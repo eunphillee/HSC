@@ -1,0 +1,5 @@
+# PC Test Tool — HSC MAIN board Modbus RTU test
+# Python 3.11+
+PyQt6>=6.6.0
+pymodbus>=3.6.0
+pyserial>=3.5
