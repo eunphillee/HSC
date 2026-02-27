@@ -14,13 +14,15 @@ extern "C" {
 
 /* ========== Slave IDs (Modbus 0x address) ========== */
 typedef enum {
-    SLAVE_ID_HPSB = 1,
-    SLAVE_ID_LPSB = 2,
-    SLAVE_ID_COUNT
+    SLAVE_ID_HPSB  = 1,
+    SLAVE_ID_LPSB1 = 2,
+    SLAVE_ID_LPSB2 = 3,
+    SLAVE_ID_LPSB3 = 4,
+    SLAVE_ID_COUNT = 4
 } SlaveId_t;
 
 #define SLAVE_ID_FIRST   SLAVE_ID_HPSB
-#define SLAVE_ID_LAST    SLAVE_ID_LPSB
+#define SLAVE_ID_LAST    SLAVE_ID_LPSB3
 
 /* ========== Poll types (what MAIN reads/writes) ========== */
 typedef enum {
@@ -95,6 +97,7 @@ typedef enum {
 
 /* ========== MAIN local DIO API (implemented in io_map.c) ========== */
 uint8_t IO_Main_ReadDI(MainDiChannel_t ch);
+uint8_t IO_Main_ReadDO(MainDoChannel_t ch);
 void    IO_Main_WriteDO(MainDoChannel_t ch, uint8_t value);
 void    IO_Main_ReadAllDI(uint8_t *bits);
 

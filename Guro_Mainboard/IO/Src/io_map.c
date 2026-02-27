@@ -36,6 +36,12 @@ void IO_Main_WriteDO(MainDoChannel_t ch, uint8_t value)
     HAL_GPIO_WritePin(main_do_map[ch].port, main_do_map[ch].pin, value ? GPIO_PIN_SET : GPIO_PIN_RESET);
 }
 
+uint8_t IO_Main_ReadDO(MainDoChannel_t ch)
+{
+    if (ch >= MAIN_DO_COUNT) return 0;
+    return (HAL_GPIO_ReadPin(main_do_map[ch].port, main_do_map[ch].pin) == GPIO_PIN_SET) ? 1 : 0;
+}
+
 void IO_Main_ReadAllDI(uint8_t *bits)
 {
     for (int i = 0; i < MAIN_DI_COUNT; i++)

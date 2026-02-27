@@ -1,129 +1,136 @@
 /**
  * @file h2tech_address_map.c
- * @brief H2TECH translation table: absolute logical address -> internal (source, type, addr, bit).
- *        Ranges from H2TECH PDF: 1x0821~0836, 1x0853~0860, 1x0869~0880, 1x0892~0900.
- *        LSB-first bit packing. Explicit table-driven mapping per address.
+ * @brief H2TECH table-driven mapping: g_agg_bits image and g_map entries.
+ *        Concrete mapping: 0821~0836, 0853~0860, 0869~0880, 0885~0891, 0892~0898.
+ *        0899/0900 not in table -> exception 0x02.
  */
 #include "h2tech_address_map.h"
 
-/* ---------- Translation table ---------- */
-#define H2TECH_MAP_MAX_ENTRIES  128
+static volatile uint8_t g_agg_bits[(AGG_BIT_COUNT + 7) / 8] = {0};
 
-static h2tech_map_entry_t s_map[H2TECH_MAP_MAX_ENTRIES];
-static uint16_t s_map_count = 0;
-
-static void add_entry(uint16_t addr, h2tech_area_t area, uint8_t rw,
-                     h2tech_source_t src, uint8_t slave_id,
-                     h2tech_internal_type_t itype, uint16_t iaddr, uint8_t bit_idx)
-{
-    if (s_map_count >= H2TECH_MAP_MAX_ENTRIES) return;
-    h2tech_map_entry_t *e = &s_map[s_map_count++];
-    e->h2tech_addr    = addr;
-    e->area           = area;
-    e->rw             = rw;
-    e->source         = src;
-    e->slave_id       = slave_id;
-    e->internal_type  = itype;
-    e->internal_addr  = iaddr;
-    e->bit_index      = bit_idx;
+static inline void bit_set(volatile uint8_t* buf, uint16_t idx, bool v) {
+    uint16_t byte = idx >> 3;
+    uint8_t  mask = (uint8_t)(1u << (idx & 7u));
+    if (v) buf[byte] |= mask;
+    else   buf[byte] &= (uint8_t)~mask;
 }
 
-/* ---------- Build table: 1x discrete status ranges ---------- */
-static void build_discrete_1x_0821_0836(void)
-{
-    /* SECTION 1: DIGITAL OUTPUT STATUS (READ ONLY)
-     * 1x0821 ~ 1x0836 (16 bits): logical ON/OFF1..16, read-only.
-     * Internal: MAIN discrete image, bytes 0..1, LSB-first. */
-    for (uint16_t i = 0; i < 16; i++) {
-        uint16_t addr = 821u + i;
-        uint16_t byte_idx = i / 8u;
-        uint8_t bit_idx  = (uint8_t)(i % 8u);
-        add_entry(addr, H2TECH_AREA_DISCRETE, 0,           /* READ ONLY */
-                  H2TECH_SOURCE_MAIN, 0,                  /* MAIN aggregated image */
-                  H2TECH_INTERNAL_DISCRETE, byte_idx, bit_idx);
-    }
+static inline bool bit_get(const volatile uint8_t* buf, uint16_t idx) {
+    uint16_t byte = idx >> 3;
+    uint8_t  mask = (uint8_t)(1u << (idx & 7u));
+    return (buf[byte] & mask) != 0;
 }
 
-static void build_discrete_1x_0853_0860(void)
-{
-    /* SECTION 2: DOOR OPEN SENSORS (READ ONLY)
-     * 1x0853 ~ 1x0860 (8 bits): 자동문 센서/외부 스위치 1..4.
-     * Internal: MAIN discrete image, byte 2, bits 0..7. */
-    for (uint16_t i = 0; i < 8; i++) {
-        add_entry(853u + i, H2TECH_AREA_DISCRETE, 0,
-                  H2TECH_SOURCE_MAIN, 0,
-                  H2TECH_INTERNAL_DISCRETE, 2, (uint8_t)i);
-    }
+bool H2Map_ReadAggBit(uint16_t agg_bit_index) {
+    if (agg_bit_index >= AGG_BIT_COUNT) return false;
+    return bit_get(g_agg_bits, agg_bit_index);
 }
 
-static void build_discrete_1x_0869_0880(void)
-{
-    /* SECTION 3: ALARM STATUS (READ ONLY)
-     * 1x0869 ~ 1x0880 (12 bits): Alarm1..12.
-     * Internal: MAIN discrete image, bytes 3..4.
-     * 869..876 -> byte 3 bits0..7, 877..880 -> byte 4 bits0..3. */
-    for (uint16_t i = 0; i < 12; i++) {
-        uint16_t addr = 869u + i;
-        uint16_t byte_idx = i / 8u;
-        uint8_t bit_idx  = (uint8_t)(i % 8u);
-        add_entry(addr, H2TECH_AREA_DISCRETE, 0,
-                  H2TECH_SOURCE_MAIN, 0,
-                  H2TECH_INTERNAL_DISCRETE, (uint16_t)(3u + byte_idx), bit_idx);
-    }
+void H2Map_WriteAggBit(uint16_t agg_bit_index, bool v) {
+    if (agg_bit_index >= AGG_BIT_COUNT) return;
+    bit_set(g_agg_bits, agg_bit_index, v);
 }
 
-/* ---------- Build table: virtual button / control (write) ---------- */
-static void build_control_1x_0892_0900(void)
-{
-    /* SECTION 4: VIRTUAL BUTTON / CONTROL (WRITE)
-     * 1x0892 ~ 1x0900 (9 bits): ON/OFF8..12 + 자동문 문열림 제어1..4.
-     * H2TECH 문서에서는 1x 영역으로 표기되지만, 쓰기 기능(FC05/15)을 위해
-     * 게이트웨이 내부에서는 COIL 영역으로 취급한다.
-     * Internal: MAIN coil image, bytes 0..1.
-     * 892..899 -> coil byte0 bits0..7, 900 -> coil byte1 bit0. */
-    for (uint16_t i = 0; i < 9; i++) {
-        uint16_t addr = 892u + i;
-        uint16_t byte_idx = i / 8u;
-        uint8_t bit_idx  = (uint8_t)(i % 8u);
-        add_entry(addr, H2TECH_AREA_COIL, 1,              /* WRITE-ABLE logical control */
-                  H2TECH_SOURCE_MAIN, 0,
-                  H2TECH_INTERNAL_COIL, (uint16_t)byte_idx, bit_idx);
-    }
-}
+#define H2E(area, dec, rw, src, agg_bit, act, label) \
+    { .h2_dec=(dec), .area=(area), .rw=(rw), .src=(src), .agg_bit_index=(agg_bit), .action=(act), .name=(label) }
 
-static void build_table(void)
-{
-    s_map_count = 0;
-    build_discrete_1x_0821_0836();
-    build_discrete_1x_0853_0860();
-    build_discrete_1x_0869_0880();
-    build_control_1x_0892_0900();
-    /* Add 0x/3x/4x register ranges here when defined in H2TECH PDF. */
-}
+static const H2_MapEntry_t g_map[] = {
+    /* 1x0821~0836 : ON/OFF 1~16 status (READ) */
+    H2E(H2_AREA_1X, 821, H2_RW_READ, H2_SRC_AGG_BIT, AGG_BIT_ONOFF_1,  H2_ACT_NONE, "ONOFF_1_DOOR1"),
+    H2E(H2_AREA_1X, 822, H2_RW_READ, H2_SRC_AGG_BIT, AGG_BIT_ONOFF_2,  H2_ACT_NONE, "ONOFF_2_DOOR2"),
+    H2E(H2_AREA_1X, 823, H2_RW_READ, H2_SRC_AGG_BIT, AGG_BIT_ONOFF_3,  H2_ACT_NONE, "ONOFF_3_HPSB_CH1"),
+    H2E(H2_AREA_1X, 824, H2_RW_READ, H2_SRC_AGG_BIT, AGG_BIT_ONOFF_4,  H2_ACT_NONE, "ONOFF_4_HPSB_CH2"),
+    H2E(H2_AREA_1X, 825, H2_RW_READ, H2_SRC_AGG_BIT, AGG_BIT_ONOFF_5,  H2_ACT_NONE, "ONOFF_5_HPSB_CH3"),
+    H2E(H2_AREA_1X, 826, H2_RW_READ, H2_SRC_AGG_BIT, AGG_BIT_ONOFF_6,  H2_ACT_NONE, "ONOFF_6_LPSB1_CH1"),
+    H2E(H2_AREA_1X, 827, H2_RW_READ, H2_SRC_AGG_BIT, AGG_BIT_ONOFF_7,  H2_ACT_NONE, "ONOFF_7_LPSB1_CH2"),
+    H2E(H2_AREA_1X, 828, H2_RW_READ, H2_SRC_AGG_BIT, AGG_BIT_ONOFF_8,  H2_ACT_NONE, "ONOFF_8_LPSB1_CH3"),
+    H2E(H2_AREA_1X, 829, H2_RW_READ, H2_SRC_AGG_BIT, AGG_BIT_ONOFF_9,  H2_ACT_NONE, "ONOFF_9_LPSB2_CH1"),
+    H2E(H2_AREA_1X, 830, H2_RW_READ, H2_SRC_AGG_BIT, AGG_BIT_ONOFF_10, H2_ACT_NONE, "ONOFF_10_LPSB2_CH2"),
+    H2E(H2_AREA_1X, 831, H2_RW_READ, H2_SRC_AGG_BIT, AGG_BIT_ONOFF_11, H2_ACT_NONE, "ONOFF_11_LPSB2_CH3"),
+    H2E(H2_AREA_1X, 832, H2_RW_READ, H2_SRC_AGG_BIT, AGG_BIT_ONOFF_12, H2_ACT_NONE, "ONOFF_12_LPSB3_CH1"),
+    H2E(H2_AREA_1X, 833, H2_RW_READ, H2_SRC_AGG_BIT, AGG_BIT_ONOFF_13, H2_ACT_NONE, "ONOFF_13_LPSB3_CH2"),
+    H2E(H2_AREA_1X, 834, H2_RW_READ, H2_SRC_AGG_BIT, AGG_BIT_ONOFF_14, H2_ACT_NONE, "ONOFF_14_LPSB3_CH3"),
+    H2E(H2_AREA_1X, 835, H2_RW_READ, H2_SRC_CONST0, 0,               H2_ACT_NONE, "ONOFF_15_RESERVED"),
+    H2E(H2_AREA_1X, 836, H2_RW_READ, H2_SRC_CONST0, 0,               H2_ACT_NONE, "ONOFF_16_RESERVED"),
 
-/* ---------- Public API ---------- */
-const h2tech_map_entry_t *H2TechMap_Lookup(h2tech_area_t area, uint16_t addr)
-{
-    if (s_map_count == 0) build_table();
+    /* 1x0853~0860 : Door sensors (READ) */
+    H2E(H2_AREA_1X, 853, H2_RW_READ, H2_SRC_AGG_BIT, AGG_BIT_DOOR_MAG_1, H2_ACT_NONE, "DOOR_MAG_1"),
+    H2E(H2_AREA_1X, 854, H2_RW_READ, H2_SRC_AGG_BIT, AGG_BIT_DOOR_MAG_2, H2_ACT_NONE, "DOOR_MAG_2"),
+    H2E(H2_AREA_1X, 855, H2_RW_READ, H2_SRC_CONST0,  0,                 H2_ACT_NONE, "DOOR_MAG_3_UNUSED"),
+    H2E(H2_AREA_1X, 856, H2_RW_READ, H2_SRC_CONST0,  0,                 H2_ACT_NONE, "DOOR_MAG_4_UNUSED"),
+    H2E(H2_AREA_1X, 857, H2_RW_READ, H2_SRC_AGG_BIT, AGG_BIT_DOOR_BTN_1, H2_ACT_NONE, "DOOR_BTN_1"),
+    H2E(H2_AREA_1X, 858, H2_RW_READ, H2_SRC_AGG_BIT, AGG_BIT_DOOR_BTN_2, H2_ACT_NONE, "DOOR_BTN_2"),
+    H2E(H2_AREA_1X, 859, H2_RW_READ, H2_SRC_CONST0,  0,                 H2_ACT_NONE, "DOOR_BTN_3_UNUSED"),
+    H2E(H2_AREA_1X, 860, H2_RW_READ, H2_SRC_CONST0,  0,                 H2_ACT_NONE, "DOOR_BTN_4_UNUSED"),
 
-    for (uint16_t i = 0; i < s_map_count; i++) {
-        if (s_map[i].area == area && s_map[i].h2tech_addr == addr)
-            return &s_map[i];
+    /* 1x0869~0880 : Alarm 1~12 (READ) */
+    H2E(H2_AREA_1X, 869, H2_RW_READ, H2_SRC_AGG_BIT, AGG_BIT_ALM_1,  H2_ACT_NONE, "ALM_1_HPSB_COMM"),
+    H2E(H2_AREA_1X, 870, H2_RW_READ, H2_SRC_AGG_BIT, AGG_BIT_ALM_2,  H2_ACT_NONE, "ALM_2_LPSB_ANY_COMM"),
+    H2E(H2_AREA_1X, 871, H2_RW_READ, H2_SRC_AGG_BIT, AGG_BIT_ALM_3,  H2_ACT_NONE, "ALM_3_SHTC3_FAIL"),
+    H2E(H2_AREA_1X, 872, H2_RW_READ, H2_SRC_AGG_BIT, AGG_BIT_ALM_4,  H2_ACT_NONE, "ALM_4_DOOR_SENSOR_FAULT"),
+    H2E(H2_AREA_1X, 873, H2_RW_READ, H2_SRC_AGG_BIT, AGG_BIT_ALM_5,  H2_ACT_NONE, "ALM_5_HPSB_OC1"),
+    H2E(H2_AREA_1X, 874, H2_RW_READ, H2_SRC_AGG_BIT, AGG_BIT_ALM_6,  H2_ACT_NONE, "ALM_6_HPSB_OC2"),
+    H2E(H2_AREA_1X, 875, H2_RW_READ, H2_SRC_AGG_BIT, AGG_BIT_ALM_7,  H2_ACT_NONE, "ALM_7_HPSB_OC3"),
+    H2E(H2_AREA_1X, 876, H2_RW_READ, H2_SRC_AGG_BIT, AGG_BIT_ALM_8,  H2_ACT_NONE, "ALM_8_LPSB1_OC_ANY"),
+    H2E(H2_AREA_1X, 877, H2_RW_READ, H2_SRC_AGG_BIT, AGG_BIT_ALM_9,  H2_ACT_NONE, "ALM_9_LPSB2_OC_ANY"),
+    H2E(H2_AREA_1X, 878, H2_RW_READ, H2_SRC_AGG_BIT, AGG_BIT_ALM_10, H2_ACT_NONE, "ALM_10_LPSB3_OC_ANY"),
+    H2E(H2_AREA_1X, 879, H2_RW_READ, H2_SRC_AGG_BIT, AGG_BIT_ALM_11, H2_ACT_NONE, "ALM_11_PC_LINK_FAIL"),
+    H2E(H2_AREA_1X, 880, H2_RW_READ, H2_SRC_AGG_BIT, AGG_BIT_ALM_12, H2_ACT_NONE, "ALM_12_RESERVED"),
+
+    /* 1x0885~0891 : ON/OFF 1~7 command/extra (READ) */
+    H2E(H2_AREA_1X, 885, H2_RW_READ, H2_SRC_AGG_BIT, AGG_BIT_CMD_ONOFF_1, H2_ACT_NONE, "CMD_ONOFF_1"),
+    H2E(H2_AREA_1X, 886, H2_RW_READ, H2_SRC_AGG_BIT, AGG_BIT_CMD_ONOFF_2, H2_ACT_NONE, "CMD_ONOFF_2"),
+    H2E(H2_AREA_1X, 887, H2_RW_READ, H2_SRC_AGG_BIT, AGG_BIT_CMD_ONOFF_3, H2_ACT_NONE, "CMD_ONOFF_3"),
+    H2E(H2_AREA_1X, 888, H2_RW_READ, H2_SRC_AGG_BIT, AGG_BIT_CMD_ONOFF_4, H2_ACT_NONE, "CMD_ONOFF_4"),
+    H2E(H2_AREA_1X, 889, H2_RW_READ, H2_SRC_AGG_BIT, AGG_BIT_CMD_ONOFF_5, H2_ACT_NONE, "CMD_ONOFF_5"),
+    H2E(H2_AREA_1X, 890, H2_RW_READ, H2_SRC_AGG_BIT, AGG_BIT_CMD_ONOFF_6, H2_ACT_NONE, "CMD_ONOFF_6"),
+    H2E(H2_AREA_1X, 891, H2_RW_READ, H2_SRC_AGG_BIT, AGG_BIT_CMD_ONOFF_7, H2_ACT_NONE, "CMD_ONOFF_7"),
+
+    /* 1x0892~0898 : Virtual buttons / Door open control (WRITE). 0899/0900 not in table -> 0x02 */
+    H2E(H2_AREA_1X, 892, H2_RW_WRITE, H2_SRC_ACTION_PULSE, 0, H2_ACT_PULSE_OUTPUT, "VB_ONOFF_8"),
+    H2E(H2_AREA_1X, 893, H2_RW_WRITE, H2_SRC_ACTION_PULSE, 0, H2_ACT_PULSE_OUTPUT, "VB_ONOFF_9"),
+    H2E(H2_AREA_1X, 894, H2_RW_WRITE, H2_SRC_ACTION_PULSE, 0, H2_ACT_PULSE_OUTPUT, "VB_ONOFF_10"),
+    H2E(H2_AREA_1X, 895, H2_RW_WRITE, H2_SRC_ACTION_PULSE, 0, H2_ACT_PULSE_OUTPUT, "VB_ONOFF_11"),
+    H2E(H2_AREA_1X, 896, H2_RW_WRITE, H2_SRC_ACTION_PULSE, 0, H2_ACT_PULSE_OUTPUT, "VB_ONOFF_12"),
+    H2E(H2_AREA_1X, 897, H2_RW_WRITE, H2_SRC_ACTION_PULSE, 0, H2_ACT_PULSE_MAIN_DOOR1, "DOOR_OPEN_CTRL_1"),
+    H2E(H2_AREA_1X, 898, H2_RW_WRITE, H2_SRC_ACTION_PULSE, 0, H2_ACT_PULSE_MAIN_DOOR2, "DOOR_OPEN_CTRL_2"),
+};
+
+const H2_MapEntry_t* H2Map_FindByDec(H2_Area_t area, uint16_t h2_dec) {
+    for (unsigned i = 0; i < (sizeof(g_map) / sizeof(g_map[0])); i++) {
+        if (g_map[i].area == area && g_map[i].h2_dec == h2_dec) {
+            return &g_map[i];
+        }
     }
     return NULL;
 }
 
-int H2TechMap_IsRangeDefined(h2tech_area_t area, uint16_t addr, uint16_t count)
-{
-    for (uint16_t k = 0; k < count; k++) {
-        if (H2TechMap_Lookup(area, addr + k) == NULL)
-            return 0;
-    }
-    return 1;
+__attribute__((weak)) void Gateway_Action_PulseMainDoor1(uint16_t pulse_ms) { (void)pulse_ms; }
+__attribute__((weak)) void Gateway_Action_PulseMainDoor2(uint16_t pulse_ms) { (void)pulse_ms; }
+__attribute__((weak)) void Gateway_Action_PulseOutputByOnOffIndex(uint8_t onoff_index_1based, uint16_t pulse_ms) {
+    (void)onoff_index_1based; (void)pulse_ms;
 }
 
-uint16_t H2TechMap_EntryCount(void)
-{
-    if (s_map_count == 0) build_table();
-    return s_map_count;
+bool H2Map_ApplyWrite(const H2_MapEntry_t* e, bool value, uint16_t pulse_ms) {
+    if (!e) return false;
+    if (e->rw != H2_RW_WRITE) return false;
+    if (!value) return true;
+
+    switch (e->action) {
+    case H2_ACT_PULSE_MAIN_DOOR1:
+        Gateway_Action_PulseMainDoor1(pulse_ms);
+        return true;
+    case H2_ACT_PULSE_MAIN_DOOR2:
+        Gateway_Action_PulseMainDoor2(pulse_ms);
+        return true;
+    case H2_ACT_PULSE_OUTPUT:
+        if (e->h2_dec >= 892 && e->h2_dec <= 896) {
+            uint8_t onoff_index = (uint8_t)(e->h2_dec - 884);
+            Gateway_Action_PulseOutputByOnOffIndex(onoff_index, pulse_ms);
+            return true;
+        }
+        return false;
+    default:
+        return false;
+    }
 }

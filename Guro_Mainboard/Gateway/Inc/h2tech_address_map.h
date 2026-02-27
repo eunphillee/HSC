@@ -1,80 +1,117 @@
 /**
  * @file h2tech_address_map.h
- * @brief H2TECH address translation: logical address -> internal (source, type, addr, bit).
- *        Authority: H2TECH 스마트 쉘터 매핑 PDF.
- *        Do NOT use BASE subtraction; use explicit translation table.
+ * @brief H2TECH address mapping: table-driven 1x discrete/coil for upstream Modbus Slave.
+ *        H2TECH PDF "1xNNNN" = DEC logical address NNNN; Modbus start_addr = (NNNN - 1).
  */
-#ifndef H2TECH_ADDRESS_MAP_H
-#define H2TECH_ADDRESS_MAP_H
-
+#pragma once
 #include <stdint.h>
+#include <stdbool.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/* ---------- Modbus area (0x / 1x / 3x / 4x) ---------- */
+/* H2TECH PDF uses "1xNNNN" notation. We treat NNNN as DEC logical address.
+ * Modbus RTU frame uses 0-based starting address => start_addr = (NNNN - 1).
+ * (Protocol example: 1x0197 -> 0x00C4) */
 typedef enum {
-    H2TECH_AREA_COIL          = 0,  /* 0x - FC01/05/15 */
-    H2TECH_AREA_DISCRETE      = 1,  /* 1x - FC02 */
-    H2TECH_AREA_INPUT_REG     = 2,  /* 3x - FC04 */
-    H2TECH_AREA_HOLDING       = 3   /* 4x - FC03/06/16 */
-} h2tech_area_t;
+    H2_AREA_1X = 0,
+    H2_AREA_0X,
+    H2_AREA_3X,
+    H2_AREA_4X
+} H2_Area_t;
 
-/* ---------- Data source ---------- */
 typedef enum {
-    H2TECH_SOURCE_MAIN  = 0,
-    H2TECH_SOURCE_HPSB  = 1,
-    H2TECH_SOURCE_LPSB  = 2
-} h2tech_source_t;
+    H2_RW_READ  = 0,
+    H2_RW_WRITE = 1
+} H2_Rw_t;
 
-/* ---------- Internal data type (for aggregated image index) ---------- */
 typedef enum {
-    H2TECH_INTERNAL_COIL       = 0,
-    H2TECH_INTERNAL_DISCRETE   = 1,
-    H2TECH_INTERNAL_HOLDING    = 2,
-    H2TECH_INTERNAL_INPUT_REG  = 3
-} h2tech_internal_type_t;
+    H2_SRC_AGG_BIT = 0,
+    H2_SRC_ACTION_PULSE,
+    H2_SRC_CONST0
+} H2_Source_t;
 
-/* ---------- Single translation entry ---------- */
+typedef enum {
+    H2_ACT_NONE = 0,
+    H2_ACT_PULSE_MAIN_DOOR1,
+    H2_ACT_PULSE_MAIN_DOOR2,
+    H2_ACT_TOGGLE_OUTPUT,
+    H2_ACT_PULSE_OUTPUT
+} H2_Action_t;
+
 typedef struct {
-    uint16_t h2tech_addr;           /* Absolute logical address (e.g. 821, 869) */
-    h2tech_area_t area;             /* 0x / 1x / 3x / 4x */
-    uint8_t rw;                     /* 0 = read-only, 1 = read-write */
-    h2tech_source_t source;         /* MAIN / HPSB / LPSB */
-    uint8_t slave_id;              /* 0=main, 1=HPSB, 2=LPSB */
-    h2tech_internal_type_t internal_type;
-    uint16_t internal_addr;         /* 0-based internal address (byte for coil/discrete, reg for 3x/4x) */
-    uint8_t bit_index;             /* 0..7 for bit in byte; 0xFF = whole register/byte */
-} h2tech_map_entry_t;
+    uint16_t h2_dec;
+    H2_Area_t area;
+    H2_Rw_t   rw;
+    H2_Source_t src;
+    uint16_t agg_bit_index;
+    H2_Action_t action;
+    const char* name;
+} H2_MapEntry_t;
 
-/* ---------- Modbus exception codes (H2TECH protocol) ---------- */
-#define H2TECH_EX_ILLEGAL_FUNCTION      0x01
-#define H2TECH_EX_ILLEGAL_DATA_ADDRESS  0x02
-#define H2TECH_EX_ILLEGAL_DATA_VALUE    0x03
+/* Aggregated status bit indices (unified bit-image for H2TECH 1x reads). */
+typedef enum {
+    AGG_BIT_ONOFF_1 = 0,
+    AGG_BIT_ONOFF_2,
+    AGG_BIT_ONOFF_3,
+    AGG_BIT_ONOFF_4,
+    AGG_BIT_ONOFF_5,
+    AGG_BIT_ONOFF_6,
+    AGG_BIT_ONOFF_7,
+    AGG_BIT_ONOFF_8,
+    AGG_BIT_ONOFF_9,
+    AGG_BIT_ONOFF_10,
+    AGG_BIT_ONOFF_11,
+    AGG_BIT_ONOFF_12,
+    AGG_BIT_ONOFF_13,
+    AGG_BIT_ONOFF_14,
+    AGG_BIT_ONOFF_15,
+    AGG_BIT_ONOFF_16,
 
-/* ---------- Lookup API ---------- */
-/**
- * Look up translation entry by H2TECH area and absolute address.
- * @param area   Modbus area (coil/discrete/input_reg/holding).
- * @param addr   H2TECH logical address (e.g. 821, 869).
- * @return Pointer to static entry, or NULL if not in table (-> return exception 0x02).
- */
-const h2tech_map_entry_t *H2TechMap_Lookup(h2tech_area_t area, uint16_t addr);
+    AGG_BIT_DOOR_MAG_1,
+    AGG_BIT_DOOR_MAG_2,
+    AGG_BIT_DOOR_MAG_3,
+    AGG_BIT_DOOR_MAG_4,
+    AGG_BIT_DOOR_BTN_1,
+    AGG_BIT_DOOR_BTN_2,
+    AGG_BIT_DOOR_BTN_3,
+    AGG_BIT_DOOR_BTN_4,
 
-/**
- * Check whether a contiguous range [addr, addr+count) is fully defined in the table.
- * @return 1 if all addresses present, 0 if any missing.
- */
-int H2TechMap_IsRangeDefined(h2tech_area_t area, uint16_t addr, uint16_t count);
+    AGG_BIT_ALM_1,
+    AGG_BIT_ALM_2,
+    AGG_BIT_ALM_3,
+    AGG_BIT_ALM_4,
+    AGG_BIT_ALM_5,
+    AGG_BIT_ALM_6,
+    AGG_BIT_ALM_7,
+    AGG_BIT_ALM_8,
+    AGG_BIT_ALM_9,
+    AGG_BIT_ALM_10,
+    AGG_BIT_ALM_11,
+    AGG_BIT_ALM_12,
 
-/**
- * Get total number of entries (for iteration / validation).
- */
-uint16_t H2TechMap_EntryCount(void);
+    AGG_BIT_CMD_ONOFF_1,
+    AGG_BIT_CMD_ONOFF_2,
+    AGG_BIT_CMD_ONOFF_3,
+    AGG_BIT_CMD_ONOFF_4,
+    AGG_BIT_CMD_ONOFF_5,
+    AGG_BIT_CMD_ONOFF_6,
+    AGG_BIT_CMD_ONOFF_7,
+
+    AGG_BIT_COUNT
+} AggBitIndex_t;
+
+const H2_MapEntry_t* H2Map_FindByDec(H2_Area_t area, uint16_t h2_dec);
+bool H2Map_ReadAggBit(uint16_t agg_bit_index);
+void H2Map_WriteAggBit(uint16_t agg_bit_index, bool v);
+bool H2Map_ApplyWrite(const H2_MapEntry_t* e, bool value, uint16_t pulse_ms);
+
+/* Modbus start_addr -> H2TECH dec: h2_dec = start_addr + 1 */
+static inline uint16_t H2Map_ModbusAddrToH2Dec(uint16_t start_addr) {
+    return (uint16_t)(start_addr + 1);
+}
 
 #ifdef __cplusplus
 }
 #endif
-
-#endif /* H2TECH_ADDRESS_MAP_H */

@@ -26,6 +26,7 @@
 #include "aggregated_status.h"
 #include "upstream_pc_protocol.h"
 #include "modbus_master.h"
+#include "gateway_actions.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -129,6 +130,7 @@ int main(void)
       ModbusMaster_Poll();
     if (AppScheduler_IsDue(TASK_AGGREGATE_UPDATE))
       Aggregator_Update(&aggregated_status);
+    Gateway_Action_Update();
     if (AppScheduler_IsDue(TASK_UPSTREAM_SEND_STATUS))
       UpstreamPC_SendStatus(&aggregated_status);
   }
