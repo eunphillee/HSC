@@ -14,8 +14,10 @@ extern "C" {
 
 void Gateway_Action_Update(void);
 
-/** If set, a downstream WriteCoil failed; aggregator may set comm alarm. Cleared when polled. */
+/** Returns 1 if any downstream WriteCoil failed since last clear; does not clear. Clear via ClearDownstreamWriteFailAlarm (e.g. on PC read of 1x0880). */
 uint8_t Gateway_Action_PollDownstreamWriteFail(void);
+/** Clear the downstream write-fail alarm (e.g. after PC read of 1x0880 or auto after N seconds). */
+void Gateway_Action_ClearDownstreamWriteFailAlarm(void);
 
 #ifdef __cplusplus
 }

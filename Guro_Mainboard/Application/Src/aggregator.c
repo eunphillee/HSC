@@ -8,7 +8,8 @@
 
 /* Overcurrent thresholds (configurable). Raw ADC/register value above this sets alarm. */
 #define HPSB_OC_THRESHOLD_RAW  2048u   /* 12-bit ADC: adjust for HCT17W */
-#define LPSB_OC_THRESHOLD_RAW  2048u   /* ACS712 via input reg: adjust per hardware */
+#define LPSB_OC_THRESHOLD_RAW  2048u   /* ACS712: margin above/below mid-scale; adjust per hardware */
+#define LPSB_SENSE_MIDSCALE    2048u   /* 12-bit mid-scale (0A for ACS712); alarm if |raw - mid| > threshold */
 #define HPSB_OC_CYCLES_REQUIRED 3u    /* Consecutive cycles above threshold before ALM5/6/7 */
 
 void Aggregator_Update(aggregated_status_t *out)
@@ -31,7 +32,9 @@ void Aggregator_Update(aggregated_status_t *out)
 	out->hpsb_discrete   = 0;
 	out->hpsb_status_reg = 0;
 	out->hpsb_alarm_reg  = 0;
-	out->hpsb_sense_raw  = 0;
+	out->hpsb_sense_raw[0] = ModbusTable_GetInputReg(SLAVE_ID_HPSB, 1);
+	out->hpsb_sense_raw[1] = ModbusTable_GetInputReg(SLAVE_ID_HPSB, 2);
+	out->hpsb_sense_raw[2] = ModbusTable_GetInputReg(SLAVE_ID_HPSB, 3);
 	for (int i = 0; i < MODBUS_COIL_COUNT; i++)
 		out->hpsb_coils |= (ModbusTable_GetCoil(SLAVE_ID_HPSB, (uint16_t)i) ? (1u << i) : 0);
 	for (int i = 0; i < MODBUS_DISCRETE_COUNT; i++)
@@ -62,14 +65,11 @@ void Aggregator_Update(aggregated_status_t *out)
 		out->error_flags |= AGG_ERR_COMM_LPSB;
 	if (Gateway_Action_PollDownstreamWriteFail()) out->error_flags |= AGG_ERR_DOWNSTREAM_WRITE;
 
-	/* HPSB overcurrent: ADC1/2/3 (HCT17W). If > threshold for 3 consecutive cycles, set ALM5/6/7. */
+	/* HPSB overcurrent: use ADC from HPSB Modbus InputReg 1,2,3. If > threshold for 3 consecutive cycles, set ALM5/6/7. */
 	static uint8_t hpsb_oc_count[3];
-	uint16_t hpsb_raw[3];
-	hpsb_raw[0] = IO_ReadHpsbCurrentRaw(0);
-	hpsb_raw[1] = IO_ReadHpsbCurrentRaw(1);
-	hpsb_raw[2] = IO_ReadHpsbCurrentRaw(2);
 	for (int i = 0; i < 3; i++) {
-		if (hpsb_raw[i] > HPSB_OC_THRESHOLD_RAW) {
+		uint16_t raw = out->hpsb_sense_raw[i];
+		if (raw > HPSB_OC_THRESHOLD_RAW) {
 			if (hpsb_oc_count[i] < 255u) hpsb_oc_count[i]++;
 		} else {
 			hpsb_oc_count[i] = 0;
@@ -113,11 +113,11 @@ void Aggregator_Update(aggregated_status_t *out)
 	H2Map_WriteAggBit(AGG_BIT_ALM_5, (out->hpsb_alarm_reg & (1u << 0)) ? true : false);
 	H2Map_WriteAggBit(AGG_BIT_ALM_6, (out->hpsb_alarm_reg & (1u << 1)) ? true : false);
 	H2Map_WriteAggBit(AGG_BIT_ALM_7, (out->hpsb_alarm_reg & (1u << 2)) ? true : false);
-	H2Map_WriteAggBit(AGG_BIT_ALM_8, (out->lpsb1_sense_raw > LPSB_OC_THRESHOLD_RAW) ? true : false);
-	H2Map_WriteAggBit(AGG_BIT_ALM_9, (out->lpsb2_sense_raw > LPSB_OC_THRESHOLD_RAW) ? true : false);
-	H2Map_WriteAggBit(AGG_BIT_ALM_10, (out->lpsb3_sense_raw > LPSB_OC_THRESHOLD_RAW) ? true : false);
+	H2Map_WriteAggBit(AGG_BIT_ALM_8, (out->lpsb1_sense_raw > LPSB_SENSE_MIDSCALE + LPSB_OC_THRESHOLD_RAW || (out->lpsb1_sense_raw < LPSB_SENSE_MIDSCALE && (LPSB_SENSE_MIDSCALE - out->lpsb1_sense_raw) > LPSB_OC_THRESHOLD_RAW)) ? true : false);
+	H2Map_WriteAggBit(AGG_BIT_ALM_9, (out->lpsb2_sense_raw > LPSB_SENSE_MIDSCALE + LPSB_OC_THRESHOLD_RAW || (out->lpsb2_sense_raw < LPSB_SENSE_MIDSCALE && (LPSB_SENSE_MIDSCALE - out->lpsb2_sense_raw) > LPSB_OC_THRESHOLD_RAW)) ? true : false);
+	H2Map_WriteAggBit(AGG_BIT_ALM_10, (out->lpsb3_sense_raw > LPSB_SENSE_MIDSCALE + LPSB_OC_THRESHOLD_RAW || (out->lpsb3_sense_raw < LPSB_SENSE_MIDSCALE && (LPSB_SENSE_MIDSCALE - out->lpsb3_sense_raw) > LPSB_OC_THRESHOLD_RAW)) ? true : false);
 	H2Map_WriteAggBit(AGG_BIT_ALM_11, (out->error_flags & AGG_ERR_UPSTREAM_RX) ? true : false);
-	H2Map_WriteAggBit(AGG_BIT_ALM_12, false);
+	H2Map_WriteAggBit(AGG_BIT_ALM_12, (out->error_flags & AGG_ERR_DOWNSTREAM_WRITE) ? true : false);
 
 	/* CMD ON/OFF 1~7: mirror of output state for consistency (optional) */
 	H2Map_WriteAggBit(AGG_BIT_CMD_ONOFF_1, (out->main_do & (1u << 0)) ? true : false);

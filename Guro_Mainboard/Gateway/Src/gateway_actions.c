@@ -16,7 +16,7 @@ static uint8_t door1_active;
 static uint32_t door1_tick;
 static uint8_t door2_active;
 static uint32_t door2_tick;
-/* Set when downstream WriteCoil fails; aggregator can raise comm alarm. Cleared when polled. */
+/* Set when downstream WriteCoil fails; sticky until cleared. Cleared by ClearDownstreamWriteFailAlarm (e.g. on PC read of 1x0880 or auto after N s). */
 static volatile uint8_t s_downstream_write_fail;
 
 void Gateway_Action_PulseMainDoor1(uint16_t pulse_ms)
@@ -77,7 +77,10 @@ void Gateway_Action_Update(void)
 
 uint8_t Gateway_Action_PollDownstreamWriteFail(void)
 {
-    uint8_t v = s_downstream_write_fail;
+    return (uint8_t)s_downstream_write_fail;
+}
+
+void Gateway_Action_ClearDownstreamWriteFailAlarm(void)
+{
     s_downstream_write_fail = 0;
-    return v;
 }

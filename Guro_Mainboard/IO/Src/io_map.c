@@ -1,8 +1,10 @@
 /**
  * @file io_map.c
  * @brief MAIN board: local DIO read/write (GPIO) using enum mapping.
+ *        HPSB current: read from aggregated Modbus image (HPSB InputReg 1,2,3).
  */
 #include "io_map.h"
+#include "modbus_table.h"
 #include "main.h"
 
 /* Map DI enum to GPIO pin/port */
@@ -50,7 +52,6 @@ void IO_Main_ReadAllDI(uint8_t *bits)
 
 uint16_t IO_ReadHpsbCurrentRaw(uint8_t ch_0_to_2)
 {
-    (void)ch_0_to_2;
-    /* Stub: wire ADC1/2/3 (HCT17W) and return raw count here */
-    return 0;
+    if (ch_0_to_2 > 2) return 0;
+    return ModbusTable_GetInputReg(SLAVE_ID_HPSB, (uint16_t)(1 + ch_0_to_2));
 }

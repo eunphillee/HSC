@@ -6,6 +6,7 @@
  */
 #include "upstream_slave_h2tech.h"
 #include "h2tech_address_map.h"
+#include "gateway_actions.h"
 
 #define EX_ILLEGAL_FUNCTION  0x01
 #define EX_ILLEGAL_DATA_ADDR 0x02
@@ -40,6 +41,9 @@ static int handle_fc02(uint16_t start_addr, uint16_t count, uint8_t *response, u
         if (bit)
             response[2u + (i / 8u)] |= (uint8_t)(1u << (i % 8u));
     }
+    /* Clear downstream write-fail alarm when PC reads 1x0880 (ALM12). */
+    if (start_addr <= 880u && (start_addr + count) > 880u)
+        Gateway_Action_ClearDownstreamWriteFailAlarm();
     return (int)(2 + byte_count);
 }
 

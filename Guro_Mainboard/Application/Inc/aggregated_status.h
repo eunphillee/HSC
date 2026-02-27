@@ -30,7 +30,7 @@ typedef struct {
 	uint8_t   hpsb_discrete;
 	uint16_t  hpsb_status_reg;
 	uint16_t  hpsb_alarm_reg;
-	uint16_t  hpsb_sense_raw;
+	uint16_t  hpsb_sense_raw[3];
 	uint8_t   lpsb1_coils[3];
 	uint8_t   lpsb2_coils[3];
 	uint8_t   lpsb3_coils[3];
