@@ -14,6 +14,9 @@ extern "C" {
 
 void Gateway_Action_Update(void);
 
+/** If set, a downstream WriteCoil failed; aggregator may set comm alarm. Cleared when polled. */
+uint8_t Gateway_Action_PollDownstreamWriteFail(void);
+
 #ifdef __cplusplus
 }
 #endif

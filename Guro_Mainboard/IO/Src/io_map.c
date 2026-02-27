@@ -47,3 +47,10 @@ void IO_Main_ReadAllDI(uint8_t *bits)
     for (int i = 0; i < MAIN_DI_COUNT; i++)
         bits[i] = IO_Main_ReadDI((MainDiChannel_t)i);
 }
+
+uint16_t IO_ReadHpsbCurrentRaw(uint8_t ch_0_to_2)
+{
+    (void)ch_0_to_2;
+    /* Stub: wire ADC1/2/3 (HCT17W) and return raw count here */
+    return 0;
+}

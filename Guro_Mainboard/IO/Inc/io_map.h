@@ -101,6 +101,9 @@ uint8_t IO_Main_ReadDO(MainDoChannel_t ch);
 void    IO_Main_WriteDO(MainDoChannel_t ch, uint8_t value);
 void    IO_Main_ReadAllDI(uint8_t *bits);
 
+/** HPSB current sensing (HCT17W): ADC ch 0,1,2. Returns raw ADC count; stub returns 0 until ADC wired. */
+uint16_t IO_ReadHpsbCurrentRaw(uint8_t ch_0_to_2);
+
 #ifdef __cplusplus
 }
 #endif

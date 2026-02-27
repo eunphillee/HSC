@@ -16,6 +16,8 @@ static uint8_t door1_active;
 static uint32_t door1_tick;
 static uint8_t door2_active;
 static uint32_t door2_tick;
+/* Set when downstream WriteCoil fails; aggregator can raise comm alarm. Cleared when polled. */
+static volatile uint8_t s_downstream_write_fail;
 
 void Gateway_Action_PulseMainDoor1(uint16_t pulse_ms)
 {
@@ -38,7 +40,7 @@ void Gateway_Action_PulseMainDoor2(uint16_t pulse_ms)
 void Gateway_Action_PulseOutputByOnOffIndex(uint8_t onoff_index_1based, uint16_t pulse_ms)
 {
     (void)pulse_ms;
-    /* Explicit mapping: ON/OFF 8 -> Slave 2 coil 2; 9 -> Slave 3 coil 0; 10 -> Slave 3 coil 1; 11 -> Slave 3 coil 2; 12 -> Slave 4 coil 0 */
+    /* Explicit mapping: ON/OFF 8 -> Slave 2 coil 2; 9 -> Slave 3 coil 0; ... 12 -> Slave 4 coil 0 */
     SlaveId_t slave_id;
     uint16_t coil_index;
     switch (onoff_index_1based) {
@@ -51,8 +53,12 @@ void Gateway_Action_PulseOutputByOnOffIndex(uint8_t onoff_index_1based, uint16_t
     }
     uint8_t cur = ModbusTable_GetCoil(slave_id, coil_index);
     uint8_t next = cur ? 0 : 1;
-    ModbusTable_SetCoil(slave_id, coil_index, next);
-    ModbusMaster_WriteCoil(slave_id, coil_index, next);
+    /* Write downstream first; update local image only on success */
+    int ret = ModbusMaster_WriteCoil(slave_id, coil_index, next);
+    if (ret == 0)
+        ModbusTable_SetCoil(slave_id, coil_index, next);
+    else
+        s_downstream_write_fail = 1;
 }
 
 void Gateway_Action_Update(void)
@@ -67,4 +73,11 @@ void Gateway_Action_Update(void)
         IO_Main_WriteDO(MAIN_DO_RELAY2, 0);
         door2_active = 0;
     }
+}
+
+uint8_t Gateway_Action_PollDownstreamWriteFail(void)
+{
+    uint8_t v = s_downstream_write_fail;
+    s_downstream_write_fail = 0;
+    return v;
 }
