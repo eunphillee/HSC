@@ -14,6 +14,7 @@ from .h2tech_map import (
     DOOR_OPEN_1_COIL, DOOR_OPEN_2_COIL,
     VB_ONOFF_8_COIL, VB_ONOFF_12_COIL,
     INVALID_COIL_899, INVALID_COIL_900,
+    MAIN_IO_ENABLED, MAIN_DI_REG, MAIN_DO_REG, MAIN_DI_COUNT, MAIN_DO_COUNT,
 )
 
 
@@ -115,6 +116,55 @@ class ModbusClient:
                 return False, None, str(e)
             except Exception as e:
                 return False, None, str(e)
+
+    def read_main_io(self) -> tuple[bool, list[int] | None, list[int] | None, str | None]:
+        """FC03 MAIN_DI_REG count=2 -> [DI bitmap 8 bits, DO bitmap 4 bits]. Returns (ok, di_bits, do_bits, err)."""
+        if not MAIN_IO_ENABLED:
+            return False, None, None, "MAIN IO not enabled"
+        with self._lock:
+            if not self._client or not self._client.connected:
+                return False, None, None, "Not connected"
+            try:
+                rr = self._client.read_holding_registers(
+                    address=MAIN_DI_REG,
+                    count=2,
+                    slave=self._slave_id,
+                )
+                if rr.isError():
+                    return False, None, None, f"Exception 0x{rr.exception_code:02X}"
+                regs = list(rr.registers) if rr.registers else [0, 0]
+                di = [(regs[0] >> i) & 1 for i in range(8)]
+                do = [(regs[1] >> i) & 1 for i in range(4)]
+                return True, di, do, None
+            except ModbusException as e:
+                return False, None, None, str(e)
+            except Exception as e:
+                return False, None, None, str(e)
+
+    def write_main_do_bitmap(self, do_bits: list[int]) -> tuple[bool, str | None]:
+        """FC06 write single register MAIN_DO_REG with 4-bit DO bitmap (do_bits[0..3])."""
+        if not MAIN_IO_ENABLED:
+            return False, "MAIN IO not enabled"
+        val = 0
+        for i in range(min(4, len(do_bits))):
+            if do_bits[i]:
+                val |= 1 << i
+        with self._lock:
+            if not self._client or not self._client.connected:
+                return False, "Not connected"
+            try:
+                rr = self._client.write_register(
+                    address=MAIN_DO_REG,
+                    value=val,
+                    slave=self._slave_id,
+                )
+                if rr.isError():
+                    return False, f"Exception 0x{rr.exception_code:02X}"
+                return True, None
+            except ModbusException as e:
+                return False, str(e)
+            except Exception as e:
+                return False, str(e)
 
     def write_coil(self, address: int, value: bool) -> tuple[bool, str | None]:
         """FC05 Write Single Coil. Returns (ok, exception_message)."""

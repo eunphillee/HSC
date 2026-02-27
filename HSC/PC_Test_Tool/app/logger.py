@@ -1,5 +1,6 @@
 """
-Log window: timestamp, function, addr, count/value, result, exception. Save to CSV.
+Log: timestamp, function, addr, count/value, result, exception. Save to CSV.
+Exception decode: 0x01 Illegal Function, 0x02 Illegal Data Address, 0x03 Illegal Data Value.
 """
 import csv
 import io
@@ -8,6 +9,22 @@ from pathlib import Path
 
 from PyQt6.QtWidgets import QPlainTextEdit, QPushButton, QVBoxLayout, QWidget, QFileDialog
 from PyQt6.QtCore import QObject, pyqtSignal
+
+EXCEPTION_DECODE = {
+    "0x01": "Illegal Function",
+    "0x02": "Illegal Data Address",
+    "0x03": "Illegal Data Value",
+}
+
+
+def decode_exception(exception: str) -> str:
+    """Append human-readable decode for Modbus exception codes."""
+    if not exception:
+        return ""
+    for code, text in EXCEPTION_DECODE.items():
+        if code in exception:
+            return f" | exc={exception} — {text}"
+    return f" | exc={exception}"
 
 
 class LogHandler(QObject):
@@ -33,7 +50,7 @@ class LogHandler(QObject):
         self._lines.append(row)
         line = f"{ts} | {func} | addr={addr_s} count/value={cov_s} | {result}"
         if exception:
-            line += f" | exc={exception}"
+            line += decode_exception(exception)
         self.log_line.emit(line)
 
     def get_csv_content(self) -> str:

@@ -37,3 +37,11 @@ VB_ONOFF_12_COIL = 895
 # 1x0899, 1x0900 not in table -> exception 0x02
 INVALID_COIL_899 = 898   # 1x0899 -> 898
 INVALID_COIL_900 = 899   # 1x0900 -> 899
+
+# MAIN Board I/O (Option 1: enable when firmware exposes FC03/FC06)
+# FC03 start=2100 count=2: 4x2100=DI bitmap(bit0..7), 4x2101=DO bitmap(bit0..3); FC06 reg 2101 to write DO
+MAIN_IO_ENABLED = False
+MAIN_DI_REG = 2100
+MAIN_DO_REG = 2101
+MAIN_DI_COUNT = 1
+MAIN_DO_COUNT = 1

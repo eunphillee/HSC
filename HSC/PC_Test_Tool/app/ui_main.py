@@ -1,17 +1,18 @@
 """
-Main window: industrial diagnostic UI with dark theme.
-Layout: top bar, 2-column status/current, bottom controls + log.
-All Modbus reads run in worker thread; no protocol or logic changes.
+Main window: field test utility — MAIN I/O, HPSB, LPSB, Door, Alarms, Currents.
+Layout: top bar, left (MAIN I/O, ON/OFF, Door, Alarms), right (HPSB, LPSB tabs, Currents), bottom (Control Actions, Log).
+Serial/worker/H2TECH addressing unchanged for existing reads/writes.
 """
 from datetime import datetime
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QComboBox, QPushButton, QLabel, QSpinBox, QCheckBox, QTableWidget,
     QTableWidgetItem, QFrame, QMessageBox, QLineEdit, QPlainTextEdit,
-    QFileDialog, QScrollArea, QSizePolicy,
+    QFileDialog, QScrollArea, QSizePolicy, QTabWidget, QGroupBox, QApplication,
 )
 from PyQt6.QtCore import QTimer, pyqtSignal, Qt
 from PyQt6.QtGui import QFont
+from itertools import chain
 
 from .modbus_client import ModbusClient
 from .worker import PollWorker, create_worker_and_thread
@@ -23,6 +24,7 @@ from .h2tech_map import (
     DOOR_OPEN_1_COIL, DOOR_OPEN_2_COIL,
     VB_ONOFF_8_COIL, VB_ONOFF_12_COIL,
     INVALID_COIL_899, INVALID_COIL_900,
+    MAIN_IO_ENABLED,
 )
 
 # ---- Industrial dark theme QSS ----
@@ -243,9 +245,43 @@ class MainWindow(QMainWindow):
         content_lay = QHBoxLayout(content)
         content_lay.setSpacing(12)
 
-        # LEFT column: Status Monitor (3 cards)
+        # LEFT column: MAIN I/O, Status Monitor (3 cards)
         left_col = QVBoxLayout()
         left_col.setSpacing(12)
+
+        # Card: MAIN Board I/O (Option 2: placeholders; enable read/write when MAIN_IO_ENABLED)
+        card_main_io, lay_main_io = card_frame("MAIN Board I/O")
+        main_di_labels = [
+            "DI1: PC_RESET_BTN", "DI2: PC_ON_BTN", "DI3: PC_RESET_EN", "DI4: PC_ON_EN",
+            "DI5: RESERVED", "DI6: RESERVED", "DI7: RESERVED", "DI8: RESERVED",
+        ]
+        main_do_labels = ["DO1: PC_RESET_EN", "DO2: PC_ON_EN", "DO3: PC_LED", "DO4: RESERVED"]
+        grid_di = QGridLayout()
+        self._main_di_leds = []
+        for i in range(8):
+            led = LedIndicator(alarm_mode=False)
+            lbl = QLabel(main_di_labels[i])
+            lbl.setStyleSheet("color: #e0e0e0;")
+            grid_di.addWidget(led, i // 4, (i % 4) * 2)
+            grid_di.addWidget(lbl, i // 4, (i % 4) * 2 + 1)
+            self._main_di_leds.append(led)
+        lay_main_io.addLayout(grid_di)
+        lay_main_io.addWidget(QLabel("DO (outputs):"))
+        grid_do = QGridLayout()
+        self._main_do_leds = []
+        self._main_do_buttons = []
+        for i in range(4):
+            led = LedIndicator(alarm_mode=False)
+            btn = QPushButton("ON/OFF")
+            btn.setEnabled(MAIN_IO_ENABLED)
+            btn.setToolTip("Write mapping not assigned yet" if not MAIN_IO_ENABLED else "")
+            self._main_do_leds.append(led)
+            self._main_do_buttons.append(btn)
+            grid_do.addWidget(led, i // 2, (i % 2) * 3)
+            grid_do.addWidget(QLabel(main_do_labels[i]), i // 2, (i % 2) * 3 + 1)
+            grid_do.addWidget(btn, i // 2, (i % 2) * 3 + 2)
+        lay_main_io.addLayout(grid_do)
+        left_col.addWidget(card_main_io)
 
         # Card A: ON/OFF 1~16
         card_a, lay_a = card_frame("ON/OFF 1~16")
@@ -309,7 +345,81 @@ class MainWindow(QMainWindow):
         left_w.setLayout(left_col)
         content_lay.addWidget(left_w, stretch=1)
 
-        # RIGHT column: Current Monitor
+        # RIGHT column: HPSB, LPSB tabs, Current Monitor
+        right_col = QVBoxLayout()
+        right_col.setSpacing(12)
+
+        # HPSB (Slave 1) — Ports
+        card_hpsb, lay_hpsb = card_frame("HPSB (Slave 1) — Ports")
+        hpsb_port_labels = ["Port1: 냉온풍기", "Port2: 온열벤치", "Port3: spare"]
+        self._hpsb_leds = []
+        self._hpsb_toggles = []
+        self._hpsb_current_labels = []
+        for i in range(3):
+            row = QHBoxLayout()
+            led = LedIndicator(alarm_mode=False)
+            lbl = QLabel(hpsb_port_labels[i])
+            lbl.setStyleSheet("color: #e0e0e0;")
+            btn = QPushButton("ON/OFF")
+            btn.setEnabled(False)
+            btn.setToolTip("Write mapping not assigned yet")
+            cur_lbl = QLabel("Raw: —  Min/Max: —")
+            cur_lbl.setStyleSheet("color: #888888; font-size: 11px;")
+            row.addWidget(led)
+            row.addWidget(lbl)
+            row.addWidget(btn)
+            row.addWidget(cur_lbl)
+            lay_hpsb.addLayout(row)
+            self._hpsb_leds.append(led)
+            self._hpsb_toggles.append(btn)
+            self._hpsb_current_labels.append(cur_lbl)
+        right_col.addWidget(card_hpsb)
+
+        # LPSB Units (3) — Ports (tabs)
+        card_lpsb, lay_lpsb = card_frame("LPSB Units (3) — Ports")
+        self._lpsb_tabs = QTabWidget()
+        lpsb1_labels = ["P1 내부조명1", "P2 내부조명2", "P3 충전기"]
+        lpsb2_labels = ["P1 외부조명1", "P2 외부조명2", "P3 spare"]
+        lpsb3_labels = ["P1 spare", "P2 spare", "P3 spare"]
+        self._lpsb_leds = []   # [LPSB1_leds, LPSB2_leds, LPSB3_leds]
+        self._lpsb_buttons = []
+        self._lpsb_current_labels = []
+        for board_idx, labels in enumerate([lpsb1_labels, lpsb2_labels, lpsb3_labels]):
+            page = QWidget()
+            page_lay = QVBoxLayout(page)
+            leds = []
+            btns = []
+            cur_lbls = []
+            for i in range(3):
+                row = QHBoxLayout()
+                led = LedIndicator(alarm_mode=False)
+                lbl = QLabel(labels[i])
+                lbl.setStyleSheet("color: #e0e0e0;")
+                b = QPushButton("ON/OFF")
+                b.setToolTip("FC05 coil (VB 8~12)" if (board_idx < 2 and i < (3 if board_idx == 0 else 2)) else "Not mapped")
+                vb_idx = (8 + board_idx * 3 + i) if (board_idx == 0 and i < 3) or (board_idx == 1 and i < 2) else None
+                if vb_idx is not None:
+                    b.clicked.connect(lambda checked=False, x=vb_idx: self._write_vb(x))
+                else:
+                    b.setEnabled(False)
+                cur_lbl = QLabel("Raw: —  Min/Max: —")
+                cur_lbl.setStyleSheet("color: #888888; font-size: 11px;")
+                row.addWidget(led)
+                row.addWidget(lbl)
+                row.addWidget(b)
+                row.addWidget(cur_lbl)
+                page_lay.addLayout(row)
+                leds.append(led)
+                btns.append(b)
+                cur_lbls.append(cur_lbl)
+            self._lpsb_leds.append(leds)
+            self._lpsb_buttons.append(btns)
+            self._lpsb_current_labels.append(cur_lbls)
+            self._lpsb_tabs.addTab(page, f"LPSB{board_idx + 1}")
+        lay_lpsb.addWidget(self._lpsb_tabs)
+        right_col.addWidget(card_lpsb)
+
+        # Current Monitor
         card_cur, lay_cur = card_frame("Current Monitor")
         self._current_table = QTableWidget(14, 3)
         self._current_table.setHorizontalHeaderLabels(["Name", "Raw Value", "Min / Max"])
@@ -327,7 +437,11 @@ class MainWindow(QMainWindow):
         btn_cur.clicked.connect(self._read_currents_once)
         lay_cur.addWidget(btn_cur)
         self._read_buttons.append(btn_cur)
-        content_lay.addWidget(card_cur, stretch=1)
+        right_col.addWidget(card_cur)
+
+        right_w = QWidget()
+        right_w.setLayout(right_col)
+        content_lay.addWidget(right_w, stretch=1)
 
         main_layout.addWidget(content)
 
@@ -337,39 +451,61 @@ class MainWindow(QMainWindow):
         bottom_lay = QHBoxLayout(bottom)
         bottom_lay.setSpacing(12)
 
-        # Left: Controls card
-        card_ctrl, lay_ctrl = card_frame("Controls")
+        # Left: Control Actions (Commands)
+        card_ctrl, lay_ctrl = card_frame("Control Actions (Commands)")
+        lay_ctrl.addWidget(QLabel("Door actions:"))
         row1 = QHBoxLayout()
         self._btn_door1 = QPushButton("Open Door 1")
         self._btn_door1.setObjectName("primary")
+        self._btn_door1.setToolTip("FC05 coil 896 (1x0897)")
         self._btn_door1.clicked.connect(self._write_door1)
         self._btn_door2 = QPushButton("Open Door 2")
         self._btn_door2.setObjectName("primary")
+        self._btn_door2.setToolTip("FC05 coil 897 (1x0898)")
         self._btn_door2.clicked.connect(self._write_door2)
         row1.addWidget(self._btn_door1)
         row1.addWidget(self._btn_door2)
-        row1.addSpacing(20)
-        row1.addWidget(QLabel("Virtual Buttons ON/OFF 8~12:"))
-        self._vb_buttons = []
-        for i in range(8, 13):
-            b = QPushButton(f"{i}")
-            b.clicked.connect(lambda checked=False, x=i: self._write_vb(x))
-            row1.addWidget(b)
-            self._vb_buttons.append(b)
         lay_ctrl.addLayout(row1)
+        lay_ctrl.addWidget(QLabel("LPSB port toggles (FC05 VB 8~12):"))
+        row_vb = QHBoxLayout()
+        vb_labels = ["VB8 → LPSB1 P1", "VB9 → LPSB1 P2", "VB10 → LPSB1 P3", "VB11 → LPSB2 P1", "VB12 → LPSB2 P2"]
+        self._vb_buttons = []
+        for i, label in enumerate(vb_labels):
+            b = QPushButton(label)
+            b.setToolTip(f"FC05 coil {891 + i} (1x0{892 + i})")
+            b.clicked.connect(lambda checked=False, x=8 + i: self._write_vb(x))
+            row_vb.addWidget(b)
+            self._vb_buttons.append(b)
+        lay_ctrl.addLayout(row_vb)
+        lay_ctrl.addWidget(QLabel("HPSB port toggles: Not mapped yet."))
+        lay_ctrl.addWidget(QLabel("Exception test (expect 0x02):"))
         row2 = QHBoxLayout()
-        row2.addWidget(QLabel("Exception test (expect 0x02):"))
         b899 = QPushButton("0899")
         b899.setObjectName("danger")
+        b899.setToolTip("FC05 invalid coil 898 — expect Illegal Data Address")
         b899.clicked.connect(self._write_invalid_899)
         b900 = QPushButton("0900")
         b900.setObjectName("danger")
+        b900.setToolTip("FC05 invalid coil 899 — expect Illegal Data Address")
         b900.clicked.connect(self._write_invalid_900)
         row2.addWidget(b899)
         row2.addWidget(b900)
         row2.addStretch()
         lay_ctrl.addLayout(row2)
-        self._control_buttons = [self._btn_door1, self._btn_door2] + self._vb_buttons + [b899, b900]
+        help_text = (
+            "Open Door 1/2: FC05 write single coil (896, 897). "
+            "VB 8~12: FC05 coils 891~895 toggle output. "
+            "0899/0900: invalid addresses to verify exception 0x02 (Illegal Data Address)."
+        )
+        lay_ctrl.addWidget(QLabel(help_text))
+        help_lbl = lay_ctrl.itemAt(lay_ctrl.count() - 1).widget()
+        help_lbl.setStyleSheet("color: #888888; font-size: 11px;")
+        help_lbl.setWordWrap(True)
+        self._control_buttons = (
+            [self._btn_door1, self._btn_door2] + self._vb_buttons +
+            self._hpsb_toggles + self._main_do_buttons +
+            list(chain.from_iterable(self._lpsb_buttons)) + [b899, b900]
+        )
         bottom_lay.addWidget(card_ctrl, stretch=1)
 
         # Right: Log card
@@ -386,9 +522,12 @@ class MainWindow(QMainWindow):
         log_btns = QHBoxLayout()
         btn_clear = QPushButton("Clear")
         btn_clear.clicked.connect(self._log_clear)
+        btn_copy = QPushButton("Copy selected")
+        btn_copy.clicked.connect(self._log_copy_selected)
         btn_save = QPushButton("Save CSV")
         btn_save.clicked.connect(self._log_save_csv)
         log_btns.addWidget(btn_clear)
+        log_btns.addWidget(btn_copy)
         log_btns.addWidget(btn_save)
         log_btns.addStretch()
         lay_log.addLayout(log_btns)
@@ -411,11 +550,10 @@ class MainWindow(QMainWindow):
         print("[PC Test Tool] --- Layout verification ---")
         print(f"  Main window size: {w} x {h}")
         print("  Layout tree:")
-        print("    - Top bar (Port, Refresh, Baud 9600, Slave ID, Connect/Disconnect, status badge, Auto poll, Interval, Last poll)")
-        print("    - Left column: 3 cards — Card1 ON/OFF 4x4, Card2 Door 2x2, Card3 Alarms 3x4")
-        print("    - Right column: 1 card — Current Monitor table (Name | Raw Value | Min/Max)")
-        print("    - Bottom: 2 cards — Controls (Open Door 1/2, VB 8~12, 0899/0900), Log (filter, Clear, Save CSV)")
-        print("  Visible on 1440x900 (no scroll): Top bar, ON/OFF grid, Door grid, Alarm grid, Current table, Controls, Log")
+        print("    - Top bar (Port, Refresh, Baud 9600, Slave ID, Connect/Disconnect, status, Auto poll, Last poll)")
+        print("    - Left: MAIN Board I/O, ON/OFF 1~16, Door Sensors, Alarms 1~12")
+        print("    - Right: HPSB (Slave 1) Ports, LPSB Units (3) tabs, Current Monitor")
+        print("    - Bottom: Control Actions (Commands), Log (filter, Copy selected, Clear, Save CSV)")
         print("[PC Test Tool] ------------------------------")
 
     def _on_log_line(self, line: str):
@@ -444,6 +582,11 @@ class MainWindow(QMainWindow):
         if not content:
             return
         Path(path).write_text(content, encoding="utf-8")
+
+    def _log_copy_selected(self):
+        text = self._log_edit.textCursor().selectedText()
+        if text:
+            QApplication.clipboard().setText(text)
 
     def _set_connected_ui(self, connected: bool):
         self._btn_connect.setEnabled(not connected)
@@ -548,9 +691,23 @@ class MainWindow(QMainWindow):
                 self._onoff_leds[i].set_state(bool(data[i]))
             for i in range(len(data), 16):
                 self._onoff_leds[i].set_state(False)
+            # HPSB (indices 2,3,4) and LPSB (5..13)
+            for j in range(3):
+                if len(data) > 2 + j:
+                    self._hpsb_leds[j].set_state(bool(data[2 + j]))
+            for board in range(3):
+                for port in range(3):
+                    idx = 5 + board * 3 + port
+                    if len(data) > idx:
+                        self._lpsb_leds[board][port].set_state(bool(data[idx]))
         else:
             for led in self._onoff_leds:
                 led.set_state(False)
+            for led in self._hpsb_leds:
+                led.set_state(False)
+            for leds in self._lpsb_leds:
+                for led in leds:
+                    led.set_state(False)
 
     def _apply_door(self, ok: bool, data: list | None, err: str | None):
         if ok and data is not None:
@@ -589,10 +746,33 @@ class MainWindow(QMainWindow):
             for r in range(len(data), 14):
                 self._current_table.item(r, 1).setText("—")
                 self._current_table.item(r, 2).setText("—")
+            # HPSB current labels (indices 0,1,2)
+            for j in range(3):
+                if len(data) > j and isinstance(data[j], int):
+                    mn = self._current_min[j] if self._current_min[j] is not None else "—"
+                    mx = self._current_max[j] if self._current_max[j] is not None else "—"
+                    self._hpsb_current_labels[j].setText(f"Raw: {data[j]}  Min/Max: {mn} / {mx}")
+                else:
+                    self._hpsb_current_labels[j].setText("Raw: —  Min/Max: —")
+            # LPSB current labels (indices 3..11)
+            for board in range(3):
+                for port in range(3):
+                    r = 3 + board * 3 + port
+                    if len(data) > r and isinstance(data[r], int):
+                        mn = self._current_min[r] if self._current_min[r] is not None else "—"
+                        mx = self._current_max[r] if self._current_max[r] is not None else "—"
+                        self._lpsb_current_labels[board][port].setText(f"Raw: {data[r]}  Min/Max: {mn} / {mx}")
+                    else:
+                        self._lpsb_current_labels[board][port].setText("Raw: —  Min/Max: —")
         else:
             for r in range(14):
                 self._current_table.item(r, 1).setText(err or "—")
                 self._current_table.item(r, 2).setText("—")
+            for lbl in self._hpsb_current_labels:
+                lbl.setText("Raw: —  Min/Max: —")
+            for board_lbls in self._lpsb_current_labels:
+                for lbl in board_lbls:
+                    lbl.setText("Raw: —  Min/Max: —")
 
     def _on_onoff(self, ok: bool, data, err):
         self._apply_onoff(ok, data, err)
