@@ -1,19 +1,21 @@
 """
-Main window: connection panel, live read panels (FC02 x4 + FC03), control, log.
-All Modbus reads run in worker thread; timer in main thread triggers poll.
+Main window: industrial diagnostic UI with dark theme.
+Layout: top bar, 2-column status/current, bottom controls + log.
+All Modbus reads run in worker thread; no protocol or logic changes.
 """
-import sys
+from datetime import datetime
 from PyQt6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QGridLayout,
+    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QComboBox, QPushButton, QLabel, QSpinBox, QCheckBox, QTableWidget,
-    QTableWidgetItem, QScrollArea, QFrame, QMessageBox,
+    QTableWidgetItem, QFrame, QMessageBox, QLineEdit, QPlainTextEdit,
+    QFileDialog, QScrollArea, QSizePolicy,
 )
 from PyQt6.QtCore import QTimer, pyqtSignal, Qt
 from PyQt6.QtGui import QFont
 
 from .modbus_client import ModbusClient
 from .worker import PollWorker, create_worker_and_thread
-from .logger import LogHandler, LogPanel
+from .logger import LogHandler
 from .h2tech_map import (
     ONOFF_START, ONOFF_COUNT, DOOR_START, DOOR_COUNT,
     ALARMS_START, ALARMS_COUNT, CMD_ONOFF_START, CMD_ONOFF_COUNT,
@@ -23,9 +25,42 @@ from .h2tech_map import (
     INVALID_COIL_899, INVALID_COIL_900,
 )
 
+# ---- Industrial dark theme QSS ----
+# Background: #1e1e1e | Cards: #2a2a2a | Text: #e0e0e0 | Accent: #2d8cf0
+# ON LED: #00c853 | OFF LED: #555555 | Alarm LED: #ff1744 (blinking)
+DARK_QSS = """
+QMainWindow, QWidget { background-color: #1e1e1e; }
+QFrame#card { background-color: #2a2a2a; border: 1px solid #3a3a3a; border-radius: 6px; padding: 8px; }
+QGroupBox { font-weight: bold; color: #e0e0e0; border: 1px solid #3a3a3a; border-radius: 4px; margin-top: 8px; }
+QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 6px; }
+QLabel { color: #e0e0e0; }
+QComboBox, QSpinBox, QLineEdit { background-color: #252525; color: #e0e0e0; border: 1px solid #3a3a3a; border-radius: 4px; padding: 4px; min-height: 20px; }
+QComboBox:hover, QSpinBox:hover, QLineEdit:hover { border-color: #2d8cf0; }
+QComboBox::drop-down, QSpinBox::down-arrow { border: none; }
+QPushButton { background-color: #252525; color: #e0e0e0; border: 1px solid #3a3a3a; border-radius: 4px; padding: 6px 12px; min-height: 20px; }
+QPushButton:hover { background-color: #2a2a2a; border-color: #2d8cf0; }
+QPushButton:pressed { background-color: #2d8cf0; color: white; }
+QPushButton:disabled { background-color: #252525; color: #555555; border-color: #2a2a2a; }
+QPushButton#primary { background-color: #2d8cf0; color: white; border-color: #2574d0; }
+QPushButton#primary:hover { background-color: #4da3f2; }
+QPushButton#danger { background-color: #4a2a2a; }
+QPushButton#danger:hover { background-color: #ff1744; color: white; }
+QCheckBox { color: #e0e0e0; spacing: 6px; }
+QCheckBox::indicator { width: 18px; height: 18px; border-radius: 3px; border: 2px solid #3a3a3a; background: #252525; }
+QCheckBox::indicator:checked { background: #2d8cf0; border-color: #2d8cf0; }
+QTableWidget { background-color: #2a2a2a; color: #e0e0e0; gridline-color: #3a3a3a; }
+QTableWidget::item { padding: 4px; }
+QHeaderView::section { background-color: #252525; color: #e0e0e0; padding: 6px; }
+QPlainTextEdit { background-color: #1e1e1e; color: #e0e0e0; font-family: Consolas, Monaco, monospace; font-size: 12px; border: 1px solid #3a3a3a; border-radius: 4px; }
+QScrollArea { border: none; background: transparent; }
+QScrollBar:vertical { background: #2a2a2a; width: 12px; border-radius: 6px; margin: 0; }
+QScrollBar::handle:vertical { background: #555555; border-radius: 6px; min-height: 24px; }
+QScrollBar::handle:vertical:hover { background: #2d8cf0; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+"""
+
 
 def list_serial_ports():
-    """List available serial ports (cross-platform)."""
     try:
         import serial.tools.list_ports
         return [p.device for p in serial.tools.list_ports.comports()]
@@ -33,12 +68,95 @@ def list_serial_ports():
         return []
 
 
+class LedIndicator(QFrame):
+    """Small LED: on=#00c853, off=#555555; alarm mode = #ff1744 red, blinking every 400ms."""
+    def __init__(self, parent=None, alarm_mode: bool = False):
+        super().__init__(parent)
+        self.setFixedSize(14, 14)
+        self.setStyleSheet("border-radius: 7px; background-color: #555555;")
+        self._on = False
+        self._alarm_mode = alarm_mode
+        self._blink_visible = False
+        self._blink_timer = QTimer(self)
+        self._blink_timer.timeout.connect(self._blink_toggle)
+        if alarm_mode:
+            self._blink_timer.setInterval(400)
+
+    def _blink_toggle(self):
+        if not self._alarm_mode or not self._on:
+            return
+        self._blink_visible = not self._blink_visible
+        if self._blink_visible:
+            self.setStyleSheet("border-radius: 7px; background-color: #ff1744;")
+        else:
+            self.setStyleSheet("border-radius: 7px; background-color: #c41040;")
+
+    def set_state(self, on: bool):
+        self._on = on
+        if self._alarm_mode:
+            if on:
+                self._blink_timer.start(400)
+            else:
+                self._blink_timer.stop()
+        self._update_style()
+
+    def _update_style(self):
+        if self._alarm_mode and self._on and not self._blink_timer.isActive():
+            self._blink_timer.start(400)
+        if self._alarm_mode and self._on:
+            self.setStyleSheet("border-radius: 7px; background-color: #c41040;")
+        elif self._on:
+            self.setStyleSheet("border-radius: 7px; background-color: #00c853;")
+        else:
+            if self._alarm_mode:
+                self._blink_timer.stop()
+            self.setStyleSheet("border-radius: 7px; background-color: #555555;")
+
+    def set_alarm_mode(self, alarm: bool):
+        self._alarm_mode = alarm
+        if alarm and self._on:
+            self._blink_timer.start(400)
+        else:
+            self._blink_timer.stop()
+        self._update_style()
+
+
+def card_frame(title: str = "") -> tuple[QFrame, QVBoxLayout]:
+    f = QFrame()
+    f.setObjectName("card")
+    f.setStyleSheet("QFrame#card { background-color: #2a2a2a; border: 1px solid #3a3a3a; border-radius: 6px; padding: 8px; }")
+    lay = QVBoxLayout(f)
+    lay.setSpacing(8)
+    if title:
+        lbl = QLabel(title)
+        lbl.setStyleSheet("font-weight: bold; color: #e0e0e0; font-size: 13px;")
+        lay.addWidget(lbl)
+    return f, lay
+
+
 class MainWindow(QMainWindow):
     request_poll = pyqtSignal()
+
+    ONOFF_LABELS = [
+        "Door1", "Door2", "HPSB Fan", "Heated Bench", "HPSB Spare",
+        "LPSB1 Internal1", "LPSB1 Internal2", "LPSB1 Charger",
+        "LPSB2 External1", "LPSB2 External2", "LPSB2 Spare",
+        "LPSB3 Spare1", "LPSB3 Spare2", "LPSB3 Spare3",
+        "Reserved", "Reserved",
+    ]
+    DOOR_LABELS = ["MAG1", "MAG2", "BTN1", "BTN2"]
+    CURRENT_NAMES = [
+        "HPSB P1", "HPSB P2", "HPSB P3",
+        "LPSB1 P1", "LPSB1 P2", "LPSB1 P3",
+        "LPSB2 P1", "LPSB2 P2", "LPSB2 P3",
+        "LPSB3 P1", "LPSB3 P2", "LPSB3 P3",
+        "Door1", "Door2",
+    ]
 
     def __init__(self):
         super().__init__()
         self.setWindowTitle("HSC PC Test Tool — MAIN Modbus RTU")
+        self.setStyleSheet(DARK_QSS)
         self._client = ModbusClient()
         self._log = LogHandler()
         self._poll_timer = QTimer(self)
@@ -47,8 +165,13 @@ class MainWindow(QMainWindow):
         self._thread.start()
         self.request_poll.connect(self._worker.on_request_poll, Qt.ConnectionType.QueuedConnection)
         self._connect_worker_signals()
+        self._last_poll_ts: str = "—"
+        self._current_min: list[int | None] = [None] * 14
+        self._current_max: list[int | None] = [None] * 14
+        self._log_lines: list[str] = []
         self._build_ui()
         self._refresh_ports()
+        self._set_connected_ui(False)
 
     def _connect_worker_signals(self):
         self._worker.onoff_result.connect(self._on_onoff)
@@ -59,160 +182,265 @@ class MainWindow(QMainWindow):
 
     def _build_ui(self):
         central = QWidget()
-        layout = QVBoxLayout(central)
-        layout.addWidget(self._connection_group())
-        layout.addWidget(self._read_group())
-        layout.addWidget(self._control_group())
-        layout.addWidget(LogPanel(self._log))
-        self.setCentralWidget(central)
-        self.resize(800, 700)
+        central.setStyleSheet("background-color: #1e1e1e;")
+        main_layout = QVBoxLayout(central)
+        main_layout.setSpacing(12)
+        main_layout.setContentsMargins(12, 12, 12, 12)
 
-    def _connection_group(self) -> QGroupBox:
-        g = QGroupBox("Connection")
-        L = QHBoxLayout(g)
-        L.addWidget(QLabel("Port:"))
+        # ---- Top bar ----
+        top = QWidget()
+        top_lay = QHBoxLayout(top)
+        top_lay.setSpacing(12)
+        top_lay.addWidget(QLabel("Port:"))
         self._port_combo = QComboBox()
-        self._port_combo.setMinimumWidth(120)
-        L.addWidget(self._port_combo)
+        self._port_combo.setMinimumWidth(140)
+        top_lay.addWidget(self._port_combo)
         btn_refresh = QPushButton("Refresh")
         btn_refresh.clicked.connect(self._refresh_ports)
-        L.addWidget(btn_refresh)
-        L.addWidget(QLabel("Baud:"))
+        top_lay.addWidget(btn_refresh)
+        top_lay.addWidget(QLabel("Baud:"))
         self._baud = QSpinBox()
-        self._baud.setRange(1200, 115200)
+        self._baud.setRange(9600, 9600)
         self._baud.setValue(9600)
-        L.addWidget(self._baud)
-        L.addWidget(QLabel("Slave ID:"))
+        self._baud.setMinimumWidth(70)
+        self._baud.setEnabled(False)
+        top_lay.addWidget(self._baud)
+        top_lay.addWidget(QLabel("Slave ID:"))
         self._slave_id = QSpinBox()
         self._slave_id.setRange(1, 247)
         self._slave_id.setValue(1)
-        L.addWidget(self._slave_id)
+        self._slave_id.setMinimumWidth(50)
+        top_lay.addWidget(self._slave_id)
         self._btn_connect = QPushButton("Connect")
         self._btn_connect.clicked.connect(self._do_connect)
-        L.addWidget(self._btn_connect)
+        top_lay.addWidget(self._btn_connect)
         self._btn_disconnect = QPushButton("Disconnect")
         self._btn_disconnect.clicked.connect(self._do_disconnect)
         self._btn_disconnect.setEnabled(False)
-        L.addWidget(self._btn_disconnect)
-        L.addStretch()
-        return g
-
-    def _read_group(self) -> QGroupBox:
-        g = QGroupBox("Live Read (FC02 / FC03)")
-        layout = QVBoxLayout(g)
-        row = QHBoxLayout()
+        top_lay.addWidget(self._btn_disconnect)
+        self._status_badge = QLabel("Disconnected")
+        self._status_badge.setStyleSheet("color: #555555; font-weight: bold; padding: 4px 8px;")
+        top_lay.addWidget(self._status_badge)
+        top_lay.addStretch()
         self._auto_poll = QCheckBox("Auto poll")
         self._auto_poll.stateChanged.connect(self._on_auto_poll_changed)
-        row.addWidget(self._auto_poll)
-        row.addWidget(QLabel("Interval (ms):"))
+        top_lay.addWidget(self._auto_poll)
+        top_lay.addWidget(QLabel("Interval (ms):"))
         self._poll_interval = QSpinBox()
         self._poll_interval.setRange(100, 5000)
         self._poll_interval.setValue(500)
         self._poll_interval.valueChanged.connect(self._set_poll_interval)
-        row.addWidget(self._poll_interval)
-        row.addStretch()
-        layout.addLayout(row)
+        self._poll_interval.setMinimumWidth(70)
+        top_lay.addWidget(self._poll_interval)
+        self._last_poll_label = QLabel("Last poll: —")
+        self._last_poll_label.setStyleSheet("color: #888888;")
+        top_lay.addWidget(self._last_poll_label)
+        main_layout.addWidget(top)
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll_w = QWidget()
-        grid = QVBoxLayout(scroll_w)
+        # ---- Main 2-column ----
+        content = QWidget()
+        content_lay = QHBoxLayout(content)
+        content_lay.setSpacing(12)
 
-        # ON/OFF 1~16
-        g1 = QGroupBox("1) ON/OFF status 1~16 (FC02 start=820 count=16)")
-        l1 = QVBoxLayout(g1)
-        self._onoff_label = QLabel("—")
-        self._onoff_label.setFont(QFont("Monospace", 10))
-        l1.addWidget(self._onoff_label)
-        btn = QPushButton("Read once")
-        btn.clicked.connect(self._read_onoff_once)
-        l1.addWidget(btn)
-        grid.addWidget(g1)
+        # LEFT column: Status Monitor (3 cards)
+        left_col = QVBoxLayout()
+        left_col.setSpacing(12)
 
-        # Door
-        g2 = QGroupBox("2) Door sensors (FC02 start=852 count=8)")
-        l2 = QVBoxLayout(g2)
-        self._door_label = QLabel("—")
-        self._door_label.setFont(QFont("Monospace", 10))
-        l2.addWidget(self._door_label)
-        btn = QPushButton("Read once")
-        btn.clicked.connect(self._read_door_once)
-        l2.addWidget(btn)
-        grid.addWidget(g2)
+        # Card A: ON/OFF 1~16
+        card_a, lay_a = card_frame("ON/OFF 1~16")
+        grid_a = QGridLayout()
+        self._onoff_leds = []
+        self._onoff_labels = []
+        for i in range(16):
+            led = LedIndicator(alarm_mode=False)
+            lbl = QLabel(f"{i+1} {self.ONOFF_LABELS[i]}")
+            lbl.setStyleSheet("color: #e0e0e0;")
+            row, col = i // 4, i % 4
+            grid_a.addWidget(led, row, col * 2)
+            grid_a.addWidget(lbl, row, col * 2 + 1)
+            self._onoff_leds.append(led)
+            self._onoff_labels.append(lbl)
+        lay_a.addLayout(grid_a)
+        btn_read_onoff = QPushButton("Read once")
+        btn_read_onoff.clicked.connect(self._read_onoff_once)
+        lay_a.addWidget(btn_read_onoff)
+        self._read_buttons = [btn_read_onoff]
+        left_col.addWidget(card_a)
 
-        # Alarms
-        g3 = QGroupBox("3) Alarms 1~12 (FC02 start=868 count=12)")
-        l3 = QVBoxLayout(g3)
-        self._alarms_label = QLabel("—")
-        self._alarms_label.setFont(QFont("Monospace", 10))
-        l3.addWidget(self._alarms_label)
-        btn = QPushButton("Read once")
-        btn.clicked.connect(self._read_alarms_once)
-        l3.addWidget(btn)
-        grid.addWidget(g3)
+        # Card B: Door sensors
+        card_b, lay_b = card_frame("Door Sensors")
+        grid_b = QGridLayout()
+        self._door_leds = []
+        for i, name in enumerate(self.DOOR_LABELS):
+            led = LedIndicator(alarm_mode=False)
+            lbl = QLabel(name)
+            lbl.setStyleSheet("color: #e0e0e0;")
+            grid_b.addWidget(led, i // 2, (i % 2) * 2)
+            grid_b.addWidget(lbl, i // 2, (i % 2) * 2 + 1)
+            self._door_leds.append(led)
+        lay_b.addLayout(grid_b)
+        btn_door = QPushButton("Read once")
+        btn_door.clicked.connect(self._read_door_once)
+        lay_b.addWidget(btn_door)
+        self._read_buttons.append(btn_door)
+        left_col.addWidget(card_b)
 
-        # CMD ON/OFF 1~7
-        g4 = QGroupBox("4) CMD ON/OFF 1~7 (FC02 start=884 count=7)")
-        l4 = QVBoxLayout(g4)
-        self._cmd_onoff_label = QLabel("—")
-        self._cmd_onoff_label.setFont(QFont("Monospace", 10))
-        l4.addWidget(self._cmd_onoff_label)
-        btn = QPushButton("Read once")
-        btn.clicked.connect(self._read_cmd_onoff_once)
-        l4.addWidget(btn)
-        grid.addWidget(g4)
+        # Card C: Alarms 1~12
+        card_c, lay_c = card_frame("Alarms 1~12")
+        grid_c = QGridLayout()
+        self._alarm_leds = []
+        for i in range(12):
+            led = LedIndicator(alarm_mode=True)
+            lbl = QLabel(f"ALM{i+1}")
+            lbl.setStyleSheet("color: #e0e0e0;")
+            row, col = i // 3, i % 3
+            grid_c.addWidget(led, row, col * 2)
+            grid_c.addWidget(lbl, row, col * 2 + 1)
+            self._alarm_leds.append(led)
+        lay_c.addLayout(grid_c)
+        btn_alarms = QPushButton("Read once")
+        btn_alarms.clicked.connect(self._read_alarms_once)
+        lay_c.addWidget(btn_alarms)
+        self._read_buttons.append(btn_alarms)
+        left_col.addWidget(card_c)
 
-        # Currents
-        g5 = QGroupBox("5) Currents (FC03 start=2000 count=14 only)")
-        l5 = QVBoxLayout(g5)
-        self._current_table = QTableWidget(14, 2)
-        self._current_table.setHorizontalHeaderLabels(["Register", "Value"])
+        left_w = QWidget()
+        left_w.setLayout(left_col)
+        content_lay.addWidget(left_w, stretch=1)
+
+        # RIGHT column: Current Monitor
+        card_cur, lay_cur = card_frame("Current Monitor")
+        self._current_table = QTableWidget(14, 3)
+        self._current_table.setHorizontalHeaderLabels(["Name", "Raw Value", "Min / Max"])
+        self._current_table.horizontalHeader().setStretchLastSection(True)
         for r in range(14):
-            self._current_table.setItem(r, 0, QTableWidgetItem(""))
+            self._current_table.setItem(r, 0, QTableWidgetItem(self.CURRENT_NAMES[r]))
             self._current_table.setItem(r, 1, QTableWidgetItem("—"))
-        labels = [
-            "2000 HPSB P1", "2001 HPSB P2", "2002 HPSB P3",
-            "2003 LPSB1 P1", "2004 LPSB1 P2", "2005 LPSB1 P3",
-            "2006 LPSB2 P1", "2007 LPSB2 P2", "2008 LPSB2 P3",
-            "2009 LPSB3 P1", "200A LPSB3 P2", "200B LPSB3 P3",
-            "200C Door1", "200D Door2",
-        ]
-        for r, lb in enumerate(labels):
-            self._current_table.item(r, 0).setText(lb)
-        btn = QPushButton("Read once")
-        btn.clicked.connect(self._read_currents_once)
-        l5.addWidget(self._current_table)
-        l5.addWidget(btn)
-        grid.addWidget(g5)
+            self._current_table.setItem(r, 2, QTableWidgetItem("—"))
+            self._current_table.item(r, 1).setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self._current_table.item(r, 2).setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self._current_table.setColumnWidth(0, 120)
+        self._current_table.setColumnWidth(1, 80)
+        lay_cur.addWidget(self._current_table)
+        btn_cur = QPushButton("Read once")
+        btn_cur.clicked.connect(self._read_currents_once)
+        lay_cur.addWidget(btn_cur)
+        self._read_buttons.append(btn_cur)
+        content_lay.addWidget(card_cur, stretch=1)
 
-        scroll.setWidget(scroll_w)
-        layout.addWidget(scroll)
-        return g
+        main_layout.addWidget(content)
 
-    def _control_group(self) -> QGroupBox:
-        g = QGroupBox("Control (FC05 Write)")
-        L = QHBoxLayout(g)
-        L.addWidget(QLabel("Door open:"))
-        btn_d1 = QPushButton("Door 1 (1x0897)")
-        btn_d1.clicked.connect(self._write_door1)
-        L.addWidget(btn_d1)
-        btn_d2 = QPushButton("Door 2 (1x0898)")
-        btn_d2.clicked.connect(self._write_door2)
-        L.addWidget(btn_d2)
-        L.addWidget(QLabel("  VB ON/OFF 8~12:"))
+        # ---- Bottom: Controls + Log ----
+        bottom = QWidget()
+        bottom_lay = QHBoxLayout(bottom)
+        bottom_lay.setSpacing(12)
+
+        # Left: Controls card
+        card_ctrl, lay_ctrl = card_frame("Controls")
+        row1 = QHBoxLayout()
+        self._btn_door1 = QPushButton("Open Door 1")
+        self._btn_door1.setObjectName("primary")
+        self._btn_door1.clicked.connect(self._write_door1)
+        self._btn_door2 = QPushButton("Open Door 2")
+        self._btn_door2.setObjectName("primary")
+        self._btn_door2.clicked.connect(self._write_door2)
+        row1.addWidget(self._btn_door1)
+        row1.addWidget(self._btn_door2)
+        row1.addSpacing(20)
+        row1.addWidget(QLabel("Virtual Buttons ON/OFF 8~12:"))
+        self._vb_buttons = []
         for i in range(8, 13):
             b = QPushButton(f"{i}")
             b.clicked.connect(lambda checked=False, x=i: self._write_vb(x))
-            L.addWidget(b)
-        L.addWidget(QLabel("  Exception test:"))
-        b899 = QPushButton("0899 (0x02)")
+            row1.addWidget(b)
+            self._vb_buttons.append(b)
+        lay_ctrl.addLayout(row1)
+        row2 = QHBoxLayout()
+        row2.addWidget(QLabel("Exception test (expect 0x02):"))
+        b899 = QPushButton("0899")
+        b899.setObjectName("danger")
         b899.clicked.connect(self._write_invalid_899)
-        L.addWidget(b899)
-        b900 = QPushButton("0900 (0x02)")
+        b900 = QPushButton("0900")
+        b900.setObjectName("danger")
         b900.clicked.connect(self._write_invalid_900)
-        L.addWidget(b900)
-        L.addStretch()
-        return g
+        row2.addWidget(b899)
+        row2.addWidget(b900)
+        row2.addStretch()
+        lay_ctrl.addLayout(row2)
+        self._control_buttons = [self._btn_door1, self._btn_door2] + self._vb_buttons + [b899, b900]
+        bottom_lay.addWidget(card_ctrl, stretch=1)
+
+        # Right: Log card
+        card_log, lay_log = card_frame("Log")
+        self._log_filter = QLineEdit()
+        self._log_filter.setPlaceholderText("Filter (search)...")
+        self._log_filter.textChanged.connect(self._apply_log_filter)
+        lay_log.addWidget(self._log_filter)
+        self._log_edit = QPlainTextEdit()
+        self._log_edit.setReadOnly(True)
+        self._log_edit.setMinimumHeight(140)
+        self._log_edit.setFont(QFont("Consolas", 10))
+        lay_log.addWidget(self._log_edit)
+        log_btns = QHBoxLayout()
+        btn_clear = QPushButton("Clear")
+        btn_clear.clicked.connect(self._log_clear)
+        btn_save = QPushButton("Save CSV")
+        btn_save.clicked.connect(self._log_save_csv)
+        log_btns.addWidget(btn_clear)
+        log_btns.addWidget(btn_save)
+        log_btns.addStretch()
+        lay_log.addLayout(log_btns)
+        bottom_lay.addWidget(card_log, stretch=1)
+
+        main_layout.addWidget(bottom)
+
+        self.setCentralWidget(central)
+        self.resize(920, 720)
+
+        self._log.log_line.connect(self._on_log_line)
+
+    def _on_log_line(self, line: str):
+        self._log_lines.append(line)
+        self._apply_log_filter()
+
+    def _apply_log_filter(self):
+        filt = self._log_filter.text().strip().lower()
+        if not filt:
+            self._log_edit.setPlainText("\n".join(self._log_lines))
+            return
+        self._log_edit.setPlainText("\n".join(l for l in self._log_lines if filt in l.lower()))
+
+    def _log_clear(self):
+        self._log.clear()
+        self._log_lines.clear()
+        self._log_edit.clear()
+        self._log_filter.clear()
+
+    def _log_save_csv(self):
+        path, _ = QFileDialog.getSaveFileName(self, "Save log", "", "CSV (*.csv)")
+        if not path:
+            return
+        from pathlib import Path
+        content = self._log.get_csv_content()
+        if not content:
+            return
+        Path(path).write_text(content, encoding="utf-8")
+
+    def _set_connected_ui(self, connected: bool):
+        self._btn_connect.setEnabled(not connected)
+        self._btn_disconnect.setEnabled(connected)
+        self._port_combo.setEnabled(not connected)
+        self._slave_id.setEnabled(not connected)
+        for b in self._read_buttons:
+            b.setEnabled(connected)
+        for b in self._control_buttons:
+            b.setEnabled(connected)
+        if connected:
+            self._status_badge.setText("Connected")
+            self._status_badge.setStyleSheet("color: #00c853; font-weight: bold; padding: 4px 8px;")
+        else:
+            self._status_badge.setText("Disconnected")
+            self._status_badge.setStyleSheet("color: #555555; font-weight: bold; padding: 4px 8px;")
 
     def _refresh_ports(self):
         self._port_combo.clear()
@@ -226,16 +454,12 @@ class MainWindow(QMainWindow):
         if not port or port == "(no ports)":
             QMessageBox.warning(self, "Connection", "Select a valid port.")
             return
-        ok, msg = self._client.connect(
-            port,
-            baudrate=self._baud.value(),
-            slave_id=self._slave_id.value(),
-        )
+        ok, msg = self._client.connect(port, baudrate=self._baud.value(), slave_id=self._slave_id.value())
         if ok:
-            self._btn_connect.setEnabled(False)
-            self._btn_disconnect.setEnabled(True)
-            self._port_combo.setEnabled(False)
+            self._set_connected_ui(True)
             self._worker.set_running(True)
+            self._current_min = [None] * 14
+            self._current_max = [None] * 14
             self._log.log("Connect", port, self._baud.value(), "OK")
         else:
             QMessageBox.warning(self, "Connection", msg)
@@ -246,13 +470,11 @@ class MainWindow(QMainWindow):
         self._poll_timer.stop()
         self._auto_poll.setChecked(False)
         self._client.disconnect()
-        self._btn_connect.setEnabled(True)
-        self._btn_disconnect.setEnabled(False)
-        self._port_combo.setEnabled(True)
+        self._set_connected_ui(False)
         self._log.log("Disconnect", "", "", "OK")
 
     def _on_auto_poll_changed(self, state):
-        if state:  # checked
+        if state:
             self._worker.set_running(self._client.connected)
             self._poll_timer.start(self._poll_interval.value())
         else:
@@ -265,12 +487,17 @@ class MainWindow(QMainWindow):
     def _on_timer(self):
         self.request_poll.emit()
 
+    def _update_last_poll(self):
+        self._last_poll_ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        self._last_poll_label.setText(f"Last poll: {self._last_poll_ts}")
+
     def _read_onoff_once(self):
         if not self._client.connected:
             return
         ok, data, err = self._client.read_onoff()
         self._log.log("FC02", ONOFF_START, ONOFF_COUNT, "OK" if ok else "Fail", err or "")
         self._apply_onoff(ok, data, err)
+        self._update_last_poll()
 
     def _read_door_once(self):
         if not self._client.connected:
@@ -278,6 +505,7 @@ class MainWindow(QMainWindow):
         ok, data, err = self._client.read_door_sensors()
         self._log.log("FC02", DOOR_START, DOOR_COUNT, "OK" if ok else "Fail", err or "")
         self._apply_door(ok, data, err)
+        self._update_last_poll()
 
     def _read_alarms_once(self):
         if not self._client.connected:
@@ -285,13 +513,7 @@ class MainWindow(QMainWindow):
         ok, data, err = self._client.read_alarms()
         self._log.log("FC02", ALARMS_START, ALARMS_COUNT, "OK" if ok else "Fail", err or "")
         self._apply_alarms(ok, data, err)
-
-    def _read_cmd_onoff_once(self):
-        if not self._client.connected:
-            return
-        ok, data, err = self._client.read_cmd_onoff()
-        self._log.log("FC02", CMD_ONOFF_START, CMD_ONOFF_COUNT, "OK" if ok else "Fail", err or "")
-        self._apply_cmd_onoff(ok, data, err)
+        self._update_last_poll()
 
     def _read_currents_once(self):
         if not self._client.connected:
@@ -299,55 +521,78 @@ class MainWindow(QMainWindow):
         ok, data, err = self._client.read_currents()
         self._log.log("FC03", CURRENT_START, CURRENT_COUNT, "OK" if ok else "Fail", err or "")
         self._apply_currents(ok, data, err)
+        self._update_last_poll()
 
     def _apply_onoff(self, ok: bool, data: list | None, err: str | None):
         if ok and data is not None:
-            self._onoff_label.setText(" ".join(str(b) for b in data[:16]))
+            for i in range(min(16, len(data))):
+                self._onoff_leds[i].set_state(bool(data[i]))
+            for i in range(len(data), 16):
+                self._onoff_leds[i].set_state(False)
         else:
-            self._onoff_label.setText(err or "—")
+            for led in self._onoff_leds:
+                led.set_state(False)
 
     def _apply_door(self, ok: bool, data: list | None, err: str | None):
         if ok and data is not None:
-            self._door_label.setText(" ".join(str(b) for b in data[:8]))
+            for i in range(min(4, len(data))):
+                self._door_leds[i].set_state(bool(data[i]))
+            for i in range(len(data), 4):
+                self._door_leds[i].set_state(False)
         else:
-            self._door_label.setText(err or "—")
+            for led in self._door_leds:
+                led.set_state(False)
 
     def _apply_alarms(self, ok: bool, data: list | None, err: str | None):
         if ok and data is not None:
-            self._alarms_label.setText(" ".join(str(b) for b in data[:12]))
+            for i in range(min(12, len(data))):
+                self._alarm_leds[i].set_state(bool(data[i]))
+            for i in range(len(data), 12):
+                self._alarm_leds[i].set_state(False)
         else:
-            self._alarms_label.setText(err or "—")
-
-    def _apply_cmd_onoff(self, ok: bool, data: list | None, err: str | None):
-        if ok and data is not None:
-            self._cmd_onoff_label.setText(" ".join(str(b) for b in data[:7]))
-        else:
-            self._cmd_onoff_label.setText(err or "—")
+            for led in self._alarm_leds:
+                led.set_state(False)
 
     def _apply_currents(self, ok: bool, data: list | None, err: str | None):
         if ok and data is not None:
             for r in range(min(14, len(data))):
-                self._current_table.item(r, 1).setText(str(data[r]))
+                val = data[r]
+                self._current_table.item(r, 1).setText(str(val))
+                if isinstance(val, int):
+                    if self._current_min[r] is None or val < self._current_min[r]:
+                        self._current_min[r] = val
+                    if self._current_max[r] is None or val > self._current_max[r]:
+                        self._current_max[r] = val
+                    mn, mx = self._current_min[r], self._current_max[r]
+                    self._current_table.item(r, 2).setText(f"{mn} / {mx}")
+                else:
+                    self._current_table.item(r, 2).setText("—")
             for r in range(len(data), 14):
                 self._current_table.item(r, 1).setText("—")
+                self._current_table.item(r, 2).setText("—")
         else:
             for r in range(14):
                 self._current_table.item(r, 1).setText(err or "—")
+                self._current_table.item(r, 2).setText("—")
 
     def _on_onoff(self, ok: bool, data, err):
         self._apply_onoff(ok, data, err)
+        self._update_last_poll()
 
     def _on_door(self, ok: bool, data, err):
         self._apply_door(ok, data, err)
+        self._update_last_poll()
 
     def _on_alarms(self, ok: bool, data, err):
         self._apply_alarms(ok, data, err)
+        self._update_last_poll()
 
     def _on_cmd_onoff(self, ok: bool, data, err):
-        self._apply_cmd_onoff(ok, data, err)
+        pass  # CMD ON/OFF 1~7 not shown as separate LEDs; same as ON/OFF for display
 
     def _on_currents(self, ok: bool, data, err):
         self._apply_currents(ok, data, err)
+        self._update_last_poll()
 
     def _write_door1(self):
         if not self._client.connected:
