@@ -73,6 +73,10 @@ void Error_Handler(void);
 #define PC_ON_EN_GPIO_Port GPIOC
 #define PC_LED_IN_Pin GPIO_PIN_2
 #define PC_LED_IN_GPIO_Port GPIOC
+#define PC_RS485_TX_Pin GPIO_PIN_2
+#define PC_RS485_TX_GPIO_Port GPIOA
+#define PC_RS485_RX_Pin GPIO_PIN_3
+#define PC_RS485_RX_GPIO_Port GPIOA
 #define RS485_DE_Pin GPIO_PIN_1
 #define RS485_DE_GPIO_Port GPIOB
 #define DI_04_Pin GPIO_PIN_7

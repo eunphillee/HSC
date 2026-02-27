@@ -21,7 +21,11 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "app_scheduler.h"
+#include "aggregator.h"
+#include "aggregated_status.h"
+#include "upstream_pc_protocol.h"
+#include "modbus_master.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -44,11 +48,12 @@ I2C_HandleTypeDef hi2c1;
 I2C_HandleTypeDef hi2c3;
 
 UART_HandleTypeDef huart1;
+UART_HandleTypeDef huart2;
 
 WWDG_HandleTypeDef hwwdg;
 
 /* USER CODE BEGIN PV */
-
+static aggregated_status_t aggregated_status;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -58,6 +63,7 @@ static void MX_WWDG_Init(void);
 static void MX_I2C1_Init(void);
 static void MX_I2C3_Init(void);
 static void MX_USART1_UART_Init(void);
+static void MX_USART2_UART_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -100,8 +106,12 @@ int main(void)
   MX_I2C1_Init();
   MX_I2C3_Init();
   MX_USART1_UART_Init();
+  MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
-
+  AppScheduler_Init();
+  ModbusMaster_Init();
+  AggregatedStatus_Clear(&aggregated_status);
+  UpstreamPC_Init();
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -111,6 +121,16 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    AppScheduler_Update();
+
+    if (AppScheduler_IsDue(TASK_UPSTREAM_POLL))
+      UpstreamPC_Poll();
+    if (AppScheduler_IsDue(TASK_DOWNSTREAM_MODBUS))
+      ModbusMaster_Poll();
+    if (AppScheduler_IsDue(TASK_AGGREGATE_UPDATE))
+      Aggregator_Update(&aggregated_status);
+    if (AppScheduler_IsDue(TASK_UPSTREAM_SEND_STATUS))
+      UpstreamPC_SendStatus(&aggregated_status);
   }
   /* USER CODE END 3 */
 }
@@ -257,6 +277,39 @@ static void MX_USART1_UART_Init(void)
 }
 
 /**
+  * @brief USART2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART2_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART2_Init 0 */
+
+  /* USER CODE END USART2_Init 0 */
+
+  /* USER CODE BEGIN USART2_Init 1 */
+
+  /* USER CODE END USART2_Init 1 */
+  huart2.Instance = USART2;
+  huart2.Init.BaudRate = 9600;
+  huart2.Init.WordLength = UART_WORDLENGTH_8B;
+  huart2.Init.StopBits = UART_STOPBITS_1;
+  huart2.Init.Parity = UART_PARITY_NONE;
+  huart2.Init.Mode = UART_MODE_TX_RX;
+  huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart2.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART2_Init 2 */
+
+  /* USER CODE END USART2_Init 2 */
+
+}
+
+/**
   * @brief WWDG Initialization Function
   * @param None
   * @retval None
@@ -302,8 +355,8 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOE_CLK_ENABLE();
   __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOH_CLK_ENABLE();
-  __HAL_RCC_GPIOB_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
+  __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOE, RELAY3_EN_Pin|RELAY4_EN_Pin|RELAY1_EN_Pin|RELAY2_EN_Pin, GPIO_PIN_RESET);
