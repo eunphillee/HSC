@@ -15,6 +15,7 @@ from .h2tech_map import (
     VB_ONOFF_8_COIL, VB_ONOFF_12_COIL,
     INVALID_COIL_899, INVALID_COIL_900,
     MAIN_IO_ENABLED, MAIN_DI_REG, MAIN_DO_REG, MAIN_DI_COUNT, MAIN_DO_COUNT,
+    MAIN_SLAVE_ID_DEFAULT,
 )
 
 
@@ -25,9 +26,9 @@ class ModbusClient:
     def __init__(self):
         self._client: ModbusSerialClient | None = None
         self._port: str = ""
-        self._slave_id: int = 1
+        self._slave_id: int = MAIN_SLAVE_ID_DEFAULT
 
-    def connect(self, port: str, baudrate: int = 9600, slave_id: int = 1) -> tuple[bool, str]:
+    def connect(self, port: str, baudrate: int = 9600, slave_id: int = MAIN_SLAVE_ID_DEFAULT) -> tuple[bool, str]:
         """Connect to serial port. Returns (success, message)."""
         with self._lock:
             if self._client and self._client.connected:

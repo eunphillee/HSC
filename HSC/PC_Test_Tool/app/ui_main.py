@@ -24,7 +24,7 @@ from .h2tech_map import (
     DOOR_OPEN_1_COIL, DOOR_OPEN_2_COIL,
     VB_ONOFF_8_COIL, VB_ONOFF_12_COIL,
     INVALID_COIL_899, INVALID_COIL_900,
-    MAIN_IO_ENABLED, MAIN_DI_REG, MAIN_DO_REG,
+    MAIN_IO_ENABLED, MAIN_DI_REG, MAIN_DO_REG, MAIN_SLAVE_ID_DEFAULT,
 )
 
 # ---- Industrial dark theme QSS ----
@@ -216,7 +216,7 @@ class MainWindow(QMainWindow):
         top_lay.addWidget(QLabel("Slave ID:"))
         self._slave_id = QSpinBox()
         self._slave_id.setRange(1, 247)
-        self._slave_id.setValue(1)
+        self._slave_id.setValue(MAIN_SLAVE_ID_DEFAULT)
         self._slave_id.setMinimumWidth(50)
         top_lay.addWidget(self._slave_id)
         self._btn_connect = QPushButton("Connect")

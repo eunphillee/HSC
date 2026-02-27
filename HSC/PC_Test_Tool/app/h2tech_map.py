@@ -2,6 +2,9 @@
 H2TECH address mapping: 1xNNNN -> Modbus start address = NNNN - 1.
 Bit packing in responses: LSB-first, lowest address = bit0.
 """
+# Upstream MAIN Modbus Slave ID default (user can change in UI)
+MAIN_SLAVE_ID_DEFAULT = 9
+
 # FC02 discrete (1x) — Modbus start = NNNN - 1
 # ON/OFF 1~16: 1x0821~0836 -> start 820, count 16
 ONOFF_START = 820

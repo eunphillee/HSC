@@ -32,7 +32,7 @@ python main.py
 
 After the window opens, the **console** prints a layout verification block: main window size, layout tree (top bar, 3 left cards, 1 right card, bottom 2 cards), and that all sections are visible on 1440×900 without scrolling.
 
-Select COM port (e.g. `COM3` on Windows, `/dev/tty.usbserial-*` or `/dev/ttyUSB0` on macOS/Linux), set Slave ID (default 1), then Connect. Use the read panels and control buttons as needed.
+Select COM port (e.g. `COM3` on Windows, `/dev/tty.usbserial-*` or `/dev/ttyUSB0` on macOS/Linux), set Slave ID (default **9**), then Connect. Use the read panels and control buttons as needed.
 
 ## UI overview (text layout)
 
