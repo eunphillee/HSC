@@ -1,0 +1,23 @@
+# STM32CubeIDE / Eclipse (local workspace metadata only)
+.metadata/
+
+# Build outputs
+Debug/
+Release/
+**/*.o
+**/*.d
+*.elf
+*.bin
+*.map
+*.lst
+*.su
+
+# IDE
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
