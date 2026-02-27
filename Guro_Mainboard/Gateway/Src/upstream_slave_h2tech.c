@@ -52,13 +52,19 @@ static int handle_fc02(uint16_t start_addr, uint16_t count, uint8_t *response, u
     return (int)(2 + byte_count);
 }
 
-/* FC03 Read Holding Registers: 4x2000..4x200D = per-port current raw (read-only) */
+/* FC03 Read Holding Registers: 4x2000..4x200D = per-port current raw (read-only).
+ * Policy: only start=2000 and count=14 accepted; else 0x02 (bad address) or 0x03 (bad value). */
 static int handle_fc03(uint16_t start_addr, uint16_t count, const void *p_agg,
                        uint8_t *response, uint16_t resp_max)
 {
-    if (start_addr != UPSTREAM_CURRENT_START || count > UPSTREAM_CURRENT_COUNT || count == 0) {
+    if (start_addr != UPSTREAM_CURRENT_START) {
         response[0] = 0x83;
         response[1] = EX_ILLEGAL_DATA_ADDR;
+        return 2;
+    }
+    if (count != UPSTREAM_CURRENT_COUNT) {
+        response[0] = 0x83;
+        response[1] = EX_ILLEGAL_DATA_VAL;
         return 2;
     }
     const uint16_t byte_count = count * 2u;

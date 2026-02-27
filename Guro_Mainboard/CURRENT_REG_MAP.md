@@ -71,6 +71,8 @@ PC reads per-port current via **Holding Registers (4x)**. Address range is fixed
 
 **Block:** 4x**2000** .. 4x**200D** (Modbus register start address **2000**, count **14**). Read with **FC03**. **Read-only**; write (FC06/FC16) returns exception **0x03**.
 
+**FC03 current read must be requested only as start=2000, count=14.** Any other start or count is rejected (0x02 Illegal Data Address if start≠2000, 0x03 Illegal Data Value if count≠14). This simplifies the PC test tool and avoids partial-range ambiguity.
+
 | Reg (4x) | Modbus start + offset | Content |
 |----------|------------------------|---------|
 | 2000     | 0                      | HPSB Port1 current raw |
