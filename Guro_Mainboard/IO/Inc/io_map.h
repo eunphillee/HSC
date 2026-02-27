@@ -43,7 +43,7 @@ typedef enum {
 #define MODBUS_HOLDING_START        0
 #define MODBUS_HOLDING_COUNT        4
 #define MODBUS_INPUT_REG_START      0
-#define MODBUS_INPUT_REG_COUNT      4
+#define MODBUS_INPUT_REG_COUNT      7
 
 /* ========== MAIN local Digital Inputs (GPIO) ========== */
 typedef enum {

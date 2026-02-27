@@ -55,9 +55,15 @@ void Aggregator_Update(aggregated_status_t *out)
 	out->lpsb1_alarm_reg  = ModbusTable_GetHoldingReg(SLAVE_ID_LPSB1, HOLDING_REG_ALARM);
 	out->lpsb2_alarm_reg  = ModbusTable_GetHoldingReg(SLAVE_ID_LPSB2, HOLDING_REG_ALARM);
 	out->lpsb3_alarm_reg  = ModbusTable_GetHoldingReg(SLAVE_ID_LPSB3, HOLDING_REG_ALARM);
-	out->lpsb1_sense_raw  = ModbusTable_GetInputReg(SLAVE_ID_LPSB1, 1);
-	out->lpsb2_sense_raw  = ModbusTable_GetInputReg(SLAVE_ID_LPSB2, 1);
-	out->lpsb3_sense_raw  = ModbusTable_GetInputReg(SLAVE_ID_LPSB3, 1);
+	out->lpsb1_sense_raw[0] = ModbusTable_GetInputReg(SLAVE_ID_LPSB1, 1);
+	out->lpsb1_sense_raw[1] = ModbusTable_GetInputReg(SLAVE_ID_LPSB1, 2);
+	out->lpsb1_sense_raw[2] = ModbusTable_GetInputReg(SLAVE_ID_LPSB1, 3);
+	out->lpsb2_sense_raw[0] = ModbusTable_GetInputReg(SLAVE_ID_LPSB2, 1);
+	out->lpsb2_sense_raw[1] = ModbusTable_GetInputReg(SLAVE_ID_LPSB2, 2);
+	out->lpsb2_sense_raw[2] = ModbusTable_GetInputReg(SLAVE_ID_LPSB2, 3);
+	out->lpsb3_sense_raw[0] = ModbusTable_GetInputReg(SLAVE_ID_LPSB3, 1);
+	out->lpsb3_sense_raw[1] = ModbusTable_GetInputReg(SLAVE_ID_LPSB3, 2);
+	out->lpsb3_sense_raw[2] = ModbusTable_GetInputReg(SLAVE_ID_LPSB3, 3);
 
 	out->error_flags = 0;
 	if (!ModbusMaster_IsCommOk(SLAVE_ID_HPSB)) out->error_flags |= AGG_ERR_COMM_HPSB;
@@ -113,9 +119,17 @@ void Aggregator_Update(aggregated_status_t *out)
 	H2Map_WriteAggBit(AGG_BIT_ALM_5, (out->hpsb_alarm_reg & (1u << 0)) ? true : false);
 	H2Map_WriteAggBit(AGG_BIT_ALM_6, (out->hpsb_alarm_reg & (1u << 1)) ? true : false);
 	H2Map_WriteAggBit(AGG_BIT_ALM_7, (out->hpsb_alarm_reg & (1u << 2)) ? true : false);
-	H2Map_WriteAggBit(AGG_BIT_ALM_8, (out->lpsb1_sense_raw > LPSB_SENSE_MIDSCALE + LPSB_OC_THRESHOLD_RAW || (out->lpsb1_sense_raw < LPSB_SENSE_MIDSCALE && (LPSB_SENSE_MIDSCALE - out->lpsb1_sense_raw) > LPSB_OC_THRESHOLD_RAW)) ? true : false);
-	H2Map_WriteAggBit(AGG_BIT_ALM_9, (out->lpsb2_sense_raw > LPSB_SENSE_MIDSCALE + LPSB_OC_THRESHOLD_RAW || (out->lpsb2_sense_raw < LPSB_SENSE_MIDSCALE && (LPSB_SENSE_MIDSCALE - out->lpsb2_sense_raw) > LPSB_OC_THRESHOLD_RAW)) ? true : false);
-	H2Map_WriteAggBit(AGG_BIT_ALM_10, (out->lpsb3_sense_raw > LPSB_SENSE_MIDSCALE + LPSB_OC_THRESHOLD_RAW || (out->lpsb3_sense_raw < LPSB_SENSE_MIDSCALE && (LPSB_SENSE_MIDSCALE - out->lpsb3_sense_raw) > LPSB_OC_THRESHOLD_RAW)) ? true : false);
+	/* LPSB overcurrent: any of 3 ports over threshold (mid-scale ± margin) sets ALM8/9/10 */
+	static int lpsb_oc(const uint16_t raw[3]) {
+		for (int i = 0; i < 3; i++) {
+			if (raw[i] > LPSB_SENSE_MIDSCALE + LPSB_OC_THRESHOLD_RAW) return 1;
+			if (raw[i] < LPSB_SENSE_MIDSCALE && (LPSB_SENSE_MIDSCALE - raw[i]) > LPSB_OC_THRESHOLD_RAW) return 1;
+		}
+		return 0;
+	}
+	H2Map_WriteAggBit(AGG_BIT_ALM_8, lpsb_oc(out->lpsb1_sense_raw) ? true : false);
+	H2Map_WriteAggBit(AGG_BIT_ALM_9, lpsb_oc(out->lpsb2_sense_raw) ? true : false);
+	H2Map_WriteAggBit(AGG_BIT_ALM_10, lpsb_oc(out->lpsb3_sense_raw) ? true : false);
 	H2Map_WriteAggBit(AGG_BIT_ALM_11, (out->error_flags & AGG_ERR_UPSTREAM_RX) ? true : false);
 	H2Map_WriteAggBit(AGG_BIT_ALM_12, (out->error_flags & AGG_ERR_DOWNSTREAM_WRITE) ? true : false);
 

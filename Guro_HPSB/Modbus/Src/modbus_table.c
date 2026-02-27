@@ -75,8 +75,12 @@ void ModbusTable_RefreshInputRegs(void)
     for (uint16_t i = 0; i < 8 && i < DISCRETE_COUNT; i++)
         byte |= (discrete_image[i] ? (1u << i) : 0);
     input_regs[HPSB_INPUT_REG_DISCRETE_IMAGE] = (uint16_t)byte;
-    /* ADC ch0..2 (HCT17W current): stub 0 until ADC wired; then read from IO_HPSB_ReadAdcRaw(0..2) */
-    input_regs[HPSB_INPUT_REG_ADC_CH0] = 0;
-    input_regs[HPSB_INPUT_REG_ADC_CH1] = 0;
-    input_regs[HPSB_INPUT_REG_ADC_CH2] = 0;
+    /* CT ch1..3 raw: ADC raw (e.g. 0..4095); fill from IO_HPSB_ReadCTRaw(0..2) when wired */
+    input_regs[HPSB_INPUT_REG_CT_CH1_RAW] = 0;
+    input_regs[HPSB_INPUT_REG_CT_CH2_RAW] = 0;
+    input_regs[HPSB_INPUT_REG_CT_CH3_RAW] = 0;
+    /* RMS x100 optional; 0 for v1 */
+    input_regs[HPSB_INPUT_REG_CT_CH1_RMS_X100] = 0;
+    input_regs[HPSB_INPUT_REG_CT_CH2_RMS_X100] = 0;
+    input_regs[HPSB_INPUT_REG_CT_CH3_RMS_X100] = 0;
 }

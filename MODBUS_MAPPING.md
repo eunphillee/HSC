@@ -12,7 +12,7 @@
 | Coils      | 0x          | 01/05/15 | 0   | 8  | Coil0=RLY_EN01, Coil1=RLY_EN02, Coil2=RLY_EN03, Coil3–7=reserved(0) |
 | Discrete   | 1x          | 02   | 0   | 8  | Bit0=ID_BIT1, Bit1=ID_BIT2, Bit2=ID_BIT3, Bit3=ID_BIT4, Bit4–7=reserved(0) |
 | Holding    | 4x          | 03/06/16 | 0   | 4  | Reg0=Status, Reg1=Alarm, Reg2–3=Reserved |
-| Input Regs | 3x          | 04   | 0   | 4  | Reg0=Discrete_image(8bit), Reg1=ADC_ch0, Reg2=ADC_ch1, Reg3=ADC_ch2 (HCT17W current raw, 12-bit) |
+| Input Regs | 3x          | 04   | 0   | 7  | Reg0=DI image, Reg1..3=CT_CH1..3_RAW, Reg4..6=CT_RMS_x100 (optional, 0) |
 
 **Coil response (FC01) example — 8 coils, 1 byte:**  
 `[Byte0]` = Coil0 | (Coil1<<1) | (Coil2<<2) | ... (Coil7<<7). LSB = Coil0.
@@ -29,11 +29,11 @@
 | Coils      | 0x          | 01/05/15 | 0   | 8  | Coil0=SSR1_EN, Coil1=SSR2_EN, Coil2=SSR3_EN, Coil3–7=reserved(0) |
 | Discrete   | 1x          | 02   | 0   | 8  | Bit0=ID_BIT1, Bit1=ID_BIT2, Bit2=ID_BIT3, Bit3=ID_BIT4, Bit4–7=reserved(0) |
 | Holding    | 4x          | 03/06/16 | 0   | 4  | Reg0=Status, Reg1=Alarm, Reg2–3=Reserved |
-| Input Regs | 3x          | 04   | 0   | 2  | Reg0=Discrete_image(8bit), Reg1=Current sense (see below) |
+| Input Regs | 3x          | 04   | 0   | 4  | Reg0=DI image, Reg1..3=ACS_CH1..3_RAW (current raw) |
 
 Bit packing same as HPSB (LSB-first, 8 bits per byte).
 
-**LPSB InputReg[1] (Current sense):** Single 16-bit register. Meaning: ADC raw from ACS712 (or equivalent) current sensor. Typically 12-bit ADC; value is **unscaled raw count**. For ACS712 centered at mid-supply (e.g. 3.3V/2): 0A corresponds to mid-scale raw (e.g. 2048 for 12-bit). MAIN uses this value with configurable threshold; optional offset/scale: `effective_margin = |raw - LPSB_SENSE_MIDSCALE|`, alarm if `effective_margin > LPSB_OC_THRESHOLD_RAW`. Averaging (if any) is done on the LPSB before placing in Reg1.
+**LPSB InputReg[1..3]:** ACS712 (or equivalent) current raw per port; ADC raw, mid-scale = 0 A. See CURRENT_REG_MAP.md.
 
 ---
 
@@ -46,11 +46,11 @@ MAIN uses enum-based addresses (no magic numbers). Polling reads from slaves:
 | HPSB     | Discrete inputs (DI image)              | 02  | 0     | 8     |
 | HPSB     | Coils (relay status)                    | 01  | 0     | 8     |
 | HPSB     | Holding (Status, Alarm)                  | 03  | 0     | 4     |
-| HPSB     | Input regs (ADC ch0–2)              | 04  | 0     | 4     |
+| HPSB     | Input regs (CT raw + RMS optional)   | 04  | 0     | 7     |
 | LPSB     | Discrete inputs                         | 02  | 0     | 8     |
 | LPSB     | Coils (SSR status)                      | 01  | 0     | 8     |
 | LPSB     | Holding (Status, Alarm)                  | 03  | 0     | 4     |
-| LPSB     | Input regs (optional)                    | 04  | 0     | 2     |
+| LPSB     | Input regs (ACS ch1..3 raw)              | 04  | 0     | 4     |
 
 MAIN writes: FC05/15 for Coils, FC06/16 for Holding (e.g. control commands).
 

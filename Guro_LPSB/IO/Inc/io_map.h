@@ -15,7 +15,7 @@ extern "C" {
 #define COIL_COUNT           8
 #define DISCRETE_COUNT       8
 #define HOLDING_REG_COUNT    4
-#define INPUT_REG_COUNT      2
+#define INPUT_REG_COUNT      4
 
 #define COIL_START           0
 #define DISCRETE_START       0
@@ -53,7 +53,9 @@ typedef enum {
 
 typedef enum {
     LPSB_INPUT_REG_DISCRETE_IMAGE = 0,
-    LPSB_INPUT_REG_ADC_OR_RESERVED = 1
+    LPSB_INPUT_REG_ACS_CH1_RAW = 1,
+    LPSB_INPUT_REG_ACS_CH2_RAW = 2,
+    LPSB_INPUT_REG_ACS_CH3_RAW = 3
 } LpsbInputRegIdx_t;
 
 uint8_t IO_LPSB_ReadDiscrete(uint16_t idx);

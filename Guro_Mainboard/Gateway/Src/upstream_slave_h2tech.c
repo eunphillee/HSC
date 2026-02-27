@@ -7,11 +7,16 @@
 #include "upstream_slave_h2tech.h"
 #include "h2tech_address_map.h"
 #include "gateway_actions.h"
+#include "aggregated_status.h"
 
 #define EX_ILLEGAL_FUNCTION  0x01
 #define EX_ILLEGAL_DATA_ADDR 0x02
-#define EX_ILLEGAL_DATA_VAL  0x03  /* Write to read-only (0821~0836, 0853~0860, 0869~0880) */
+#define EX_ILLEGAL_DATA_VAL  0x03  /* Write to read-only */
 #define PULSE_MS_DEFAULT     300u
+
+/* Upstream current block: 4x2000..4x200D (read-only). Modbus start_addr 2000, 14 registers. */
+#define UPSTREAM_CURRENT_START  2000u
+#define UPSTREAM_CURRENT_COUNT  14u
 
 /* FC02 Read Discrete Inputs: H2TECH 1x, h2_dec = start_addr + 1 + i */
 static int handle_fc02(uint16_t start_addr, uint16_t count, uint8_t *response, uint16_t resp_max)
@@ -44,6 +49,44 @@ static int handle_fc02(uint16_t start_addr, uint16_t count, uint8_t *response, u
     /* Clear downstream write-fail alarm when PC reads 1x0880 (ALM12). */
     if (start_addr <= 880u && (start_addr + count) > 880u)
         Gateway_Action_ClearDownstreamWriteFailAlarm();
+    return (int)(2 + byte_count);
+}
+
+/* FC03 Read Holding Registers: 4x2000..4x200D = per-port current raw (read-only) */
+static int handle_fc03(uint16_t start_addr, uint16_t count, const void *p_agg,
+                       uint8_t *response, uint16_t resp_max)
+{
+    if (start_addr != UPSTREAM_CURRENT_START || count > UPSTREAM_CURRENT_COUNT || count == 0) {
+        response[0] = 0x83;
+        response[1] = EX_ILLEGAL_DATA_ADDR;
+        return 2;
+    }
+    const uint16_t byte_count = count * 2u;
+    if (resp_max < 2u + byte_count) return -1;
+
+    const aggregated_status_t *agg = (const aggregated_status_t *)p_agg;
+    response[0] = 0x03;
+    response[1] = (uint8_t)byte_count;
+
+    uint16_t regs[UPSTREAM_CURRENT_COUNT];
+    regs[0] = agg->hpsb_sense_raw[0];
+    regs[1] = agg->hpsb_sense_raw[1];
+    regs[2] = agg->hpsb_sense_raw[2];
+    regs[3] = agg->lpsb1_sense_raw[0];
+    regs[4] = agg->lpsb1_sense_raw[1];
+    regs[5] = agg->lpsb1_sense_raw[2];
+    regs[6] = agg->lpsb2_sense_raw[0];
+    regs[7] = agg->lpsb2_sense_raw[1];
+    regs[8] = agg->lpsb2_sense_raw[2];
+    regs[9] = agg->lpsb3_sense_raw[0];
+    regs[10] = agg->lpsb3_sense_raw[1];
+    regs[11] = agg->lpsb3_sense_raw[2];
+    regs[12] = 0;  /* MAIN DOOR1 current (none) */
+    regs[13] = 0;  /* MAIN DOOR2 current (none) */
+    for (uint16_t i = 0; i < count; i++) {
+        response[2 + i * 2]     = (uint8_t)(regs[i] >> 8);
+        response[2 + i * 2 + 1] = (uint8_t)(regs[i] & 0xFF);
+    }
     return (int)(2 + byte_count);
 }
 
@@ -126,12 +169,13 @@ int UpstreamSlave_HandleRequest(uint8_t fc, uint16_t start_addr, uint16_t count,
     switch (fc) {
     case 0x02:
         return handle_fc02(start_addr, count, response, resp_max);
+    case 0x03:
+        return handle_fc03(start_addr, count, p_agg, response, resp_max);
     case 0x05:
         return handle_fc05(start_addr, write_data, response, resp_max);
     case 0x0F:
         return handle_fc15(start_addr, count, write_data, response, resp_max);
     case 0x01:
-    case 0x03:
     case 0x04:
     case 0x06:
     case 0x10:

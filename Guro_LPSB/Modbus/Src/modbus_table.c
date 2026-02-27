@@ -75,5 +75,8 @@ void ModbusTable_RefreshInputRegs(void)
     for (uint16_t i = 0; i < 8 && i < DISCRETE_COUNT; i++)
         byte |= (discrete_image[i] ? (1u << i) : 0);
     input_regs[LPSB_INPUT_REG_DISCRETE_IMAGE] = (uint16_t)byte;
-    input_regs[LPSB_INPUT_REG_ADC_OR_RESERVED] = 0;
+    /* ACS712 ch1..3 raw: ADC raw; fill from IO when wired */
+    input_regs[LPSB_INPUT_REG_ACS_CH1_RAW] = 0;
+    input_regs[LPSB_INPUT_REG_ACS_CH2_RAW] = 0;
+    input_regs[LPSB_INPUT_REG_ACS_CH3_RAW] = 0;
 }

@@ -16,7 +16,7 @@ extern "C" {
 #define COIL_COUNT           8
 #define DISCRETE_COUNT       8
 #define HOLDING_REG_COUNT    4
-#define INPUT_REG_COUNT     4
+#define INPUT_REG_COUNT     7
 
 #define COIL_START           0
 #define DISCRETE_START       0
@@ -55,12 +55,15 @@ typedef enum {
     HPSB_HOLDING_RESERVED_3 = 3
 } HpsbHoldingRegIdx_t;
 
-/* Input register indices (3x): Reg0=discrete image, Reg1..3=ADC raw ch0..2 (HCT17W current) */
+/* Input register indices (3x): Reg0=DI image, Reg1..3=CT raw ch1..3, Reg4..6=CT RMS x100 (optional, 0 for v1) */
 typedef enum {
     HPSB_INPUT_REG_DISCRETE_IMAGE = 0,
-    HPSB_INPUT_REG_ADC_CH0 = 1,
-    HPSB_INPUT_REG_ADC_CH1 = 2,
-    HPSB_INPUT_REG_ADC_CH2 = 3
+    HPSB_INPUT_REG_CT_CH1_RAW = 1,
+    HPSB_INPUT_REG_CT_CH2_RAW = 2,
+    HPSB_INPUT_REG_CT_CH3_RAW = 3,
+    HPSB_INPUT_REG_CT_CH1_RMS_X100 = 4,
+    HPSB_INPUT_REG_CT_CH2_RMS_X100 = 5,
+    HPSB_INPUT_REG_CT_CH3_RMS_X100 = 6
 } HpsbInputRegIdx_t;
 
 uint8_t IO_HPSB_ReadDiscrete(uint16_t idx);

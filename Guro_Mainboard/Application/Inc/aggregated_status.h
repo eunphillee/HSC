@@ -37,9 +37,9 @@ typedef struct {
 	uint16_t  lpsb1_alarm_reg;
 	uint16_t  lpsb2_alarm_reg;
 	uint16_t  lpsb3_alarm_reg;
-	uint16_t  lpsb1_sense_raw;
-	uint16_t  lpsb2_sense_raw;
-	uint16_t  lpsb3_sense_raw;
+	uint16_t  lpsb1_sense_raw[3];
+	uint16_t  lpsb2_sense_raw[3];
+	uint16_t  lpsb3_sense_raw[3];
 	uint16_t  error_flags;
 } aggregated_status_t;
 
