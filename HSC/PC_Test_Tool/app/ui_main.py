@@ -239,6 +239,7 @@ class MainWindow(QMainWindow):
 
         # ---- Main 2-column ----
         content = QWidget()
+        content.setMinimumHeight(380)
         content_lay = QHBoxLayout(content)
         content_lay.setSpacing(12)
 
@@ -332,6 +333,7 @@ class MainWindow(QMainWindow):
 
         # ---- Bottom: Controls + Log ----
         bottom = QWidget()
+        bottom.setMinimumHeight(200)
         bottom_lay = QHBoxLayout(bottom)
         bottom_lay.setSpacing(12)
 
@@ -396,8 +398,25 @@ class MainWindow(QMainWindow):
 
         self.setCentralWidget(central)
         self.resize(920, 720)
+        self.setMinimumSize(880, 700)
 
         self._log.log_line.connect(self._on_log_line)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        QTimer.singleShot(200, self._print_layout_summary)
+
+    def _print_layout_summary(self):
+        w, h = self.width(), self.height()
+        print("[PC Test Tool] --- Layout verification ---")
+        print(f"  Main window size: {w} x {h}")
+        print("  Layout tree:")
+        print("    - Top bar (Port, Refresh, Baud 9600, Slave ID, Connect/Disconnect, status badge, Auto poll, Interval, Last poll)")
+        print("    - Left column: 3 cards — Card1 ON/OFF 4x4, Card2 Door 2x2, Card3 Alarms 3x4")
+        print("    - Right column: 1 card — Current Monitor table (Name | Raw Value | Min/Max)")
+        print("    - Bottom: 2 cards — Controls (Open Door 1/2, VB 8~12, 0899/0900), Log (filter, Clear, Save CSV)")
+        print("  Visible on 1440x900 (no scroll): Top bar, ON/OFF grid, Door grid, Alarm grid, Current table, Controls, Log")
+        print("[PC Test Tool] ------------------------------")
 
     def _on_log_line(self, line: str):
         self._log_lines.append(line)
