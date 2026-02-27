@@ -24,7 +24,7 @@ from .h2tech_map import (
     DOOR_OPEN_1_COIL, DOOR_OPEN_2_COIL,
     VB_ONOFF_8_COIL, VB_ONOFF_12_COIL,
     INVALID_COIL_899, INVALID_COIL_900,
-    MAIN_IO_ENABLED,
+    MAIN_IO_ENABLED, MAIN_DI_REG, MAIN_DO_REG,
 )
 
 # ---- Industrial dark theme QSS ----
@@ -138,6 +138,8 @@ def card_frame(title: str = "") -> tuple[QFrame, QVBoxLayout]:
 
 class MainWindow(QMainWindow):
     request_poll = pyqtSignal()
+    request_main_do_toggle = pyqtSignal(int)
+    request_main_io_read = pyqtSignal()
 
     ONOFF_LABELS = [
         "Door1", "Door2", "HPSB Fan", "Heated Bench", "HPSB Spare",
@@ -171,6 +173,7 @@ class MainWindow(QMainWindow):
         self._current_min: list[int | None] = [None] * 14
         self._current_max: list[int | None] = [None] * 14
         self._log_lines: list[str] = []
+        self._main_io_pending_log = False
         self._build_ui()
         self._refresh_ports()
         self._set_connected_ui(False)
@@ -181,6 +184,9 @@ class MainWindow(QMainWindow):
         self._worker.alarms_result.connect(self._on_alarms)
         self._worker.cmd_onoff_result.connect(self._on_cmd_onoff)
         self._worker.currents_result.connect(self._on_currents)
+        self._worker.main_io_result.connect(self._on_main_io)
+        self.request_main_do_toggle.connect(self._worker.on_request_main_do_toggle, Qt.ConnectionType.QueuedConnection)
+        self.request_main_io_read.connect(self._worker.on_request_main_io_read, Qt.ConnectionType.QueuedConnection)
 
     def _build_ui(self):
         central = QWidget()
@@ -280,7 +286,14 @@ class MainWindow(QMainWindow):
             grid_do.addWidget(led, i // 2, (i % 2) * 3)
             grid_do.addWidget(QLabel(main_do_labels[i]), i // 2, (i % 2) * 3 + 1)
             grid_do.addWidget(btn, i // 2, (i % 2) * 3 + 2)
+            if MAIN_IO_ENABLED:
+                btn.clicked.connect(lambda checked=False, idx=i: self.request_main_do_toggle.emit(idx))
         lay_main_io.addLayout(grid_do)
+        if MAIN_IO_ENABLED:
+            btn_read_main_io = QPushButton("Read once")
+            btn_read_main_io.clicked.connect(self._read_main_io_once)
+            lay_main_io.addWidget(btn_read_main_io)
+            self._read_buttons.append(btn_read_main_io)
         left_col.addWidget(card_main_io)
 
         # Card A: ON/OFF 1~16
@@ -684,6 +697,41 @@ class MainWindow(QMainWindow):
         self._log.log("FC03", CURRENT_START, CURRENT_COUNT, "OK" if ok else "Fail", err or "")
         self._apply_currents(ok, data, err)
         self._update_last_poll()
+
+    def _read_main_io_once(self):
+        if not self._client.connected:
+            return
+        self._main_io_pending_log = True
+        self.request_main_io_read.emit()
+
+    def _apply_main_io(self, ok: bool, di: list | None, do: list | None, err: str | None):
+        if ok and di is not None:
+            for i in range(min(8, len(di))):
+                self._main_di_leds[i].set_state(bool(di[i]))
+            for i in range(len(di), 8):
+                self._main_di_leds[i].set_state(False)
+        else:
+            for led in self._main_di_leds:
+                led.set_state(False)
+        if ok and do is not None:
+            for i in range(min(4, len(do))):
+                self._main_do_leds[i].set_state(bool(do[i]))
+            for i in range(len(do), 4):
+                self._main_do_leds[i].set_state(False)
+        else:
+            for led in self._main_do_leds:
+                led.set_state(False)
+
+    def _on_main_io(self, ok: bool, di: list | None, do: list | None, err: str | None, from_toggle: bool):
+        self._apply_main_io(ok, di, do, err)
+        if from_toggle:
+            do_val = sum((b << i) for i, b in enumerate(do[:4])) if do else 0
+            self._log.log("FC06", MAIN_DO_REG, f"bitmap=0x{do_val:X}", "OK" if ok else "Fail", err or "")
+        elif self._main_io_pending_log:
+            self._main_io_pending_log = False
+            di_val = sum((b << i) for i, b in enumerate(di[:8])) if di else 0
+            do_val = sum((b << i) for i, b in enumerate(do[:4])) if do else 0
+            self._log.log("FC03", MAIN_DI_REG, f"2 DI=0x{di_val:02X} DO=0x{do_val:X}", "OK" if ok else "Fail", err or "")
 
     def _apply_onoff(self, ok: bool, data: list | None, err: str | None):
         if ok and data is not None:

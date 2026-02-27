@@ -101,6 +101,11 @@ uint8_t IO_Main_ReadDO(MainDoChannel_t ch);
 void    IO_Main_WriteDO(MainDoChannel_t ch, uint8_t value);
 void    IO_Main_ReadAllDI(uint8_t *bits);
 
+/** MAIN I/O Modbus 4x2100/4x2101: DI bitmap (8 bits), DO bitmap (4 bits). */
+uint16_t IO_Main_ReadDI_Bitmap(void);
+uint16_t IO_Main_ReadDO_Bitmap(void);
+void     IO_Main_WriteDO_Bitmap(uint16_t bitmap);
+
 /** HPSB current sensing (HCT17W): ADC ch 0,1,2. Returns raw ADC count; stub returns 0 until ADC wired. */
 uint16_t IO_ReadHpsbCurrentRaw(uint8_t ch_0_to_2);
 

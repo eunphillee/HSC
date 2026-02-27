@@ -44,6 +44,30 @@ uint8_t IO_Main_ReadDO(MainDoChannel_t ch)
     return (HAL_GPIO_ReadPin(main_do_map[ch].port, main_do_map[ch].pin) == GPIO_PIN_SET) ? 1 : 0;
 }
 
+uint16_t IO_Main_ReadDI_Bitmap(void)
+{
+    uint16_t v = 0;
+    for (int i = 0; i < MAIN_DI_COUNT && i < 16; i++)
+        v |= (IO_Main_ReadDI((MainDiChannel_t)i) ? (1u << i) : 0);
+    return v;
+}
+
+uint16_t IO_Main_ReadDO_Bitmap(void)
+{
+    uint16_t v = 0;
+    for (int i = 0; i < MAIN_DO_COUNT && i < 4; i++)
+        v |= (IO_Main_ReadDO((MainDoChannel_t)i) ? (1u << i) : 0);
+    return v;
+}
+
+void IO_Main_WriteDO_Bitmap(uint16_t bitmap)
+{
+    /* Only bits 0..3 valid; bit3 RESERVED (write 0). */
+    uint16_t v = bitmap & 0x0Fu;
+    for (int i = 0; i < MAIN_DO_COUNT; i++)
+        IO_Main_WriteDO((MainDoChannel_t)i, (v >> i) & 1u);
+}
+
 void IO_Main_ReadAllDI(uint8_t *bits)
 {
     for (int i = 0; i < MAIN_DI_COUNT; i++)
