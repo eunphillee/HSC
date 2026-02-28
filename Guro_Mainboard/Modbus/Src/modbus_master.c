@@ -6,6 +6,7 @@
 #include "modbus_rtu.h"
 #include "modbus_cfg.h"
 #include "main.h"
+#include "led_status.h"
 #include <string.h>
 
 extern UART_HandleTypeDef huart1;
@@ -58,6 +59,7 @@ static void send_request(void)
     set_de_tx();
     HAL_UART_Transmit(&MODBUS_UART, tx_buf, (uint16_t)(pdu_len + 2), 100);
     set_de_rx();
+    LED_Status_OnRS485Activity();
     rx_len = 0;
     response_deadline = HAL_GetTick() + MODBUS_RESPONSE_TIMEOUT_MS;
     state = MST_WAIT_RESPONSE;
@@ -108,6 +110,7 @@ static void parse_response(void)
     if (ok == 0) {
         last_slave_responded = slave;
         comm_ok[SLAVE_TO_INDEX(e.slave_id)] = 1;
+        LED_Status_OnRS485Activity();
     }
     state = MST_IDLE;
 }
@@ -192,6 +195,7 @@ int ModbusMaster_WriteCoil(SlaveId_t slave, uint16_t coil_addr, uint8_t value)
     set_de_tx();
     HAL_StatusTypeDef s = HAL_UART_Transmit(&MODBUS_UART, pdu, (uint16_t)(len + 2), 100);
     set_de_rx();
+    if (s == HAL_OK) LED_Status_OnRS485Activity();
     return (s == HAL_OK) ? 0 : -1;
 }
 
@@ -203,6 +207,7 @@ int ModbusMaster_WriteHoldingReg(SlaveId_t slave, uint16_t reg_addr, uint16_t va
     set_de_tx();
     HAL_StatusTypeDef s = HAL_UART_Transmit(&MODBUS_UART, pdu, (uint16_t)(len + 2), 100);
     set_de_rx();
+    if (s == HAL_OK) LED_Status_OnRS485Activity();
     return (s == HAL_OK) ? 0 : -1;
 }
 

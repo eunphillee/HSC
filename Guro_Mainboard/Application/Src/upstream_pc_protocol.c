@@ -4,6 +4,7 @@
  */
 #include "upstream_pc_protocol.h"
 #include "main.h"
+#include "led_status.h"
 #include <string.h>
 
 extern UART_HandleTypeDef huart2;
@@ -42,6 +43,7 @@ static void parse_frame(uint8_t len)
 	uint8_t chk = xor_checksum(rx_buf + 1, (size_t)(len - 2));
 	if (chk != rx_buf[len - 2]) return;
 
+	LED_Status_OnRS485Activity();
 	uint8_t cmd = rx_buf[1];
 	uint8_t payload_len = len - 4; /* between CMD and CHK */
 	const uint8_t *payload = payload_len > 0 ? &rx_buf[2] : NULL;
@@ -131,6 +133,7 @@ void UpstreamPC_SetCommandCallback(upstream_cmd_cb_t cb)
 void UpstreamPC_TxCpltCallback(void)
 {
 	tx_busy = 0;
+	LED_Status_OnRS485Activity();
 }
 
 /* Override weak HAL callbacks for USART2 (PC link). */

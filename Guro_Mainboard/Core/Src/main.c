@@ -27,6 +27,7 @@
 #include "upstream_pc_protocol.h"
 #include "modbus_master.h"
 #include "gateway_actions.h"
+#include "led_status.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -113,6 +114,7 @@ int main(void)
   ModbusMaster_Init();
   AggregatedStatus_Clear(&aggregated_status);
   UpstreamPC_Init();
+  LED_Status_Init();
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -122,6 +124,7 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    LED_Status_Tick_1ms();
     AppScheduler_Update();
 
     if (AppScheduler_IsDue(TASK_UPSTREAM_POLL))
@@ -366,9 +369,9 @@ static void MX_GPIO_Init(void)
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOC, PC_RESET_EN_Pin|PC_ON_EN_Pin, GPIO_PIN_RESET);
 
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, RS485_DE_Pin|LED03_Pin|LED04_Pin|LED01_Pin
-                          |LED02_Pin, GPIO_PIN_RESET);
+  /*Configure GPIO pin Output Level (LOW active: LED01=ON(LOW), LED02~04=OFF(HIGH)) */
+  HAL_GPIO_WritePin(GPIOB, RS485_DE_Pin|LED01_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOB, LED02_Pin|LED03_Pin|LED04_Pin, GPIO_PIN_SET);
 
   /*Configure GPIO pins : RELAY3_EN_Pin RELAY4_EN_Pin RELAY1_EN_Pin RELAY2_EN_Pin */
   GPIO_InitStruct.Pin = RELAY3_EN_Pin|RELAY4_EN_Pin|RELAY1_EN_Pin|RELAY2_EN_Pin;
