@@ -4,6 +4,7 @@
  *        Concrete mapping: 0821~0836, 0853~0860, 0869~0880, 0885~0891, 0892~0898.
  *        0899/0900 not in table -> exception 0x02.
  */
+#include <stddef.h>
 #include "h2tech_address_map.h"
 
 static volatile uint8_t g_agg_bits[(AGG_BIT_COUNT + 7) / 8] = {0};
@@ -31,8 +32,8 @@ void H2Map_WriteAggBit(uint16_t agg_bit_index, bool v) {
     bit_set(g_agg_bits, agg_bit_index, v);
 }
 
-#define H2E(area, dec, rw, src, agg_bit, act, label) \
-    { .h2_dec=(dec), .area=(area), .rw=(rw), .src=(src), .agg_bit_index=(agg_bit), .action=(act), .name=(label) }
+#define H2E(_area, _dec, _rw, _src, _agg_bit, _act, _label) \
+    { .h2_dec=(_dec), .area=(_area), .rw=(_rw), .src=(_src), .agg_bit_index=(_agg_bit), .action=(_act), .name=(_label) }
 
 static const H2_MapEntry_t g_map[] = {
     /* 1x0821~0836 : ON/OFF 1~16 status (READ) */

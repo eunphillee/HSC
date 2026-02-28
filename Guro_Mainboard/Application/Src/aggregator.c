@@ -12,6 +12,15 @@
 #define LPSB_SENSE_MIDSCALE    2048u   /* 12-bit mid-scale (0A for ACS712); alarm if |raw - mid| > threshold */
 #define HPSB_OC_CYCLES_REQUIRED 3u    /* Consecutive cycles above threshold before ALM5/6/7 */
 
+static int lpsb_oc(const uint16_t raw[3])
+{
+	for (int i = 0; i < 3; i++) {
+		if (raw[i] > LPSB_SENSE_MIDSCALE + LPSB_OC_THRESHOLD_RAW) return 1;
+		if (raw[i] < LPSB_SENSE_MIDSCALE && (LPSB_SENSE_MIDSCALE - raw[i]) > LPSB_OC_THRESHOLD_RAW) return 1;
+	}
+	return 0;
+}
+
 void Aggregator_Update(aggregated_status_t *out)
 {
 	if (!out) return;
@@ -120,13 +129,6 @@ void Aggregator_Update(aggregated_status_t *out)
 	H2Map_WriteAggBit(AGG_BIT_ALM_6, (out->hpsb_alarm_reg & (1u << 1)) ? true : false);
 	H2Map_WriteAggBit(AGG_BIT_ALM_7, (out->hpsb_alarm_reg & (1u << 2)) ? true : false);
 	/* LPSB overcurrent: any of 3 ports over threshold (mid-scale ± margin) sets ALM8/9/10 */
-	static int lpsb_oc(const uint16_t raw[3]) {
-		for (int i = 0; i < 3; i++) {
-			if (raw[i] > LPSB_SENSE_MIDSCALE + LPSB_OC_THRESHOLD_RAW) return 1;
-			if (raw[i] < LPSB_SENSE_MIDSCALE && (LPSB_SENSE_MIDSCALE - raw[i]) > LPSB_OC_THRESHOLD_RAW) return 1;
-		}
-		return 0;
-	}
 	H2Map_WriteAggBit(AGG_BIT_ALM_8, lpsb_oc(out->lpsb1_sense_raw) ? true : false);
 	H2Map_WriteAggBit(AGG_BIT_ALM_9, lpsb_oc(out->lpsb2_sense_raw) ? true : false);
 	H2Map_WriteAggBit(AGG_BIT_ALM_10, lpsb_oc(out->lpsb3_sense_raw) ? true : false);

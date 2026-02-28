@@ -152,6 +152,7 @@ void ModbusMaster_Poll(void)
             }
             if (rx_len >= 5) {
                 uint8_t exp_slave = rx_buf[0];
+                (void)exp_slave;
                 uint8_t fc = rx_buf[1];
                 if (fc & 0x80) {
                     state = MST_IDLE;

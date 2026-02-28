@@ -73,13 +73,13 @@ static int handle_fc03(uint16_t start_addr, uint16_t count, const void *p_agg,
         }
         if (resp_max < 2u + 4u) return -1;
         uint16_t di = IO_Main_ReadDI_Bitmap();
-        uint16_t do = IO_Main_ReadDO_Bitmap();
+        uint16_t do_val = IO_Main_ReadDO_Bitmap();
         response[0] = 0x03;
         response[1] = 4u;
         response[2] = (uint8_t)(di >> 8);
         response[3] = (uint8_t)(di & 0xFF);
-        response[4] = (uint8_t)(do >> 8);
-        response[5] = (uint8_t)(do & 0xFF);
+        response[4] = (uint8_t)(do_val >> 8);
+        response[5] = (uint8_t)(do_val & 0xFF);
         return 6;
     }
     if (start_addr == UPSTREAM_MAIN_IO_DO_REG) {

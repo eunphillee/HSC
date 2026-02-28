@@ -81,12 +81,24 @@ static int build_status_frame(const aggregated_status_t *s, uint8_t *out, size_t
 	out[i++] = (uint8_t)(s->hpsb_status_reg >> 8);
 	out[i++] = (uint8_t)(s->hpsb_alarm_reg >> 0);
 	out[i++] = (uint8_t)(s->hpsb_alarm_reg >> 8);
-	out[i++] = s->lpsb_coils;
-	out[i++] = s->lpsb_discrete;
-	out[i++] = (uint8_t)(s->lpsb_status_reg >> 0);
-	out[i++] = (uint8_t)(s->lpsb_status_reg >> 8);
-	out[i++] = (uint8_t)(s->lpsb_alarm_reg >> 0);
-	out[i++] = (uint8_t)(s->lpsb_alarm_reg >> 8);
+	/* Backward-compatible compact LPSB summary:
+	 * - lpsb_coils: LPSB1 coils[0..2] packed into bits[0..2]
+	 * - lpsb_discrete/status_reg: not modeled in aggregated_status_t -> 0
+	 * - lpsb_alarm_reg: use LPSB1 alarm reg
+	 */
+	uint8_t  lpsb_coils = 0;
+	lpsb_coils |= (s->lpsb1_coils[0] ? (1u << 0) : 0);
+	lpsb_coils |= (s->lpsb1_coils[1] ? (1u << 1) : 0);
+	lpsb_coils |= (s->lpsb1_coils[2] ? (1u << 2) : 0);
+	uint8_t  lpsb_discrete = 0;
+	uint16_t lpsb_status_reg = 0;
+	uint16_t lpsb_alarm_reg = s->lpsb1_alarm_reg;
+	out[i++] = lpsb_coils;
+	out[i++] = lpsb_discrete;
+	out[i++] = (uint8_t)(lpsb_status_reg >> 0);
+	out[i++] = (uint8_t)(lpsb_status_reg >> 8);
+	out[i++] = (uint8_t)(lpsb_alarm_reg >> 0);
+	out[i++] = (uint8_t)(lpsb_alarm_reg >> 8);
 	out[i++] = (uint8_t)(s->error_flags >> 0);
 	out[i++] = (uint8_t)(s->error_flags >> 8);
 	if (i + 3 > out_size) return -1;
