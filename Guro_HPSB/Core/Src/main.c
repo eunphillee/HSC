@@ -21,7 +21,8 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "led_status.h"
+#include "modbus_slave.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -94,7 +95,8 @@ int main(void)
   MX_ADC_Init();
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
-
+  ModbusSlave_Init();
+  LED_Status_Init();
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -104,6 +106,8 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    LED_Status_Tick_1ms();
+    ModbusSlave_Poll();
   }
   /* USER CODE END 3 */
 }
@@ -277,12 +281,13 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOA, RLY_EN01_Pin|RLY_EN02_Pin|RLY_EN03_Pin|RS485_DE_Pin
-                          |LED04_Pin, GPIO_PIN_RESET);
+  /*Configure GPIO pin Output Level (LOW active: LED01=ON(LOW), LED02/03/04=OFF(HIGH)) */
+  HAL_GPIO_WritePin(GPIOA, RLY_EN01_Pin|RLY_EN02_Pin|RLY_EN03_Pin|RS485_DE_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOA, LED04_Pin, GPIO_PIN_SET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, LED01_Pin|LED02_Pin|LED03_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOB, LED01_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOB, LED02_Pin|LED03_Pin, GPIO_PIN_SET);
 
   /*Configure GPIO pins : RLY_EN01_Pin RLY_EN02_Pin RLY_EN03_Pin LED04_Pin */
   GPIO_InitStruct.Pin = RLY_EN01_Pin|RLY_EN02_Pin|RLY_EN03_Pin|LED04_Pin;

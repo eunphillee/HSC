@@ -72,6 +72,9 @@ uint8_t IO_HPSB_ReadCoil(uint16_t idx);
 void    IO_HPSB_ReadAllDiscrete(uint8_t *bits);
 void    IO_HPSB_ReadAllCoils(uint8_t *bits);
 
+/** Whether any of the 3 relay outputs is active (for LED2). Replace with actual output when protection/force-off is added. */
+uint8_t HPSB_IsAnyRelayActive(void);
+
 #ifdef __cplusplus
 }
 #endif

@@ -51,3 +51,11 @@ void IO_HPSB_ReadAllCoils(uint8_t *bits)
     for (uint16_t i = 0; i < COIL_COUNT; i++)
         bits[i] = IO_HPSB_ReadCoil(i);
 }
+
+uint8_t HPSB_IsAnyRelayActive(void)
+{
+    if (IO_HPSB_ReadCoil(0)) return 1;
+    if (IO_HPSB_ReadCoil(1)) return 1;
+    if (IO_HPSB_ReadCoil(2)) return 1;
+    return 0;
+}

@@ -7,6 +7,7 @@
 #include "modbus_cfg.h"
 #include "modbus_table.h"
 #include "io_map.h"
+#include "led_status.h"
 #include "main.h"
 #include <string.h>
 
@@ -33,6 +34,7 @@ static void send_response(uint8_t *pdu, size_t pdu_len)
     set_de_tx();
     HAL_UART_Transmit(&MODBUS_UART, pdu, (uint16_t)(pdu_len + 2), 100);
     set_de_rx();
+    LED_Status_OnRS485Activity();
 }
 
 static void process_frame(void)
@@ -40,6 +42,8 @@ static void process_frame(void)
     if (rx_len < 4) return;
     if (rx_buf[0] != MODBUS_SLAVE_ADDR) return;
     if (ModbusRTU_CRC16Check(rx_buf, rx_len) != 0) return;
+
+    LED_Status_OnRS485Activity();  /* valid RX */
 
     uint8_t fc = rx_buf[1];
     uint8_t tx_pdu[MODBUS_MAX_PDU_LEN];
