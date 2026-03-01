@@ -64,6 +64,9 @@ uint8_t IO_LPSB_ReadCoil(uint16_t idx);
 void    IO_LPSB_ReadAllDiscrete(uint8_t *bits);
 void    IO_LPSB_ReadAllCoils(uint8_t *bits);
 
+/** @return 1 if any of SSR1/SSR2/SSR3 (channel 0,1,2) output is ON, 0 otherwise. For LED2. */
+uint8_t LPSB_IsAnyOutputActive(void);
+
 #ifdef __cplusplus
 }
 #endif

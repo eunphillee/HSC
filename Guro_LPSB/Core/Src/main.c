@@ -21,7 +21,8 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "led_status.h"
+#include "modbus_slave.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -94,7 +95,8 @@ int main(void)
   MX_USART1_UART_Init();
   MX_ADC_Init();
   /* USER CODE BEGIN 2 */
-
+  ModbusSlave_Init();
+  LED_Status_Init();
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -104,6 +106,8 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    LED_Status_Tick_1ms();
+    ModbusSlave_Poll();
   }
   /* USER CODE END 3 */
 }
@@ -279,10 +283,12 @@ static void MX_GPIO_Init(void)
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOA, SSR1_EN_Pin|SSR2_EN_Pin|SSR3_EN_Pin|RS485_DE_Pin
-                          |LED04_Pin, GPIO_PIN_RESET);
+                          , GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOA, LED04_Pin, GPIO_PIN_SET);
 
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, LED01_Pin|LED02_Pin|LED03_Pin, GPIO_PIN_RESET);
+  /*Configure GPIO pin Output Level (LOW active: LED01=ON(LOW), LED02/03/04=OFF(HIGH)) */
+  HAL_GPIO_WritePin(GPIOB, LED01_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOB, LED02_Pin|LED03_Pin, GPIO_PIN_SET);
 
   /*Configure GPIO pins : SSR1_EN_Pin SSR2_EN_Pin SSR3_EN_Pin LED04_Pin */
   GPIO_InitStruct.Pin = SSR1_EN_Pin|SSR2_EN_Pin|SSR3_EN_Pin|LED04_Pin;

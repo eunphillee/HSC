@@ -49,3 +49,8 @@ void IO_LPSB_ReadAllCoils(uint8_t *bits)
     for (uint16_t i = 0; i < COIL_COUNT; i++)
         bits[i] = IO_LPSB_ReadCoil(i);
 }
+
+uint8_t LPSB_IsAnyOutputActive(void)
+{
+    return IO_LPSB_ReadCoil(LPSB_COIL_SSR1) || IO_LPSB_ReadCoil(LPSB_COIL_SSR2) || IO_LPSB_ReadCoil(LPSB_COIL_SSR3);
+}
