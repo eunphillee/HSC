@@ -1,6 +1,6 @@
 """
-Modbus RTU client wrapper using pymodbus. All I/O is synchronous; run from worker thread.
-Compatible with pymodbus 2.5.3 (use pymodbus.client.sync.ModbusSerialClient, unit= for slave).
+Modbus RTU client for Mainboard only. All I/O synchronous; run from worker thread.
+Compatible with pymodbus 2.5.3 (ModbusSerialClient, unit= for slave).
 """
 import threading
 from typing import Callable
@@ -8,25 +8,22 @@ from typing import Callable
 from pymodbus.client.sync import ModbusSerialClient
 from pymodbus.exceptions import ModbusException
 
-from .h2tech_map import (
-    ONOFF_START, ONOFF_COUNT,
-    DOOR_START, DOOR_COUNT,
-    ALARMS_START, ALARMS_COUNT,
-    CMD_ONOFF_START, CMD_ONOFF_COUNT,
-    CURRENT_START, CURRENT_COUNT,
-    DOOR_OPEN_1_COIL, DOOR_OPEN_2_COIL,
-    VB_ONOFF_8_COIL, VB_ONOFF_9_COIL, VB_ONOFF_10_COIL, VB_ONOFF_11_COIL, VB_ONOFF_12_COIL,
-    INVALID_COIL_899, INVALID_COIL_900,
-    MAIN_IO_ENABLED, MAIN_DI_REG, MAIN_DO_REG, MAIN_DI_COUNT, MAIN_DO_COUNT,
-    MAIN_SLAVE_ID_DEFAULT,
+from .address_map import (
+    MAINBOARD_SLAVE_ID_DEFAULT,
+    MAIN_DI_REG,
+    MAIN_DI_COUNT,
+    MAIN_DO_REG,
+    MAIN_DO_COUNT,
+    PC_CTRL_REG,
+    PC_LED_IN_REG,
 )
 
 
 def format_modbus_error(resp=None, exc=None) -> str:
     """
     Safe error message from Modbus response or Python exception.
-    - resp: response object with isError(); use exception_code only if present (not on ModbusIOException).
-    - exc: Python exception; never access exception_code, use type and str only.
+    - resp: use exception_code only if present (not on ModbusIOException).
+    - exc: never access exception_code; use type and str only.
     """
     if resp is not None:
         if getattr(resp, "isError", lambda: False)():
@@ -45,21 +42,36 @@ def format_modbus_error(resp=None, exc=None) -> str:
     return "Unknown error"
 
 
+def _response_exception_code(resp) -> int | None:
+    """Modbus exception code from response if error; else None."""
+    if resp is None:
+        return None
+    if not getattr(resp, "isError", lambda: False)():
+        return None
+    return getattr(resp, "exception_code", None)
+
+
 class ModbusClient:
-    """Thread-safe Modbus RTU client. Call from worker thread only."""
+    """Thread-safe Modbus RTU client for Mainboard. Call from worker thread only."""
     _lock = threading.Lock()
 
     def __init__(self):
         self._client: ModbusSerialClient | None = None
         self._port: str = ""
-        self._slave_id: int = MAIN_SLAVE_ID_DEFAULT
+        self._baudrate: int = 9600
+        self._slave_id: int = MAINBOARD_SLAVE_ID_DEFAULT
         self._request_logger: Callable[[int, str, int | str, int | str], None] | None = None
+        self._response_logger: Callable[[bool, int | None], None] | None = None
 
     def set_request_logger(self, callback: Callable[[int, str, int | str, int | str], None] | None):
-        """Set callback(unit, func, addr, count_or_value) to log each request. Called from worker thread."""
+        """Set callback(unit, func, addr, count_or_value) for each request (TX)."""
         self._request_logger = callback
 
-    def connect(self, port: str, baudrate: int = 9600, slave_id: int = MAIN_SLAVE_ID_DEFAULT) -> tuple[bool, str]:
+    def set_response_logger(self, callback: Callable[[bool, int | None], None] | None):
+        """Set callback(ok, exception_code) for each response (RX). exception_code is None on success or non-Modbus error."""
+        self._response_logger = callback
+
+    def connect(self, port: str, baudrate: int = 9600, slave_id: int = MAINBOARD_SLAVE_ID_DEFAULT) -> tuple[bool, str]:
         """Connect to serial port. Returns (success, message)."""
         with self._lock:
             if self._client and self._client.is_socket_open():
@@ -76,10 +88,11 @@ class ModbusClient:
                 if not self._client.connect():
                     return False, "Failed to open port"
                 self._port = port
+                self._baudrate = baudrate
                 self._slave_id = slave_id
                 return True, "Connected"
             except Exception as e:
-                return False, str(e)
+                return False, format_modbus_error(exc=e)
 
     def disconnect(self) -> None:
         with self._lock:
@@ -91,80 +104,74 @@ class ModbusClient:
                 self._client = None
             self._port = ""
 
+    def _ensure_socket_open(self) -> tuple[bool, str | None]:
+        """
+        If client exists but socket is closed (e.g. after timeout), try reconnect once.
+        Caller must hold _lock. Never calls disconnect(); on failure returns (False, err).
+        """
+        if self._client is None:
+            return False, "Not connected"
+        if self._client.is_socket_open():
+            return True, None
+        try:
+            old = self._client
+            self._client = ModbusSerialClient(
+                method="rtu",
+                port=self._port,
+                baudrate=self._baudrate,
+                bytesize=8,
+                parity="N",
+                stopbits=1,
+            )
+            if not self._client.connect():
+                self._client = old
+                return False, "Reconnect failed (port open failed)"
+            try:
+                old.close()
+            except Exception:
+                pass
+            return True, None
+        except Exception as e:
+            if self._client is not old:
+                self._client = old
+            return False, format_modbus_error(exc=e)
+
     @property
     def connected(self) -> bool:
+        """True while user has connected and not disconnected. Does not drop on request failure."""
         with self._lock:
-            return self._client is not None and self._client.is_socket_open()
+            return self._client is not None
 
-    def _read_discrete(self, start: int, count: int) -> tuple[bool, list[int] | None, str | None]:
-        """FC02 Read Discrete Inputs. Returns (ok, bits or None, exception_message)."""
+    def read_raw_available(self) -> list[int]:
+        """Read any bytes currently in the serial RX buffer (e.g. board TX 0xAA). Returns list of byte values."""
         with self._lock:
             if not self._client or not self._client.is_socket_open():
-                return False, None, "Not connected"
-            if self._request_logger:
-                self._request_logger(self._slave_id, "FC02", start, count)
+                return []
+            # pymodbus may store serial as socket, connection, client, or _connection
+            sock = None
+            for name in ("socket", "connection", "client", "_connection"):
+                c = getattr(self._client, name, None)
+                if c is not None and callable(getattr(c, "read", None)) and hasattr(c, "in_waiting"):
+                    sock = c
+                    break
+            if sock is None:
+                return []
+            out: list[int] = []
             try:
-                rr = self._client.read_discrete_inputs(
-                    address=start,
-                    count=count,
-                    unit=self._slave_id,
-                )
-                if rr.isError():
-                    return False, None, format_modbus_error(resp=rr)
-                # LSB-first: first address = bit0
-                raw = getattr(rr, "bits", None) or []
-                bits = [1 if (i < len(raw) and raw[i]) else 0 for i in range(count)]
-                return True, bits, None
-            except TypeError as e:
-                return False, None, format_modbus_error(exc=e)
-            except ModbusException as e:
-                return False, None, format_modbus_error(exc=e)
-            except Exception as e:
-                return False, None, format_modbus_error(exc=e)
+                n = getattr(sock, "in_waiting", 0) or 0
+                if n > 0:
+                    data = sock.read(min(n, 256))
+                    out = list(data)
+            except Exception:
+                pass
+            return out
 
-    def read_onoff(self) -> tuple[bool, list[int] | None, str | None]:
-        return self._read_discrete(ONOFF_START, ONOFF_COUNT)
-
-    def read_door_sensors(self) -> tuple[bool, list[int] | None, str | None]:
-        return self._read_discrete(DOOR_START, DOOR_COUNT)
-
-    def read_alarms(self) -> tuple[bool, list[int] | None, str | None]:
-        return self._read_discrete(ALARMS_START, ALARMS_COUNT)
-
-    def read_cmd_onoff(self) -> tuple[bool, list[int] | None, str | None]:
-        return self._read_discrete(CMD_ONOFF_START, CMD_ONOFF_COUNT)
-
-    def read_currents(self) -> tuple[bool, list[int] | None, str | None]:
-        """FC03 start=2000 count=14 only."""
+    def read_di_bitmap(self) -> tuple[bool, list[int] | None, str | None]:
+        """FC03 read MAIN_DI_REG count=1 → 8 bits DI_01..DI_08. Returns (ok, bits[8] or None, err)."""
         with self._lock:
-            if not self._client or not self._client.is_socket_open():
-                return False, None, "Not connected"
-            if self._request_logger:
-                self._request_logger(self._slave_id, "FC03", CURRENT_START, CURRENT_COUNT)
-            try:
-                rr = self._client.read_holding_registers(
-                    address=CURRENT_START,
-                    count=CURRENT_COUNT,
-                    unit=self._slave_id,
-                )
-                if rr.isError():
-                    return False, None, format_modbus_error(resp=rr)
-                regs = list(rr.registers) if rr.registers else []
-                return True, regs, None
-            except TypeError as e:
-                return False, None, format_modbus_error(exc=e)
-            except ModbusException as e:
-                return False, None, format_modbus_error(exc=e)
-            except Exception as e:
-                return False, None, format_modbus_error(exc=e)
-
-    def read_main_io(self) -> tuple[bool, list[int] | None, list[int] | None, str | None]:
-        """FC03 MAIN_DI_REG count=2 -> [DI bitmap 8 bits, DO bitmap 4 bits]. Returns (ok, di_bits, do_bits, err)."""
-        if not MAIN_IO_ENABLED:
-            return False, None, None, "MAIN IO not enabled"
-        with self._lock:
-            if not self._client or not self._client.is_socket_open():
-                return False, None, None, "Not connected"
+            ok, err = self._ensure_socket_open()
+            if not ok:
+                return False, None, err or "Not connected"
             if self._request_logger:
                 self._request_logger(self._slave_id, "FC03", MAIN_DI_REG, 2)
             try:
@@ -173,95 +180,133 @@ class ModbusClient:
                     count=2,
                     unit=self._slave_id,
                 )
+                if self._response_logger:
+                    self._response_logger(not rr.isError(), _response_exception_code(rr))
                 if rr.isError():
-                    return False, None, None, format_modbus_error(resp=rr)
+                    return False, None, format_modbus_error(resp=rr)
                 regs = list(rr.registers) if rr.registers else [0, 0]
-                di = [(regs[0] >> i) & 1 for i in range(8)]
-                do = [(regs[1] >> i) & 1 for i in range(4)]
-                return True, di, do, None
-            except TypeError as e:
-                return False, None, None, format_modbus_error(exc=e)
-            except ModbusException as e:
-                return False, None, None, format_modbus_error(exc=e)
+                di_val = regs[0] if len(regs) > 0 else 0
+                bits = [(di_val >> i) & 1 for i in range(MAIN_DI_COUNT)]
+                return True, bits, None
             except Exception as e:
-                return False, None, None, format_modbus_error(exc=e)
+                if self._response_logger:
+                    self._response_logger(False, None)
+                return False, None, format_modbus_error(exc=e)
 
-    def write_main_do_bitmap(self, do_bits: list[int]) -> tuple[bool, str | None]:
-        """FC06 write single register MAIN_DO_REG with 4-bit DO bitmap (do_bits[0..3])."""
-        if not MAIN_IO_ENABLED:
-            return False, "MAIN IO not enabled"
-        val = 0
-        for i in range(min(4, len(do_bits))):
-            if do_bits[i]:
-                val |= 1 << i
+    def read_pc_led_in(self) -> tuple[bool, bool | None, str | None]:
+        """FC03 read PC_LED_IN_REG count=1 → bit0 = PC_LED_IN. Returns (ok, state or None, err)."""
         with self._lock:
-            if not self._client or not self._client.is_socket_open():
-                return False, "Not connected"
+            ok, err = self._ensure_socket_open()
+            if not ok:
+                return False, None, err or "Not connected"
             if self._request_logger:
-                self._request_logger(self._slave_id, "FC06", MAIN_DO_REG, val)
+                self._request_logger(self._slave_id, "FC03", PC_LED_IN_REG, 1)
             try:
-                rr = self._client.write_register(
+                rr = self._client.read_holding_registers(
+                    address=PC_LED_IN_REG,
+                    count=1,
+                    unit=self._slave_id,
+                )
+                if self._response_logger:
+                    self._response_logger(not rr.isError(), _response_exception_code(rr))
+                if rr.isError():
+                    return False, None, format_modbus_error(resp=rr)
+                regs = list(rr.registers) if rr.registers else [0]
+                state = bool(regs[0] & 1) if regs else False
+                return True, state, None
+            except Exception as e:
+                if self._response_logger:
+                    self._response_logger(False, None)
+                return False, None, format_modbus_error(exc=e)
+
+    def write_relay(self, ch: int, onoff: bool) -> tuple[bool, str | None]:
+        """Set one relay (ch 0..3). Read current DO bitmap, set bit ch, FC06 write. Returns (ok, err)."""
+        if ch < 0 or ch >= MAIN_DO_COUNT:
+            return False, "Invalid relay index 0..3"
+        with self._lock:
+            ok, err = self._ensure_socket_open()
+            if not ok:
+                return False, err or "Not connected"
+            try:
+                if self._request_logger:
+                    self._request_logger(self._slave_id, "FC03", MAIN_DI_REG, 2)
+                rr = self._client.read_holding_registers(
+                    address=MAIN_DI_REG,
+                    count=2,
+                    unit=self._slave_id,
+                )
+                if self._response_logger:
+                    self._response_logger(not rr.isError(), _response_exception_code(rr))
+                if rr.isError():
+                    return False, format_modbus_error(resp=rr)
+                regs = list(rr.registers) if rr.registers else [0, 0]
+                do_val = regs[1] & 0x0F if len(regs) > 1 else 0
+                if onoff:
+                    do_val |= 1 << ch
+                else:
+                    do_val &= ~(1 << ch)
+                if self._request_logger:
+                    self._request_logger(self._slave_id, "FC06", MAIN_DO_REG, do_val)
+                wr = self._client.write_register(
                     address=MAIN_DO_REG,
+                    value=do_val,
+                    unit=self._slave_id,
+                )
+                if self._response_logger:
+                    self._response_logger(not wr.isError(), _response_exception_code(wr))
+                if wr.isError():
+                    return False, format_modbus_error(resp=wr)
+                return True, None
+            except Exception as e:
+                if self._response_logger:
+                    self._response_logger(False, None)
+                return False, format_modbus_error(exc=e)
+
+    def write_pc_on_en(self, onoff: bool) -> tuple[bool, str | None]:
+        """FC06 write PC_CTRL_REG bit0 = PC_ON_EN. Returns (ok, err)."""
+        return self._write_pc_ctrl_bit(0, onoff)
+
+    def write_pc_reset_en(self, onoff: bool) -> tuple[bool, str | None]:
+        """FC06 write PC_CTRL_REG bit1 = PC_RESET_EN. Returns (ok, err)."""
+        return self._write_pc_ctrl_bit(1, onoff)
+
+    def _write_pc_ctrl_bit(self, bit_index: int, onoff: bool) -> tuple[bool, str | None]:
+        with self._lock:
+            ok, err = self._ensure_socket_open()
+            if not ok:
+                return False, err or "Not connected"
+            try:
+                if self._request_logger:
+                    self._request_logger(self._slave_id, "FC03", PC_CTRL_REG, 1)
+                rr = self._client.read_holding_registers(
+                    address=PC_CTRL_REG,
+                    count=1,
+                    unit=self._slave_id,
+                )
+                if self._response_logger:
+                    self._response_logger(not rr.isError(), _response_exception_code(rr))
+                if rr.isError():
+                    val = 0
+                else:
+                    regs = list(rr.registers) if rr.registers else [0]
+                    val = regs[0] & 0x03 if regs else 0
+                if onoff:
+                    val |= 1 << bit_index
+                else:
+                    val &= ~(1 << bit_index)
+                if self._request_logger:
+                    self._request_logger(self._slave_id, "FC06", PC_CTRL_REG, val)
+                wr = self._client.write_register(
+                    address=PC_CTRL_REG,
                     value=val,
                     unit=self._slave_id,
                 )
-                if rr.isError():
-                    return False, format_modbus_error(resp=rr)
+                if self._response_logger:
+                    self._response_logger(not wr.isError(), _response_exception_code(wr))
+                if wr.isError():
+                    return False, format_modbus_error(resp=wr)
                 return True, None
-            except TypeError as e:
-                return False, format_modbus_error(exc=e)
-            except ModbusException as e:
-                return False, format_modbus_error(exc=e)
             except Exception as e:
+                if self._response_logger:
+                    self._response_logger(False, None)
                 return False, format_modbus_error(exc=e)
-
-    def write_coil(self, address: int, value: bool) -> tuple[bool, str | None]:
-        """FC05 Write Single Coil. Returns (ok, exception_message)."""
-        with self._lock:
-            if not self._client or not self._client.is_socket_open():
-                return False, "Not connected"
-            if self._request_logger:
-                self._request_logger(self._slave_id, "FC05", address, 1 if value else 0)
-            try:
-                rr = self._client.write_coil(
-                    address=address,
-                    value=value,
-                    unit=self._slave_id,
-                )
-                if rr.isError():
-                    return False, format_modbus_error(resp=rr)
-                return True, None
-            except TypeError as e:
-                return False, format_modbus_error(exc=e)
-            except ModbusException as e:
-                return False, format_modbus_error(exc=e)
-            except Exception as e:
-                return False, format_modbus_error(exc=e)
-
-    def write_door_open_1(self) -> tuple[bool, str | None]:
-        return self.write_coil(DOOR_OPEN_1_COIL, True)
-
-    def write_door_open_2(self) -> tuple[bool, str | None]:
-        return self.write_coil(DOOR_OPEN_2_COIL, True)
-
-    def write_vb_onoff(self, index_8_to_12: int) -> tuple[bool, str | None]:
-        """index_8_to_12: 8..12 for ON/OFF 8~12."""
-        coil_map = {
-            8: VB_ONOFF_8_COIL,
-            9: VB_ONOFF_9_COIL,
-            10: VB_ONOFF_10_COIL,
-            11: VB_ONOFF_11_COIL,
-            12: VB_ONOFF_12_COIL,
-        }
-        addr = coil_map.get(index_8_to_12)
-        if addr is None:
-            return False, "Invalid index 8..12"
-        return self.write_coil(addr, True)
-
-    def write_invalid_coil_899(self) -> tuple[bool, str | None]:
-        """Expect exception 0x02."""
-        return self.write_coil(INVALID_COIL_899, True)
-
-    def write_invalid_coil_900(self) -> tuple[bool, str | None]:
-        """Expect exception 0x02."""
-        return self.write_coil(INVALID_COIL_900, True)

@@ -21,13 +21,16 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "app_config.h"
 #include "app_scheduler.h"
 #include "aggregator.h"
 #include "aggregated_status.h"
 #include "upstream_pc_protocol.h"
+#include "upstream_slave_uart1.h"
 #include "modbus_master.h"
 #include "gateway_actions.h"
 #include "led_status.h"
+#include "pc_test_aa_stream.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -104,7 +107,9 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+#if !USE_PC_TEST_UART1_SLAVE
   MX_WWDG_Init();
+#endif
   MX_I2C1_Init();
   MX_I2C3_Init();
   MX_USART1_UART_Init();
@@ -114,7 +119,18 @@ int main(void)
   ModbusMaster_Init();
   AggregatedStatus_Clear(&aggregated_status);
   UpstreamPC_Init();
+#if USE_PC_TEST_UART1_SLAVE && !ENABLE_PC_TEST_AA_STREAM
+  UpstreamSlaveUart1_Init();
+#endif
   LED_Status_Init();
+#if ENABLE_PC_TEST_AA_STREAM
+  PcTestAA_Init();
+#endif
+#if USE_PC_TEST_UART1_SLAVE && !ENABLE_PC_TEST_AA_STREAM
+  /* 부팅 시 LED2 한 번 펄스 ... */
+  LED_Status_OnUart1RxEvent();
+  LED_Status_OnUart1SlaveTx();
+#endif
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -124,13 +140,25 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+#if !USE_PC_TEST_UART1_SLAVE
+    HAL_WWDG_Refresh(&hwwdg);   /* 테스트 모드에서는 WWDG 미사용 */
+#endif
     LED_Status_Tick_1ms();
     AppScheduler_Update();
 
+#if ENABLE_PC_TEST_AA_STREAM
+    PcTestAA_Tick(&aggregated_status);
+#else
     if (AppScheduler_IsDue(TASK_UPSTREAM_POLL))
-      UpstreamPC_Poll();
+      UpstreamPC_Poll(&aggregated_status);
+#if USE_PC_TEST_UART1_SLAVE
+    if (AppScheduler_IsDue(TASK_DOWNSTREAM_MODBUS))
+      UpstreamSlaveUart1_Poll(&aggregated_status);
+#elif MODBUS_MASTER_POLL_ENABLE
     if (AppScheduler_IsDue(TASK_DOWNSTREAM_MODBUS))
       ModbusMaster_Poll();
+#endif
+#endif
     if (AppScheduler_IsDue(TASK_AGGREGATE_UPDATE))
       Aggregator_Update(&aggregated_status);
     Gateway_Action_Update();
@@ -264,7 +292,7 @@ static void MX_USART1_UART_Init(void)
 
   /* USER CODE END USART1_Init 1 */
   huart1.Instance = USART1;
-  huart1.Init.BaudRate = 115200;
+  huart1.Init.BaudRate = 9600;
   huart1.Init.WordLength = UART_WORDLENGTH_8B;
   huart1.Init.StopBits = UART_STOPBITS_1;
   huart1.Init.Parity = UART_PARITY_NONE;
