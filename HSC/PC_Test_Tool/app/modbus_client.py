@@ -14,7 +14,8 @@ from .address_map import (
     MAIN_DI_COUNT,
     MAIN_DO_REG,
     MAIN_DO_COUNT,
-    PC_CTRL_REG,
+    PC_ON_EN_REG,
+    PC_RESET_EN_REG,
     PC_LED_IN_REG,
     MAIN_ENV_REG,
     MAIN_ENV_COUNT,
@@ -300,42 +301,24 @@ class ModbusClient:
                 return False, format_modbus_error(exc=e)
 
     def write_pc_on_en(self, onoff: bool) -> tuple[bool, str | None]:
-        """FC06 write PC_CTRL_REG bit0 = PC_ON_EN. Returns (ok, err)."""
-        return self._write_pc_ctrl_bit(0, onoff)
+        """FC06 write PC_ON_EN_REG (2120): value=1 → 100ms pulse, 0 → LOW. Returns (ok, err)."""
+        return self._write_pc_reg(PC_ON_EN_REG, 1 if onoff else 0)
 
     def write_pc_reset_en(self, onoff: bool) -> tuple[bool, str | None]:
-        """FC06 write PC_CTRL_REG bit1 = PC_RESET_EN. Returns (ok, err)."""
-        return self._write_pc_ctrl_bit(1, onoff)
+        """FC06 write PC_RESET_EN_REG (2121): value=1 → 100ms pulse, 0 → LOW. Returns (ok, err)."""
+        return self._write_pc_reg(PC_RESET_EN_REG, 1 if onoff else 0)
 
-    def _write_pc_ctrl_bit(self, bit_index: int, onoff: bool) -> tuple[bool, str | None]:
+    def _write_pc_reg(self, address: int, value: int) -> tuple[bool, str | None]:
         with self._lock:
             ok, err = self._ensure_socket_open()
             if not ok:
                 return False, err or "Not connected"
             try:
                 if self._request_logger:
-                    self._request_logger(self._slave_id, "FC03", PC_CTRL_REG, 1)
-                rr = self._client.read_holding_registers(
-                    address=PC_CTRL_REG,
-                    count=1,
-                    unit=self._slave_id,
-                )
-                if self._response_logger:
-                    self._response_logger(not rr.isError(), _response_exception_code(rr))
-                if rr.isError():
-                    val = 0
-                else:
-                    regs = list(rr.registers) if rr.registers else [0]
-                    val = regs[0] & 0x03 if regs else 0
-                if onoff:
-                    val |= 1 << bit_index
-                else:
-                    val &= ~(1 << bit_index)
-                if self._request_logger:
-                    self._request_logger(self._slave_id, "FC06", PC_CTRL_REG, val)
+                    self._request_logger(self._slave_id, "FC06", address, value)
                 wr = self._client.write_register(
-                    address=PC_CTRL_REG,
-                    value=val,
+                    address=address,
+                    value=value,
                     unit=self._slave_id,
                 )
                 if self._response_logger:

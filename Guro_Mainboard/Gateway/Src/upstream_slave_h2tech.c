@@ -10,6 +10,7 @@
 #include "aggregated_status.h"
 #include "io_map.h"
 #include "reset_reason.h"
+#include "bsp_gpio.h"
 
 #define EX_ILLEGAL_FUNCTION  0x01
 #define EX_ILLEGAL_DATA_ADDR 0x02
@@ -33,6 +34,11 @@
 /* Reset reason (RCC->CSR snapshot): 4x2113 = low16, 4x2114 = high16 */
 #define UPSTREAM_RESET_CSR_START  2113u
 #define UPSTREAM_RESET_CSR_COUNT  2u
+
+/* PC control GPIO: 4x2120=PC_ON_EN (W), 4x2121=PC_RESET_EN (W), 4x2122=PC_LED_IN (R) */
+#define UPSTREAM_PC_ON_EN_REG    2120u
+#define UPSTREAM_PC_RESET_EN_REG 2121u
+#define UPSTREAM_PC_LED_IN_REG   2122u
 
 /* FC02 Read Discrete Inputs: H2TECH 1x, h2_dec = start_addr + 1 + i */
 static int handle_fc02(uint16_t start_addr, uint16_t count, uint8_t *response, uint16_t resp_max)
@@ -152,6 +158,22 @@ static int handle_fc03(uint16_t start_addr, uint16_t count, const void *p_agg,
         return 2;
     }
 
+    /* PC_LED_IN (4x2122): read-only, single register. 0=OFF, 1=ON */
+    if (start_addr == UPSTREAM_PC_LED_IN_REG) {
+        if (count != 1u) {
+            response[0] = 0x83;
+            response[1] = EX_ILLEGAL_DATA_VAL;
+            return 2;
+        }
+        if (resp_max < 2u + 2u) return -1;
+        uint16_t val = (uint16_t)BSP_ReadPC_LED_IN();
+        response[0] = 0x03;
+        response[1] = 2u;
+        response[2] = (uint8_t)(val >> 8);
+        response[3] = (uint8_t)(val & 0xFF);
+        return 4;
+    }
+
     if (start_addr != UPSTREAM_CURRENT_START) {
         response[0] = 0x83;
         response[1] = EX_ILLEGAL_DATA_ADDR;
@@ -191,22 +213,54 @@ static int handle_fc03(uint16_t start_addr, uint16_t count, const void *p_agg,
     return (int)(2 + byte_count);
 }
 
-/* FC06 Write Single Register: only addr 2101 (DO bitmap). Value bits 0..3 valid; others ignored. */
+/* FC06 Write Single Register: 2101 (DO bitmap); 2120 (PC_ON_EN); 2121 (PC_RESET_EN). 2122 read-only. */
 static int handle_fc06(uint16_t start_addr, const uint8_t *write_data,
                        uint8_t *response, uint16_t resp_max)
 {
     if (resp_max < 6u || !write_data) return -1;
+    uint16_t value = (uint16_t)((write_data[0] << 8) | write_data[1]);
+
     if (start_addr == UPSTREAM_MAIN_IO_DI_REG) {
         response[0] = 0x86;
         response[1] = EX_ILLEGAL_DATA_VAL;
         return 2;
     }
+    if (start_addr == UPSTREAM_PC_LED_IN_REG) {
+        response[0] = 0x86;
+        response[1] = EX_ILLEGAL_DATA_VAL;
+        return 2;
+    }
+
+    if (start_addr == UPSTREAM_PC_ON_EN_REG) {
+        if (value != 0u)
+            Gateway_Action_StartPulsePC_ON_EN();
+        else
+            BSP_WritePC_ON_EN(0);
+        response[0] = 0x06;
+        response[1] = (uint8_t)(start_addr >> 8);
+        response[2] = (uint8_t)(start_addr & 0xFF);
+        response[3] = (uint8_t)(value >> 8);
+        response[4] = (uint8_t)(value & 0xFF);
+        return 6;
+    }
+    if (start_addr == UPSTREAM_PC_RESET_EN_REG) {
+        if (value != 0u)
+            Gateway_Action_StartPulsePC_RESET_EN();
+        else
+            BSP_WritePC_RESET_EN(0);
+        response[0] = 0x06;
+        response[1] = (uint8_t)(start_addr >> 8);
+        response[2] = (uint8_t)(start_addr & 0xFF);
+        response[3] = (uint8_t)(value >> 8);
+        response[4] = (uint8_t)(value & 0xFF);
+        return 6;
+    }
+
     if (start_addr != UPSTREAM_MAIN_IO_DO_REG) {
         response[0] = 0x86;
         response[1] = EX_ILLEGAL_DATA_ADDR;
         return 2;
     }
-    uint16_t value = (uint16_t)((write_data[0] << 8) | write_data[1]);
     value &= 0x0Fu;
     IO_Main_WriteDO_Bitmap(value);
     response[0] = 0x06;

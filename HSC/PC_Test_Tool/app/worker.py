@@ -60,30 +60,20 @@ class MainboardWorker(QObject):
         self.write_result.emit(ok, err)
 
     def on_request_pc_on_pulse(self):
-        """PC_ON_EN 100ms high 펄스: High 출력 후 100ms 뒤 Low."""
+        """PC_ON_EN: FC06 2120 value=1 → 보드에서 500ms HIGH 펄스 수행."""
         if not self._client.connected:
             self.write_result.emit(False, "Not connected")
             return
-        ok1, err1 = self._client.write_pc_on_en(True)
-        if not ok1:
-            self.write_result.emit(False, err1)
-            return
-        time.sleep(0.1)
-        ok2, err2 = self._client.write_pc_on_en(False)
-        self.write_result.emit(ok2, err2 or err1)
+        ok, err = self._client.write_pc_on_en(True)
+        self.write_result.emit(ok, err)
 
     def on_request_pc_reset_pulse(self):
-        """PC_RESET_EN 100ms high 펄스: High 출력 후 100ms 뒤 Low."""
+        """PC_RESET_EN: FC06 2121 value=1 → 보드에서 500ms HIGH 펄스 수행."""
         if not self._client.connected:
             self.write_result.emit(False, "Not connected")
             return
-        ok1, err1 = self._client.write_pc_reset_en(True)
-        if not ok1:
-            self.write_result.emit(False, err1)
-            return
-        time.sleep(0.1)
-        ok2, err2 = self._client.write_pc_reset_en(False)
-        self.write_result.emit(ok2, err2 or err1)
+        ok, err = self._client.write_pc_reset_en(True)
+        self.write_result.emit(ok, err)
 
     def on_request_read_raw(self):
         """Read raw bytes from serial (e.g. board TX 0xAA) and emit for log."""

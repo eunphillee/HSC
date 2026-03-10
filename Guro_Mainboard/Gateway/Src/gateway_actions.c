@@ -9,13 +9,19 @@
 #include "modbus_table.h"
 #include "modbus_master.h"
 #include "main.h"
+#include "bsp_gpio.h"
 
 #define PULSE_MS_DOOR  300u
+#define PULSE_MS_PC_IO 500u
 
 static uint8_t door1_active;
 static uint32_t door1_tick;
 static uint8_t door2_active;
 static uint32_t door2_tick;
+static uint8_t pc_on_en_pulse_active;
+static uint32_t pc_on_en_pulse_tick;
+static uint8_t pc_reset_en_pulse_active;
+static uint32_t pc_reset_en_pulse_tick;
 /* Set when downstream WriteCoil fails; sticky until cleared. Cleared by ClearDownstreamWriteFailAlarm (e.g. on PC read of 1x0880 or auto after N s). */
 static volatile uint8_t s_downstream_write_fail;
 
@@ -61,6 +67,22 @@ void Gateway_Action_PulseOutputByOnOffIndex(uint8_t onoff_index_1based, uint16_t
         s_downstream_write_fail = 1;
 }
 
+void Gateway_Action_StartPulsePC_ON_EN(void)
+{
+    if (pc_on_en_pulse_active) return;
+    BSP_WritePC_ON_EN(1);
+    pc_on_en_pulse_tick = HAL_GetTick();
+    pc_on_en_pulse_active = 1;
+}
+
+void Gateway_Action_StartPulsePC_RESET_EN(void)
+{
+    if (pc_reset_en_pulse_active) return;
+    BSP_WritePC_RESET_EN(1);
+    pc_reset_en_pulse_tick = HAL_GetTick();
+    pc_reset_en_pulse_active = 1;
+}
+
 void Gateway_Action_Update(void)
 {
     uint32_t now = HAL_GetTick();
@@ -72,6 +94,14 @@ void Gateway_Action_Update(void)
     if (door2_active && (now - door2_tick >= PULSE_MS_DOOR)) {
         IO_Main_WriteDO(MAIN_DO_RELAY2, 0);
         door2_active = 0;
+    }
+    if (pc_on_en_pulse_active && (now - pc_on_en_pulse_tick >= PULSE_MS_PC_IO)) {
+        BSP_WritePC_ON_EN(0);
+        pc_on_en_pulse_active = 0;
+    }
+    if (pc_reset_en_pulse_active && (now - pc_reset_en_pulse_tick >= PULSE_MS_PC_IO)) {
+        BSP_WritePC_RESET_EN(0);
+        pc_reset_en_pulse_active = 0;
     }
 }
 

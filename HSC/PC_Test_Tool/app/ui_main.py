@@ -16,7 +16,7 @@ from pymodbus.client.sync import ModbusSerialClient
 from .modbus_client import ModbusClient
 from .worker import MainboardWorker, create_worker_and_thread
 from .logger import LogHandler
-from .address_map import MAINBOARD_SLAVE_ID_DEFAULT, MAIN_DI_REG, MAIN_DO_REG, PC_CTRL_REG, PC_LED_IN_REG
+from .address_map import MAINBOARD_SLAVE_ID_DEFAULT, MAIN_DI_REG, MAIN_DO_REG, PC_ON_EN_REG, PC_RESET_EN_REG, PC_LED_IN_REG
 
 
 DARK_QSS = """
@@ -124,7 +124,7 @@ class MainWindow(QMainWindow):
         self._raw_poll_timer.setInterval(100)
         self._raw_poll_timer.timeout.connect(self._poll_raw_rx)
         self._env_poll_timer = QTimer(self)
-        self._env_poll_timer.setInterval(1000)
+        self._env_poll_timer.setInterval(5000)  # 5초 주기 (1초→5초: 통신 안정성 확인용)
         self._env_poll_timer.timeout.connect(lambda: self.request_read_env.emit())
         self._seen_0xaa_since_connect = False
         self._modbus_fail_0xaa_hint_shown = False
@@ -223,10 +223,10 @@ class MainWindow(QMainWindow):
 
         # ---- D) PC Status ----
         card_pc, lay_pc = card_frame("PC Status")
-        lay_pc.addWidget(QLabel("Outputs (클릭 시 100ms high 출력):"))
-        btn_pc_on = QPushButton("PC_ON_EN (100ms)")
+        lay_pc.addWidget(QLabel("Outputs (클릭 시 500ms high 출력):"))
+        btn_pc_on = QPushButton("PC_ON_EN (500ms)")
         btn_pc_on.clicked.connect(lambda: self.request_pc_on_pulse.emit())
-        btn_pc_reset = QPushButton("PC_RESET_EN (100ms)")
+        btn_pc_reset = QPushButton("PC_RESET_EN (500ms)")
         btn_pc_reset.clicked.connect(lambda: self.request_pc_reset_pulse.emit())
         lay_pc.addWidget(btn_pc_on)
         lay_pc.addWidget(btn_pc_reset)
@@ -261,7 +261,7 @@ class MainWindow(QMainWindow):
         row_env.addWidget(self._lbl_env_flags)
         row_env.addStretch()
         lay_env.addLayout(row_env)
-        btn_read_env = QPushButton("Read Sensor (1s auto)")
+        btn_read_env = QPushButton("Read Sensor (5s auto)")
         btn_read_env.clicked.connect(lambda: self.request_read_env.emit())
         lay_env.addWidget(btn_read_env)
         self._btn_read_env = btn_read_env

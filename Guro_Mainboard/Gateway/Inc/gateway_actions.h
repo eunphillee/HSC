@@ -19,6 +19,11 @@ uint8_t Gateway_Action_PollDownstreamWriteFail(void);
 /** Clear the downstream write-fail alarm (e.g. after PC read of 1x0880 or auto after N seconds). */
 void Gateway_Action_ClearDownstreamWriteFailAlarm(void);
 
+/** Start 100ms HIGH pulse on PC_ON_EN (PC1). Call Gateway_Action_Update() from main loop to clear. */
+void Gateway_Action_StartPulsePC_ON_EN(void);
+/** Start 100ms HIGH pulse on PC_RESET_EN (PC0). Call Gateway_Action_Update() from main loop to clear. */
+void Gateway_Action_StartPulsePC_RESET_EN(void);
+
 #ifdef __cplusplus
 }
 #endif
