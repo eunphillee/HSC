@@ -11,6 +11,7 @@
 #include "io_map.h"
 #include "reset_reason.h"
 #include "bsp_gpio.h"
+#include "system_config.h"
 
 #define EX_ILLEGAL_FUNCTION  0x01
 #define EX_ILLEGAL_DATA_ADDR 0x02
@@ -39,6 +40,33 @@
 #define UPSTREAM_PC_ON_EN_REG    2120u
 #define UPSTREAM_PC_RESET_EN_REG 2121u
 #define UPSTREAM_PC_LED_IN_REG   2122u
+
+/* System config (EEPROM): 4x3000=slave_id, 4x3001=baudrate code, 4x3002=factory reset command */
+#define UPSTREAM_SYSCFG_REG_COUNT  3u
+
+static uint32_t baudrate_from_code(uint16_t code)
+{
+	switch (code) {
+	case 0: return SYSTEM_CONFIG_BAUDRATE_9600;
+	case 1: return SYSTEM_CONFIG_BAUDRATE_19200;
+	case 2: return SYSTEM_CONFIG_BAUDRATE_38400;
+	case 3: return SYSTEM_CONFIG_BAUDRATE_57600;
+	case 4: return SYSTEM_CONFIG_BAUDRATE_115200;
+	default: return 0;
+	}
+}
+
+static uint16_t baudrate_to_code(uint32_t baud)
+{
+	switch (baud) {
+	case SYSTEM_CONFIG_BAUDRATE_9600:   return 0;
+	case SYSTEM_CONFIG_BAUDRATE_19200: return 1;
+	case SYSTEM_CONFIG_BAUDRATE_38400: return 2;
+	case SYSTEM_CONFIG_BAUDRATE_57600: return 3;
+	case SYSTEM_CONFIG_BAUDRATE_115200: return 4;
+	default: return 0xFFu;
+	}
+}
 
 /* FC02 Read Discrete Inputs: H2TECH 1x, h2_dec = start_addr + 1 + i */
 static int handle_fc02(uint16_t start_addr, uint16_t count, uint8_t *response, uint16_t resp_max)
@@ -174,6 +202,33 @@ static int handle_fc03(uint16_t start_addr, uint16_t count, const void *p_agg,
         return 4;
     }
 
+    /* System config (4x3000~3002): FC03 read — slave_id, baudrate code, factory_reset(read 0) */
+    if (start_addr == SYSCFG_MODBUS_SLAVE_ID_REG) {
+        if (count == 0u || count > UPSTREAM_SYSCFG_REG_COUNT) {
+            response[0] = 0x83;
+            response[1] = EX_ILLEGAL_DATA_VAL;
+            return 2;
+        }
+        if (resp_max < (uint16_t)(2u + count * 2u)) return -1;
+        const system_config_t *cfg = SystemConfig_Get();
+        response[0] = 0x03;
+        response[1] = (uint8_t)(count * 2u);
+        uint16_t r0 = cfg ? (uint16_t)cfg->slave_id : SYSTEM_CONFIG_DEFAULT_SLAVE_ID;
+        uint16_t r1 = cfg ? baudrate_to_code(cfg->baudrate) : 0u;
+        if (r1 > 4u) r1 = 0u;
+        response[2] = (uint8_t)(r0 >> 8);
+        response[3] = (uint8_t)(r0 & 0xFF);
+        if (count >= 2u) {
+            response[4] = (uint8_t)(r1 >> 8);
+            response[5] = (uint8_t)(r1 & 0xFF);
+        }
+        if (count >= 3u) {
+            response[6] = 0;
+            response[7] = 0;  /* 4x3002 read: always 0 */
+        }
+        return (int)(2 + count * 2u);
+    }
+
     if (start_addr != UPSTREAM_CURRENT_START) {
         response[0] = 0x83;
         response[1] = EX_ILLEGAL_DATA_ADDR;
@@ -248,6 +303,73 @@ static int handle_fc06(uint16_t start_addr, const uint8_t *write_data,
             Gateway_Action_StartPulsePC_RESET_EN();
         else
             BSP_WritePC_RESET_EN(0);
+        response[0] = 0x06;
+        response[1] = (uint8_t)(start_addr >> 8);
+        response[2] = (uint8_t)(start_addr & 0xFF);
+        response[3] = (uint8_t)(value >> 8);
+        response[4] = (uint8_t)(value & 0xFF);
+        return 6;
+    }
+
+    /* 4x3000: slave_id (1~247) -> EEPROM save */
+    if (start_addr == SYSCFG_MODBUS_SLAVE_ID_REG) {
+        const system_config_t *cur = SystemConfig_Get();
+        if (!cur || value < SYSTEM_CONFIG_SLAVE_ID_MIN || value > SYSTEM_CONFIG_SLAVE_ID_MAX) {
+            response[0] = 0x86;
+            response[1] = EX_ILLEGAL_DATA_VAL;
+            return 2;
+        }
+        system_config_t cfg = *cur;
+        cfg.slave_id = (uint8_t)(value & 0xFF);
+        if (SystemConfig_Save(&cfg) != 0) {
+            response[0] = 0x86;
+            response[1] = EX_ILLEGAL_DATA_VAL;
+            return 2;
+        }
+        response[0] = 0x06;
+        response[1] = (uint8_t)(start_addr >> 8);
+        response[2] = (uint8_t)(start_addr & 0xFF);
+        response[3] = (uint8_t)(value >> 8);
+        response[4] = (uint8_t)(value & 0xFF);
+        return 6;
+    }
+
+    /* 4x3001: baudrate code (0~4) -> EEPROM save. UART baud는 재부팅 후 적용. */
+    if (start_addr == SYSCFG_MODBUS_BAUDRATE_CODE_REG) {
+        const system_config_t *cur = SystemConfig_Get();
+        if (!cur || value > 4u) {
+            response[0] = 0x86;
+            response[1] = EX_ILLEGAL_DATA_VAL;
+            return 2;
+        }
+        uint32_t baud = baudrate_from_code((uint16_t)value);
+        system_config_t cfg = *cur;
+        cfg.baudrate = baud;
+        if (SystemConfig_Save(&cfg) != 0) {
+            response[0] = 0x86;
+            response[1] = EX_ILLEGAL_DATA_VAL;
+            return 2;
+        }
+        response[0] = 0x06;
+        response[1] = (uint8_t)(start_addr >> 8);
+        response[2] = (uint8_t)(start_addr & 0xFF);
+        response[3] = (uint8_t)(value >> 8);
+        response[4] = (uint8_t)(value & 0xFF);
+        return 6;
+    }
+
+    /* 4x3002: factory reset command. value=1 -> SystemConfig_FactoryReset() */
+    if (start_addr == SYSCFG_MODBUS_FACTORY_RESET_REG) {
+        if (value != 1u) {
+            response[0] = 0x86;
+            response[1] = EX_ILLEGAL_DATA_VAL;
+            return 2;
+        }
+        if (SystemConfig_FactoryReset() != 0) {
+            response[0] = 0x86;
+            response[1] = EX_ILLEGAL_DATA_VAL;
+            return 2;
+        }
         response[0] = 0x06;
         response[1] = (uint8_t)(start_addr >> 8);
         response[2] = (uint8_t)(start_addr & 0xFF);

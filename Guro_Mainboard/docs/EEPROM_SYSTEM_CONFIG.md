@@ -54,16 +54,19 @@
 
 ---
 
-## Modbus 설정용 예약 레지스터 (향후 PC 툴에서 설정 변경 예정)
+## Modbus 설정 레지스터 (4x3000~3002) — 구현 완료
 
-| Modbus 주소 (4x) | 용도 | 비고 |
-|------------------|------|------|
-| **4x3000** | slave_id | 1~247. Write 동작 추후 구현 |
-| **4x3001** | baudrate code | 0=9600, 1=19200, 2=38400, 3=57600, 4=115200. Write 추후 구현 |
-| **4x3002** | factory reset command | Write 1 = factory reset 실행. 추후 구현 |
+| Modbus 주소 (4x) | Read (FC03) | Write (FC06) | 비고 |
+|------------------|-------------|--------------|------|
+| **4x3000** | 현재 slave_id (1~247) | value 1~247 → EEPROM 저장 후 정상 응답 | 범위 밖 → 0x03 Illegal Data Value |
+| **4x3001** | 현재 baudrate code (0~4) | code 0~4 → EEPROM 저장 | **보드레이트는 재부팅 후 적용** (즉시 UART 재설정 없음) |
+| **4x3002** | 0 (읽기만) | value=1 → SystemConfig_FactoryReset() 실행 | 1 외 값 → 0x03 |
 
-- 헤더: `system_config.h` — `SYSCFG_MODBUS_SLAVE_ID_REG`, `SYSCFG_MODBUS_BAUDRATE_CODE_REG`, `SYSCFG_MODBUS_FACTORY_RESET_REG`.
-- 실제 FC06/FC16 write 처리 및 EEPROM 반영은 추후 추가.
+- **FC03**: start=3000, count=1~3 → [slave_id], [slave_id, baudrate_code], [slave_id, baudrate_code, 0].
+- **FC06**: 단일 레지스터 쓰기. 성공 시 normal write response. 실패 시 0x03.
+- **baudrate code**: 0=9600, 1=19200, 2=38400, 3=57600, 4=115200.
+- **UART baud 적용**: 저장 즉시가 아닌 **다음 부팅 시** main.c에서 Load 후 huart1.Init.BaudRate 적용. 통신 중 재설정을 피하기 위한 안전 방식.
+- 부팅 로그 / UART 로그 옵션(`SYSTEM_CONFIG_BOOT_LOG` 등)으로 변경 결과 확인 가능.
 
 ---
 
