@@ -40,11 +40,18 @@ class LogHandler(QObject):
         self._lines: list[dict] = []
 
     def log(self, func: str, addr: int | str, count_or_value: int | str, result: str, exception: str = ""):
+        """Legacy log without tag (emits with no tag prefix). Prefer log_tagged for [MAIN]/[HPSB]/[LPSB*]."""
+        self.log_tagged("", func, addr, count_or_value, result, exception)
+
+    def log_tagged(self, tag: str, func: str, addr: int | str, count_or_value: int | str, result: str, exception: str = ""):
+        """Log with board tag prefix: [MAIN], [HPSB], [LPSB1], [LPSB2], [LPSB3]. tag can be empty."""
         ts = _ts()
         addr_s = str(addr)
         cov_s = str(count_or_value)
+        prefix = f"{tag} " if tag else ""
         row = {
             "timestamp": ts,
+            "tag": tag,
             "function": func,
             "address": addr_s,
             "count_or_value": cov_s,
@@ -52,7 +59,7 @@ class LogHandler(QObject):
             "exception": exception,
         }
         self._lines.append(row)
-        line = f"{ts} | {func} | addr={addr_s} count/value={cov_s} | {result}"
+        line = f"{ts} | {prefix}{func} | addr={addr_s} count/value={cov_s} | {result}"
         if exception:
             line += decode_exception(exception)
         self.log_line.emit(line)
@@ -61,25 +68,26 @@ class LogHandler(QObject):
         """Single-line info (e.g. startup: pymodbus version, client type)."""
         self.log_line.emit(f"{_ts()} | {message}")
 
-    def log_request(self, unit: int, func: str, addr: int | str, count_or_value: int | str):
-        """Log outgoing request as TX FCxx addr=... cnt=... or val=... (read vs write by func)."""
+    def log_request(self, tag: str, unit: int, func: str, addr: int | str, count_or_value: int | str):
+        """Log outgoing request. tag: [MAIN], [HPSB], [LPSB1] etc. unit = slave ID (Mainboard typically 9)."""
         addr_s = str(addr)
         cov_s = str(count_or_value)
-        # FC02/03/04 = read -> cnt= ; FC05/06/15/16 = write -> val=
+        prefix = f"{tag} " if tag else ""
         if func in ("FC02", "FC03", "FC04"):
-            line = f"{_ts()} | TX {func} addr={addr_s} cnt={cov_s}"
+            line = f"{_ts()} | {prefix}TX {func} addr={addr_s} cnt={cov_s} unit={unit}"
         else:
-            line = f"{_ts()} | TX {func} addr={addr_s} val={cov_s}"
+            line = f"{_ts()} | {prefix}TX {func} addr={addr_s} val={cov_s} unit={unit}"
         self.log_line.emit(line)
 
-    def log_response(self, ok: bool, exception_code: int | None):
-        """Log response: RX OK or RX EXC 0xNN."""
+    def log_response(self, tag: str, ok: bool, exception_code: int | None):
+        """Log response. tag: [MAIN], [HPSB], [LPSB1] etc."""
+        prefix = f"{tag} " if tag else ""
         if ok:
-            self.log_line.emit(f"{_ts()} | RX OK")
+            self.log_line.emit(f"{_ts()} | {prefix}RX OK")
         elif exception_code is not None:
-            self.log_line.emit(f"{_ts()} | RX EXC 0x{exception_code:02X}")
+            self.log_line.emit(f"{_ts()} | {prefix}RX EXC 0x{exception_code:02X}")
         else:
-            self.log_line.emit(f"{_ts()} | RX ERR")
+            self.log_line.emit(f"{_ts()} | {prefix}RX ERR")
 
     def log_raw_rx(self, bytes_list: list[int]):
         """Log raw bytes received from board (e.g. 0xAA)."""
@@ -92,9 +100,11 @@ class LogHandler(QObject):
         if not self._lines:
             return ""
         out = io.StringIO()
-        w = csv.DictWriter(out, fieldnames=["timestamp", "function", "address", "count_or_value", "result", "exception"])
+        fieldnames = ["timestamp", "tag", "function", "address", "count_or_value", "result", "exception"]
+        w = csv.DictWriter(out, fieldnames=fieldnames, extrasaction="ignore")
         w.writeheader()
-        w.writerows(self._lines)
+        for row in self._lines:
+            w.writerow({k: row.get(k, "") for k in fieldnames})
         return out.getvalue()
 
     def clear(self):

@@ -21,6 +21,10 @@ extern "C" {
 /* Timing (character time at 9600 baud ~ 1.04 ms per char) */
 #define MODBUS_RESPONSE_TIMEOUT_MS    50
 #define MODBUS_FRAME_DELAY_MS         5
+/* DE/RE (PB12): delay after asserting TX before first byte; 0=off, 1=typical for MAX3485 */
+#ifndef MODBUS_DE_TX_SETTLE_MS
+#define MODBUS_DE_TX_SETTLE_MS       1
+#endif
 
 /* Buffer sizes */
 #define MODBUS_RTU_RX_BUF_SIZE        64

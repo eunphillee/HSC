@@ -19,6 +19,9 @@ void LED_Status_OnDIChanged(void);
 void LED_Status_OnDOChanged(void);
 void LED_Status_OnRS485Activity(void);
 
+/** UART2 하위 RS485(Sub board polling) activity → LED4 펄스 */
+void LED_Status_OnSubRS485Activity(void);
+
 /** UART1 Modbus Slave: pulse LED3 (DO) when response sent (for PC test visibility). */
 void LED_Status_OnUart1SlaveTx(void);
 

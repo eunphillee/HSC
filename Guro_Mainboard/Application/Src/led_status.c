@@ -15,6 +15,7 @@
 #define DI_EVT_PULSE_MS      80u
 #define DO_EVT_PULSE_MS      80u
 #define RS485_PULSE_MS       30u
+#define SUB_RS485_PULSE_MS   40u   /* LED4: UART2 하위 폴링 TX/RX 시 */
 #define UART1_SLAVE_TX_PULSE_MS  30u  /* LED3 pulse when UART1 slave sends response */
 #define UART1_RX_EVT_PULSE_MS    50u  /* LED4: UART1 receive event (any byte) */
 #define UART1_CRCOK_PULSE_MS     50u  /* LED3: CRC OK frame received */
@@ -37,6 +38,7 @@ static uint32_t last_tick;
 static uint16_t di_evt_timer_ms;
 static uint16_t do_evt_timer_ms;
 static uint16_t rs485_timer_ms;
+static uint16_t sub_rs485_timer_ms;  /* LED4: 하위 RS485 (UART2) activity */
 static uint16_t uart1_rx_evt_timer_ms;  /* LED4: UART1 raw receive event */
 static uint16_t uart1_crc_ok_timer_ms;  /* LED3: CRC OK frame received */
 static uint16_t uart1_tx_resp_timer_ms; /* LED2: response send (before Transmit) */
@@ -58,6 +60,7 @@ void LED_Status_Init(void)
 	di_evt_timer_ms = 0;
 	do_evt_timer_ms = 0;
 	rs485_timer_ms = 0;
+	sub_rs485_timer_ms = 0;
 	uart1_rx_evt_timer_ms = 0;
 	uart1_crc_ok_timer_ms = 0;
 	uart1_tx_resp_timer_ms = 0;
@@ -125,6 +128,10 @@ void LED_Status_Tick_1ms(void)
 			if (rs485_timer_ms <= elapsed) rs485_timer_ms = 0;
 			else rs485_timer_ms -= (uint16_t)elapsed;
 		}
+		if (sub_rs485_timer_ms > 0) {
+			if (sub_rs485_timer_ms <= elapsed) sub_rs485_timer_ms = 0;
+			else sub_rs485_timer_ms -= (uint16_t)elapsed;
+		}
 		if (uart1_rx_evt_timer_ms > 0) {
 			if (uart1_rx_evt_timer_ms <= elapsed) uart1_rx_evt_timer_ms = 0;
 			else uart1_rx_evt_timer_ms -= (uint16_t)elapsed;
@@ -154,7 +161,7 @@ void LED_Status_Tick_1ms(void)
 	/* ----- LED2=DI/RS485/UART1 TX resp/PC_TEST_AA, LED3=DO/UART1 CRCOK/PC_TEST_AA TxOk, LED4=UART1 RX evt/PC_TEST_AA TxErr ----- */
 	if (di_evt_timer_ms > 0 || rs485_timer_ms > 0 || uart1_tx_resp_timer_ms > 0 || pc_test_aa_led_timer_ms > 0) LED_DI_ON(); else LED_DI_OFF();
 	if (do_evt_timer_ms > 0 || uart1_crc_ok_timer_ms > 0 || pc_test_aa_tx_ok_timer_ms > 0) LED_DO_ON(); else LED_DO_OFF();
-	if (uart1_rx_evt_timer_ms > 0 || pc_test_aa_tx_err_timer_ms > 0) LED_RS485_ON(); else LED_RS485_OFF();  /* LED4: 수신 있을 때만 50ms 펄스 */
+	if (uart1_rx_evt_timer_ms > 0 || pc_test_aa_tx_err_timer_ms > 0 || sub_rs485_timer_ms > 0) LED_RS485_ON(); else LED_RS485_OFF();  /* LED4: UART1 rx / PC_TEST err / 하위 RS485 */
 	LED_PWR_ON();
 }
 
@@ -171,6 +178,11 @@ void LED_Status_OnDOChanged(void)
 void LED_Status_OnRS485Activity(void)
 {
 	rs485_timer_ms = RS485_PULSE_MS;
+}
+
+void LED_Status_OnSubRS485Activity(void)
+{
+	sub_rs485_timer_ms = SUB_RS485_PULSE_MS;
 }
 
 void LED_Status_OnUart1SlaveTx(void)

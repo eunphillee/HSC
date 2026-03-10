@@ -19,6 +19,19 @@ from .address_map import (
     PC_LED_IN_REG,
     MAIN_ENV_REG,
     MAIN_ENV_COUNT,
+    SUB_SENSE_REG,
+    SUB_SENSE_COUNT,
+    SUB_COIL_STATUS_START,
+    SUB_COIL_STATUS_COUNT,
+    SUB_ALARM_START,
+    SUB_ALARM_COUNT,
+    SUB_VB_COIL_BASE,
+    SUB_VB_COIL_COUNT,
+    SUB_HPSB_COIL_BASE,
+    SUB_HPSB_COIL_COUNT,
+    SUB_LPSB_COIL_BASE,
+    SUB_LPSB_COIL_COUNT,
+    ERROR_FLAGS_REG,
 )
 
 
@@ -307,6 +320,150 @@ class ModbusClient:
     def write_pc_reset_en(self, onoff: bool) -> tuple[bool, str | None]:
         """FC06 write PC_RESET_EN_REG (2121): value=1 → 100ms pulse, 0 → LOW. Returns (ok, err)."""
         return self._write_pc_reg(PC_RESET_EN_REG, 1 if onoff else 0)
+
+    def read_sub_sense(self) -> tuple[bool, list[int] | None, str | None]:
+        """FC03 read SUB_SENSE_REG count=14 → HPSB raw[3], LPSB1[3], LPSB2[3], LPSB3[3], reserved[2]. Returns (ok, list of 14 u16 or None, err)."""
+        with self._lock:
+            ok, err = self._ensure_socket_open()
+            if not ok:
+                return False, None, err or "Not connected"
+            if self._request_logger:
+                self._request_logger(self._slave_id, "FC03", SUB_SENSE_REG, SUB_SENSE_COUNT)
+            try:
+                rr = self._client.read_holding_registers(
+                    address=SUB_SENSE_REG,
+                    count=SUB_SENSE_COUNT,
+                    unit=self._slave_id,
+                )
+                if self._response_logger:
+                    self._response_logger(not rr.isError(), _response_exception_code(rr))
+                if rr.isError():
+                    return False, None, format_modbus_error(resp=rr)
+                regs = list(rr.registers) if rr.registers else []
+                regs = (regs + [0] * SUB_SENSE_COUNT)[:SUB_SENSE_COUNT]
+                return True, [r & 0xFFFF for r in regs], None
+            except Exception as e:
+                if self._response_logger:
+                    self._response_logger(False, None)
+                return False, None, format_modbus_error(exc=e)
+
+    def read_sub_coil_status(self) -> tuple[bool, list[bool] | None, str | None]:
+        """FC02 read discrete SUB_COIL_STATUS_START count=14 → ONOFF_3..14. Returns (ok, bits or None, err)."""
+        with self._lock:
+            ok, err = self._ensure_socket_open()
+            if not ok:
+                return False, None, err or "Not connected"
+            if self._request_logger:
+                self._request_logger(self._slave_id, "FC02", SUB_COIL_STATUS_START, SUB_COIL_STATUS_COUNT)
+            try:
+                rr = self._client.read_discrete_inputs(
+                    address=SUB_COIL_STATUS_START,
+                    count=SUB_COIL_STATUS_COUNT,
+                    unit=self._slave_id,
+                )
+                if self._response_logger:
+                    self._response_logger(not rr.isError(), _response_exception_code(rr))
+                if rr.isError():
+                    return False, None, format_modbus_error(resp=rr)
+                bits = list(rr.bits) if rr.bits else []
+                bits = (bits + [False] * SUB_COIL_STATUS_COUNT)[:SUB_COIL_STATUS_COUNT]
+                return True, [bool(b) for b in bits], None
+            except Exception as e:
+                if self._response_logger:
+                    self._response_logger(False, None)
+                return False, None, format_modbus_error(exc=e)
+
+    def read_sub_alarms(self) -> tuple[bool, list[bool] | None, str | None]:
+        """FC02 read discrete SUB_ALARM_START count=12 → ALM_1..12. Returns (ok, bits or None, err)."""
+        with self._lock:
+            ok, err = self._ensure_socket_open()
+            if not ok:
+                return False, None, err or "Not connected"
+            if self._request_logger:
+                self._request_logger(self._slave_id, "FC02", SUB_ALARM_START, SUB_ALARM_COUNT)
+            try:
+                rr = self._client.read_discrete_inputs(
+                    address=SUB_ALARM_START,
+                    count=SUB_ALARM_COUNT,
+                    unit=self._slave_id,
+                )
+                if self._response_logger:
+                    self._response_logger(not rr.isError(), _response_exception_code(rr))
+                if rr.isError():
+                    return False, None, format_modbus_error(resp=rr)
+                bits = list(rr.bits) if rr.bits else []
+                bits = (bits + [False] * SUB_ALARM_COUNT)[:SUB_ALARM_COUNT]
+                return True, [bool(b) for b in bits], None
+            except Exception as e:
+                if self._response_logger:
+                    self._response_logger(False, None)
+                return False, None, format_modbus_error(exc=e)
+
+    def read_error_flags(self) -> tuple[bool, int | None, str | None]:
+        """FC03 read env block; return error_flags (bit0=HPSB comm, bit1=LPSB comm). Returns (ok, flags or None, err)."""
+        with self._lock:
+            ok, err = self._ensure_socket_open()
+            if not ok:
+                return False, None, err or "Not connected"
+            try:
+                rr = self._client.read_holding_registers(
+                    address=MAIN_ENV_REG,
+                    count=MAIN_ENV_COUNT,
+                    unit=self._slave_id,
+                )
+                if rr.isError():
+                    return False, None, format_modbus_error(resp=rr)
+                regs = list(rr.registers) if rr.registers else [0, 0, 0]
+                flags = (regs[2] & 0xFFFF) if len(regs) > 2 else 0
+                return True, flags, None
+            except Exception as e:
+                return False, None, format_modbus_error(exc=e)
+
+    def write_sub_coil_pulse(self, coil_index_0_to_4: int) -> tuple[bool, str | None]:
+        """FC05 write single coil SUB_VB_COIL_BASE + index = 1 (pulse). index 0..4 = VB 8..12 (LPSB). Returns (ok, err)."""
+        if coil_index_0_to_4 < 0 or coil_index_0_to_4 >= SUB_VB_COIL_COUNT:
+            return False, "Invalid coil index 0..4"
+        addr = SUB_VB_COIL_BASE + coil_index_0_to_4
+        with self._lock:
+            ok, err = self._ensure_socket_open()
+            if not ok:
+                return False, err or "Not connected"
+            try:
+                if self._request_logger:
+                    self._request_logger(self._slave_id, "FC05", addr, 1)
+                wr = self._client.write_coil(address=addr, value=True, unit=self._slave_id)
+                if self._response_logger:
+                    self._response_logger(not wr.isError(), _response_exception_code(wr))
+                if wr.isError():
+                    return False, format_modbus_error(resp=wr)
+                return True, None
+            except Exception as e:
+                if self._response_logger:
+                    self._response_logger(False, None)
+                return False, format_modbus_error(exc=e)
+
+    def write_sub_coil(self, addr: int, value: bool) -> tuple[bool, str | None]:
+        """FC05 write single coil to Mainboard; Mainboard forwards to HPSB/LPSB. addr 898..909 (HPSB 898-900, LPSB 901-909)."""
+        if addr < SUB_HPSB_COIL_BASE or addr >= SUB_HPSB_COIL_BASE + SUB_HPSB_COIL_COUNT + SUB_LPSB_COIL_COUNT:
+            return False, f"Addr {addr} out of range 898..909"
+        with self._lock:
+            ok, err = self._ensure_socket_open()
+            if not ok:
+                return False, err or "Not connected"
+            try:
+                val_int = 1 if value else 0
+                if self._request_logger:
+                    self._request_logger(self._slave_id, "FC05", addr, val_int)
+                wr = self._client.write_coil(address=addr, value=value, unit=self._slave_id)
+                if self._response_logger:
+                    self._response_logger(not wr.isError(), _response_exception_code(wr))
+                if wr.isError():
+                    return False, format_modbus_error(resp=wr)
+                return True, None
+            except Exception as e:
+                if self._response_logger:
+                    self._response_logger(False, None)
+                return False, format_modbus_error(exc=e)
 
     def _write_pc_reg(self, address: int, value: int) -> tuple[bool, str | None]:
         with self._lock:

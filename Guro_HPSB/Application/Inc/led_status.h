@@ -1,8 +1,8 @@
-     /**
+/**
  * @file led_status.h
- * @brief HPSB LED1~4: PWR always on, RELAY any-on (HPSB_IsAnyRelayActive), CURRENT/FAULT (normal/overcurrent/sensor), RS485 pulse/idle blink.
- *        Call LED_Status_Tick_1ms() from 1ms periodic; set fault via LED_Status_SetCurrentFault(); RS485 from Modbus.
- *        In led_status.c: LED3_NORMAL_SOLID 1 = NORMAL solid ON, 0 = NORMAL 1Hz blink (compile-time).
+ * @brief HPSB LED1~4: PWR always on; RELAY/current/RS485 or diagnostic.
+ *   When LED_DIAG_COMM_OUTPUT=1 (led_status.c): LED2=RELAY1, LED3=RELAY2, LED4=RELAY3 (comm diagnostic).
+ *   When 0: LED2=any relay, LED3=CURRENT/FAULT, LED4=RS485. Call LED_Status_Tick_1ms() from 1ms periodic.
  */
 #ifndef LED_STATUS_H
 #define LED_STATUS_H

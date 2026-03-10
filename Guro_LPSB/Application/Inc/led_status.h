@@ -1,8 +1,8 @@
 /**
  * @file led_status.h
- * @brief LPSB LED1~4: PWR always on, OUTPUT any-on (LPSB_IsAnyOutputActive), CURRENT/FAULT (normal/overcurrent/sensor), RS485 pulse/idle blink.
- *        Call LED_Status_Tick_1ms() from 1ms periodic; set fault via LED_Status_SetCurrentFault(); RS485 from Modbus.
- *        In led_status.c: LED3_NORMAL_SOLID 1 = NORMAL solid ON, 0 = NORMAL 1Hz blink (compile-time).
+ * @brief LPSB LED1~4: PWR always on; OUTPUT/current/RS485 or diagnostic.
+ *   When LED_DIAG_COMM_OUTPUT=1 (led_status.c): LED2=SSR1, LED3=SSR2, LED4=SSR3 (comm diagnostic).
+ *   When 0: LED2=any output, LED3=CURRENT/FAULT, LED4=RS485. Call LED_Status_Tick_1ms() from 1ms periodic.
  */
 #ifndef LED_STATUS_H
 #define LED_STATUS_H

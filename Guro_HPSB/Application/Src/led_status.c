@@ -1,23 +1,30 @@
 /**
  * @file led_status.c
- * @brief HPSB LED policy: LED1(PWR)=always ON; LED2(RELAY)=HPSB_IsAnyRelayActive(); LED3(CURRENT/FAULT)=normal/4Hz/2-blink; LED4(RS485)=30ms pulse or 1Hz idle.
- *        Board: LED01~04 LOW active (LOW=ON, HIGH=OFF). 1ms tick; flag-based, no LED toggle in ISR.
+ * @brief HPSB LED policy:
+ *   LED1(PWR)=always ON when board power valid.
+ *   When LED_DIAG_COMM_OUTPUT==1 (communication diagnostic mode):
+ *     LED2 = RELAY1 (coil 0) status, LED3 = RELAY2 (coil 1), LED4 = RELAY3 (coil 2).
+ *   When LED_DIAG_COMM_OUTPUT==0: LED2=any relay, LED3=current/fault, LED4=RS485.
+ *   Board: LED01~04 LOW active (LOW=ON, HIGH=OFF). Relay outputs: active-high (GPIO_SET=ON).
  */
 #include "led_status.h"
 #include "main.h"
 #include "io_map.h"
+
+#ifndef LED_DIAG_COMM_OUTPUT
+#define LED_DIAG_COMM_OUTPUT  1   /* 1 = LED2/3/4 show RELAY1/2/3 for comm diagnostic */
+#endif
 
 #define RS485_PULSE_MS           30u
 #define RS485_IDLE_THRESHOLD_MS  3000u   /* 1Hz blink only when no comm for > 3s */
 #define RS485_1HZ_HALF_MS       500u
 #define CURRENT_4HZ_HALF_MS     125u
 #define LED3_1HZ_HALF_MS        500u
-/* NORMAL: 1=solid ON, 0=1Hz blink (compile-time option) */
 #ifndef LED3_NORMAL_SOLID
 #define LED3_NORMAL_SOLID       1
 #endif
 
-/* LED01~04: LOW active */
+/* LED01~04: LOW active (RESET=ON, SET=OFF) */
 #define LED_PWR_ON()    HAL_GPIO_WritePin(LED01_GPIO_Port, LED01_Pin, GPIO_PIN_RESET)
 #define LED_PWR_OFF()   HAL_GPIO_WritePin(LED01_GPIO_Port, LED01_Pin, GPIO_PIN_SET)
 #define LED_RELAY_ON()  HAL_GPIO_WritePin(LED02_GPIO_Port, LED02_Pin, GPIO_PIN_RESET)
@@ -51,9 +58,16 @@ void LED_Status_Init(void)
 	cur_1hz_phase_ms = 0;
 	sensor_phase_ms = 0;
 
+#if LED_DIAG_COMM_OUTPUT
+	/* LED2/3/4 will follow RELAY1/2/3 in tick */
+	LED_RELAY_OFF();
+	LED_CUR_OFF();
+	LED_RS485_OFF();
+#else
 	LED_RELAY_OFF();
 	LED_CUR_ON();
 	LED_RS485_OFF();
+#endif
 	LED_PWR_ON();
 }
 
@@ -79,20 +93,34 @@ void LED_Status_Tick_1ms(void)
 	/* ----- LED1 (PWR): always ON ----- */
 	LED_PWR_ON();
 
-	/* ----- LED2 (RELAY): HPSB_IsAnyRelayActive() (can later use actual output when protection/force-off added) ----- */
+#if LED_DIAG_COMM_OUTPUT
+	/* Communication diagnostic: LED2 = RELAY1, LED3 = RELAY2, LED4 = RELAY3 (coil 0,1,2). Outputs active-high in io_map.c. */
+	if (IO_HPSB_ReadCoil(HPSB_COIL_RLY01))
+		LED_RELAY_ON();
+	else
+		LED_RELAY_OFF();
+	if (IO_HPSB_ReadCoil(HPSB_COIL_RLY02))
+		LED_CUR_ON();
+	else
+		LED_CUR_OFF();
+	if (IO_HPSB_ReadCoil(HPSB_COIL_RLY03))
+		LED_RS485_ON();
+	else
+		LED_RS485_OFF();
+#else
+	/* ----- LED2 (RELAY): any relay active ----- */
 	if (HPSB_IsAnyRelayActive())
 		LED_RELAY_ON();
 	else
 		LED_RELAY_OFF();
 
-	/* ----- LED3 (CURRENT/FAULT): state machine, phase reset on fault change ----- */
+	/* ----- LED3 (CURRENT/FAULT): state machine ----- */
 	if (current_fault != prev_fault) {
 		prev_fault = current_fault;
 		cur_4hz_phase_ms = 0;
 		cur_1hz_phase_ms = 0;
 		sensor_phase_ms = 0;
 	}
-
 	switch (current_fault) {
 	case LED_CURRENT_NORMAL:
 #if LED3_NORMAL_SOLID
@@ -130,14 +158,13 @@ void LED_Status_Tick_1ms(void)
 		break;
 	}
 
-	/* ----- LED4 (RS485): priority 1) 30ms pulse ON, 2) if (now - last_comm_tick_ms) > 3000 then 1Hz blink, 3) else OFF ----- */
+	/* ----- LED4 (RS485): 30ms pulse or 1Hz when idle ----- */
 	if (rs485_pulse_ms > 0) {
 		if (rs485_pulse_ms <= elapsed)
 			rs485_pulse_ms = 0;
 		else
 			rs485_pulse_ms -= (uint16_t)elapsed;
 	}
-
 	if (rs485_pulse_ms > 0) {
 		LED_RS485_ON();
 	} else {
@@ -152,4 +179,5 @@ void LED_Status_Tick_1ms(void)
 			LED_RS485_OFF();
 		}
 	}
+#endif /* !LED_DIAG_COMM_OUTPUT */
 }

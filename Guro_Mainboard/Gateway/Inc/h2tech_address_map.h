@@ -37,7 +37,8 @@ typedef enum {
     H2_ACT_PULSE_MAIN_DOOR1,
     H2_ACT_PULSE_MAIN_DOOR2,
     H2_ACT_TOGGLE_OUTPUT,
-    H2_ACT_PULSE_OUTPUT
+    H2_ACT_PULSE_OUTPUT,
+    H2_ACT_WRITE_SUB_COIL  /* PC→Mainboard FC05: forward to HPSB/LPSB coil (value 0 or 1) */
 } H2_Action_t;
 
 typedef struct {

@@ -7,6 +7,7 @@
 #include "modbus_cfg.h"
 #include "main.h"
 #include "led_status.h"
+#include "app_config.h"
 #include <string.h>
 
 extern UART_HandleTypeDef huart2;  /* Modbus Master = Subboard = USART2 */
@@ -27,7 +28,7 @@ static uint16_t     rx_len;
 static uint8_t      last_slave_responded;
 static uint8_t      comm_ok[SLAVE_ID_COUNT]; /* 0 = HPSB, 1 = LPSB */
 
-#define SLAVE_TO_INDEX(s)  ((uint8_t)((s) - SLAVE_ID_FIRST))
+#define SLAVE_TO_INDEX(s)  ((uint8_t)SLAVE_ID_TO_TABLE_INDEX(s))
 
 static void set_de_tx(void)   { HAL_GPIO_WritePin(MODBUS_DE_GPIO_PORT, MODBUS_DE_GPIO_PIN, GPIO_PIN_SET); }
 static void set_de_rx(void)   { HAL_GPIO_WritePin(MODBUS_DE_GPIO_PORT, MODBUS_DE_GPIO_PIN, GPIO_PIN_RESET); }
@@ -59,7 +60,10 @@ static void send_request(void)
     set_de_tx();
     HAL_UART_Transmit(&MODBUS_UART, tx_buf, (uint16_t)(pdu_len + 2), 100);
     set_de_rx();
-    LED_Status_OnRS485Activity();
+    LED_Status_OnSubRS485Activity();
+#if MODBUS_MASTER_DEBUG_LOG
+    ModbusMaster_LogSubPollStart((uint8_t)e.slave_id);
+#endif
     rx_len = 0;
     response_deadline = HAL_GetTick() + MODBUS_RESPONSE_TIMEOUT_MS;
     state = MST_WAIT_RESPONSE;
@@ -110,7 +114,15 @@ static void parse_response(void)
     if (ok == 0) {
         last_slave_responded = slave;
         comm_ok[SLAVE_TO_INDEX(e.slave_id)] = 1;
-        LED_Status_OnRS485Activity();
+        LED_Status_OnSubRS485Activity();
+#if MODBUS_MASTER_DEBUG_LOG
+        ModbusMaster_LogSubPollOk(slave);
+#endif
+    } else {
+#if MODBUS_MASTER_DEBUG_LOG
+        const char *reason = (rx_len >= 4 && ModbusRTU_CRC16Check(rx_buf, rx_len) != 0) ? "CRC fail" : "parse fail";
+        ModbusMaster_LogSubPollFail(slave, reason);
+#endif
     }
     state = MST_IDLE;
 }
@@ -144,8 +156,12 @@ void ModbusMaster_Poll(void)
         case MST_WAIT_RESPONSE:
             if (HAL_GetTick() >= response_deadline) {
                 PollEntry_t te;
-                if (ModbusTable_GetPollEntry(poll_index, &te) == 0)
+                if (ModbusTable_GetPollEntry(poll_index, &te) == 0) {
                     comm_ok[SLAVE_TO_INDEX(te.slave_id)] = 0;
+#if MODBUS_MASTER_DEBUG_LOG
+                    ModbusMaster_LogSubPollFail((uint8_t)te.slave_id, "timeout");
+#endif
+                }
                 state = MST_IDLE;
                 poll_index++;
                 if (poll_index >= POLL_TABLE_SIZE)
@@ -158,6 +174,13 @@ void ModbusMaster_Poll(void)
                 (void)exp_slave;
                 uint8_t fc = rx_buf[1];
                 if (fc & 0x80) {
+                    PollEntry_t te;
+                    if (ModbusTable_GetPollEntry(poll_index, &te) == 0) {
+                        comm_ok[SLAVE_TO_INDEX(te.slave_id)] = 0;
+#if MODBUS_MASTER_DEBUG_LOG
+                        ModbusMaster_LogSubPollFail((uint8_t)te.slave_id, "exception");
+#endif
+                    }
                     state = MST_IDLE;
                     poll_index++;
                     if (poll_index >= POLL_TABLE_SIZE) poll_index = 0;
@@ -187,15 +210,21 @@ void ModbusMaster_Poll(void)
     }
 }
 
+#define DE_RX_GUARD_MS  2  /* Delay after TX before DE->RX so last byte leaves the driver (PB12) */
+
 int ModbusMaster_WriteCoil(SlaveId_t slave, uint16_t coil_addr, uint8_t value)
 {
     uint8_t pdu[8];
     size_t len = ModbusRTU_BuildFC05(pdu, (uint8_t)slave, coil_addr, value);
     ModbusRTU_AppendCRC(pdu, len);
     set_de_tx();
+#if (MODBUS_DE_TX_SETTLE_MS > 0)
+    HAL_Delay(MODBUS_DE_TX_SETTLE_MS);
+#endif
     HAL_StatusTypeDef s = HAL_UART_Transmit(&MODBUS_UART, pdu, (uint16_t)(len + 2), 100);
+    if (DE_RX_GUARD_MS > 0) HAL_Delay(DE_RX_GUARD_MS);
     set_de_rx();
-    if (s == HAL_OK) LED_Status_OnRS485Activity();
+    if (s == HAL_OK) LED_Status_OnSubRS485Activity();
     return (s == HAL_OK) ? 0 : -1;
 }
 
@@ -205,9 +234,13 @@ int ModbusMaster_WriteHoldingReg(SlaveId_t slave, uint16_t reg_addr, uint16_t va
     size_t len = ModbusRTU_BuildFC06(pdu, (uint8_t)slave, reg_addr, value);
     ModbusRTU_AppendCRC(pdu, len);
     set_de_tx();
+#if (MODBUS_DE_TX_SETTLE_MS > 0)
+    HAL_Delay(MODBUS_DE_TX_SETTLE_MS);
+#endif
     HAL_StatusTypeDef s = HAL_UART_Transmit(&MODBUS_UART, pdu, (uint16_t)(len + 2), 100);
+    if (DE_RX_GUARD_MS > 0) HAL_Delay(DE_RX_GUARD_MS);
     set_de_rx();
-    if (s == HAL_OK) LED_Status_OnRS485Activity();
+    if (s == HAL_OK) LED_Status_OnSubRS485Activity();
     return (s == HAL_OK) ? 0 : -1;
 }
 
@@ -215,6 +248,6 @@ uint8_t ModbusMaster_GetLastSlaveResponded(void) { return last_slave_responded; 
 
 uint8_t ModbusMaster_IsCommOk(SlaveId_t slave)
 {
-    if (slave < SLAVE_ID_FIRST || slave > SLAVE_ID_LAST) return 0;
+    if (!IS_VALID_SLAVE_ID(slave)) return 0;
     return comm_ok[SLAVE_TO_INDEX(slave)];
 }

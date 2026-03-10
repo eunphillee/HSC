@@ -7,6 +7,7 @@
 #include "upstream_slave_h2tech.h"
 #include "h2tech_address_map.h"
 #include "gateway_actions.h"
+#include "gateway_write_log.h"
 #include "aggregated_status.h"
 #include "io_map.h"
 #include "reset_reason.h"
@@ -445,6 +446,8 @@ static int handle_fc05(uint16_t start_addr, const uint8_t *write_data,
         return 2;
     }
     bool value = (write_data[0] != 0);
+    if (e->action == H2_ACT_WRITE_SUB_COIL)
+        Gateway_LogWriteUpstream(start_addr, value ? 1u : 0u);
     if (!H2Map_ApplyWrite(e, value, PULSE_MS_DEFAULT)) {
         response[0] = 0x85;
         response[1] = EX_ILLEGAL_DATA_ADDR;

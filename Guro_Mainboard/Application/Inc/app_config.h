@@ -74,4 +74,14 @@
 #define SYSCFG_MODBUS_DEBUG_LOG  0
 #endif
 
+/* UART2 하위 폴링(HPSB/LPSB): poll start, OK(포트/전류 요약), timeout/CRC fail 로그. 1=UART1 출력 */
+#ifndef MODBUS_MASTER_DEBUG_LOG
+#define MODBUS_MASTER_DEBUG_LOG  0
+#endif
+
+/* Gateway write (PC→Mainboard FC05 898..909 → UART2 to sub): upstream command, target board/slave_id/channel, FC05 on UART2, subboard response. 1=UART1 출력 (communication diagnostic) */
+#ifndef GATEWAY_WRITE_DEBUG_LOG
+#define GATEWAY_WRITE_DEBUG_LOG  0   /* set to 1 for LED diagnostic / comm verification */
+#endif
+
 #endif /* APP_CONFIG_H */

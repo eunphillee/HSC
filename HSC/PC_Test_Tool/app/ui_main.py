@@ -16,7 +16,21 @@ from pymodbus.client.sync import ModbusSerialClient
 from .modbus_client import ModbusClient
 from .worker import MainboardWorker, create_worker_and_thread
 from .logger import LogHandler
-from .address_map import MAINBOARD_SLAVE_ID_DEFAULT, MAIN_DI_REG, MAIN_DO_REG, PC_ON_EN_REG, PC_RESET_EN_REG, PC_LED_IN_REG
+from .address_map import (
+    MAINBOARD_SLAVE_ID_DEFAULT,
+    MAIN_DI_REG,
+    MAIN_DO_REG,
+    PC_ON_EN_REG,
+    PC_RESET_EN_REG,
+    PC_LED_IN_REG,
+    SUB_SENSE_REG,
+    SUB_COIL_STATUS_START,
+    SUB_VB_COIL_BASE,
+    SUB_VB_COIL_COUNT,
+    SUB_HPSB_COIL_BASE,
+    SUB_LPSB_COIL_BASE,
+    MAIN_ENV_REG,
+)
 
 
 DARK_QSS = """
@@ -80,6 +94,20 @@ class DiLedIndicator(QFrame):
             self.setStyleSheet("border-radius: 7px; background-color: #2196F3;")
 
 
+class ColorStrip(QFrame):
+    """왼쪽 색상 표시: ON=빨강, OFF=파랑. set_state(True)=빨강, False=파랑."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(8, 36)
+        self.set_state(False)
+
+    def set_state(self, on: bool):
+        if on:
+            self.setStyleSheet("background-color: #e53935; border-radius: 2px;")
+        else:
+            self.setStyleSheet("background-color: #2196F3; border-radius: 2px;")
+
+
 def card_frame(title: str = "") -> tuple[QFrame, QVBoxLayout]:
     f = QFrame()
     f.setObjectName("card")
@@ -97,10 +125,14 @@ class MainWindow(QMainWindow):
     request_read_di = pyqtSignal()
     request_read_pc_led = pyqtSignal()
     request_write_relay = pyqtSignal(int, bool)
-    request_pc_on_pulse = pyqtSignal()   # 클릭 시 100ms high 펄스
+    request_pc_on_pulse = pyqtSignal()
     request_pc_reset_pulse = pyqtSignal()
-    request_read_env = pyqtSignal()      # SHTC3 env read (FC03 2110 cnt=2)
-    request_read_raw = pyqtSignal()  # 보드→PC raw 수신 (0xAA 등) 로그용
+    request_read_env = pyqtSignal()
+    request_read_raw = pyqtSignal()
+    request_read_sub = pyqtSignal()           # HPSB/LPSB sense + coil + error_flags
+    request_sub_pulse = pyqtSignal(int)       # LPSB VB pulse index 0..4
+    request_write_sub_coil = pyqtSignal(int, bool)  # addr 898..909, value (FC05 to Mainboard)
+    request_diagnostic_sequence = pyqtSignal()  # run HPSB/LPSB LED diagnostic sequence
 
     def __init__(self):
         super().__init__()
@@ -114,8 +146,9 @@ class MainWindow(QMainWindow):
             )
         except Exception as e:
             self._log.log_info(f"Startup: {type(e).__name__}: {e}")
-        self._client.set_request_logger(lambda u, f, a, c: self._log.log_request(u, f, a, c))
-        self._client.set_response_logger(lambda ok, exc: self._log.log_response(ok, exc))
+        self._last_log_tag = "[MAIN]"
+        self._client.set_request_logger(self._on_request_log)
+        self._client.set_response_logger(self._on_response_log)
         self._thread, self._worker = create_worker_and_thread(self._client)
         self._thread.start()
         self._connect_worker_signals()
@@ -124,8 +157,12 @@ class MainWindow(QMainWindow):
         self._raw_poll_timer.setInterval(100)
         self._raw_poll_timer.timeout.connect(self._poll_raw_rx)
         self._env_poll_timer = QTimer(self)
-        self._env_poll_timer.setInterval(5000)  # 5초 주기 (1초→5초: 통신 안정성 확인용)
+        self._env_poll_timer.setInterval(5000)
         self._env_poll_timer.timeout.connect(lambda: self.request_read_env.emit())
+        self._sub_poll_timer = QTimer(self)
+        self._sub_poll_timer.setInterval(2000)  # HPSB/LPSB 2초 주기
+        self._sub_poll_timer.timeout.connect(lambda: self.request_read_sub.emit())
+        self._sub_auto_poll = False
         self._seen_0xaa_since_connect = False
         self._modbus_fail_0xaa_hint_shown = False
         self._build_ui()
@@ -140,7 +177,12 @@ class MainWindow(QMainWindow):
         self.request_pc_reset_pulse.connect(self._worker.on_request_pc_reset_pulse, Qt.ConnectionType.QueuedConnection)
         self.request_read_env.connect(self._worker.on_request_read_env, Qt.ConnectionType.QueuedConnection)
         self.request_read_raw.connect(self._worker.on_request_read_raw, Qt.ConnectionType.QueuedConnection)
+        self.request_read_sub.connect(self._worker.on_request_read_sub, Qt.ConnectionType.QueuedConnection)
+        self.request_sub_pulse.connect(self._worker.on_request_sub_pulse, Qt.ConnectionType.QueuedConnection)
+        self.request_write_sub_coil.connect(self._worker.on_request_write_sub_coil, Qt.ConnectionType.QueuedConnection)
+        self.request_diagnostic_sequence.connect(self._worker.on_request_diagnostic_sequence, Qt.ConnectionType.QueuedConnection)
         self._worker.di_result.connect(self._on_di_result)
+        self._worker.sub_data_result.connect(self._on_sub_data_result)
         self._worker.pc_led_result.connect(self._on_pc_led_result)
         self._worker.env_result.connect(self._on_env_result)
         self._worker.write_result.connect(self._on_write_result)
@@ -190,7 +232,16 @@ class MainWindow(QMainWindow):
         top_lay.addStretch()
         main_layout.addWidget(top)
 
-        # ---- B) Mainboard Outputs (4) ----
+        # ---- Content: Left (Mainboard) + Right (HPSB/LPSB) ----
+        content_row = QHBoxLayout()
+        content_row.setSpacing(16)
+
+        # ----- Left: Mainboard 테스트 (기존 구조 유지) -----
+        left_w = QWidget()
+        left_layout = QVBoxLayout(left_w)
+        left_layout.setSpacing(12)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+
         card_out, lay_out = card_frame("Mainboard Outputs (Relay1~4)")
         out_labels = ["RELAY1_EN", "RELAY2_EN", "RELAY3_EN", "RELAY4_EN"]
         self._relay_checks = []
@@ -201,9 +252,8 @@ class MainWindow(QMainWindow):
             self._relay_checks.append(chk)
             grid_out.addWidget(chk, i // 2, i % 2)
         lay_out.addLayout(grid_out)
-        main_layout.addWidget(card_out)
+        left_layout.addWidget(card_out)
 
-        # ---- C) Mainboard Inputs (8) + Read DI ----
         card_in, lay_in = card_frame("Mainboard Inputs (DI_01~DI_08)")
         self._di_leds = []
         grid_di = QGridLayout()
@@ -219,9 +269,8 @@ class MainWindow(QMainWindow):
         btn_read_di.clicked.connect(lambda: self.request_read_di.emit())
         lay_in.addWidget(btn_read_di)
         self._btn_read_di = btn_read_di
-        main_layout.addWidget(card_in)
+        left_layout.addWidget(card_in)
 
-        # ---- D) PC Status ----
         card_pc, lay_pc = card_frame("PC Status")
         lay_pc.addWidget(QLabel("Outputs (클릭 시 500ms high 출력):"))
         btn_pc_on = QPushButton("PC_ON_EN (500ms)")
@@ -234,7 +283,7 @@ class MainWindow(QMainWindow):
         self._btn_pc_reset = btn_pc_reset
         lay_pc.addWidget(QLabel("Input:"))
         row_pc_led = QHBoxLayout()
-        self._pc_led_led = DiLedIndicator()  # high=빨강, low=파랑
+        self._pc_led_led = DiLedIndicator()
         row_pc_led.addWidget(self._pc_led_led)
         row_pc_led.addWidget(QLabel("PC_LED_IN"))
         row_pc_led.addStretch()
@@ -243,9 +292,8 @@ class MainWindow(QMainWindow):
         btn_read_pc_led.clicked.connect(lambda: self.request_read_pc_led.emit())
         lay_pc.addWidget(btn_read_pc_led)
         self._btn_read_pc_led = btn_read_pc_led
-        main_layout.addWidget(card_pc)
+        left_layout.addWidget(card_pc)
 
-        # ---- E) Env Sensor (SHTC3) ----
         card_env, lay_env = card_frame("Env Sensor (SHTC3)")
         row_env = QHBoxLayout()
         self._lbl_temp = QLabel("Temp: -.- °C")
@@ -265,7 +313,105 @@ class MainWindow(QMainWindow):
         btn_read_env.clicked.connect(lambda: self.request_read_env.emit())
         lay_env.addWidget(btn_read_env)
         self._btn_read_env = btn_read_env
-        main_layout.addWidget(card_env)
+        left_layout.addWidget(card_env)
+
+        left_layout.addStretch()
+        content_row.addWidget(left_w)
+
+        # ----- Right: 제어 / HPSB / LPSB -----
+        right_w = QWidget()
+        right_w.setMinimumWidth(300)
+        right_layout = QVBoxLayout(right_w)
+        right_layout.setSpacing(12)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+
+        gb_ctrl = QGroupBox("제어")
+        lay_ctrl = QVBoxLayout(gb_ctrl)
+        btn_read_once = QPushButton("Read once (HPSB/LPSB)")
+        btn_read_once.clicked.connect(lambda: self.request_read_sub.emit())
+        lay_ctrl.addWidget(btn_read_once)
+        self._btn_read_sub = btn_read_once
+        btn_diag_seq = QPushButton("LED diagnostic sequence")
+        btn_diag_seq.setToolTip("HPSB RELAY1/2/3 then LPSB1 SSR1/2/3 ON→OFF. Watch LED2/3/4 on boards.")
+        btn_diag_seq.clicked.connect(lambda: self.request_diagnostic_sequence.emit())
+        lay_ctrl.addWidget(btn_diag_seq)
+        self._btn_diag_seq = btn_diag_seq
+        self._chk_auto_poll = QCheckBox("Auto poll (2s)")
+        self._chk_auto_poll.stateChanged.connect(self._on_auto_poll_changed)
+        lay_ctrl.addWidget(self._chk_auto_poll)
+        right_layout.addWidget(gb_ctrl)
+
+        gb_hpsb = QGroupBox("HPSB (Slave 1)")
+        lay_hpsb = QVBoxLayout(gb_hpsb)
+        self._hpsb_strips = []
+        self._hpsb_btns = []
+        self._hpsb_current_labels = []
+        hpsb_row = QHBoxLayout()
+        for i, name in enumerate(["RELAY1 EN", "RELAY2 EN", "RELAY3 EN"]):
+            col = QVBoxLayout()
+            strip = ColorStrip()
+            self._hpsb_strips.append(strip)
+            btn = QPushButton(name)
+            btn.setCheckable(True)
+            btn.clicked.connect(lambda checked, idx=i: self._on_hpsb_relay_click(idx))
+            self._hpsb_btns.append(btn)
+            row1 = QHBoxLayout()
+            row1.addWidget(strip)
+            row1.addWidget(btn)
+            col.addLayout(row1)
+            cur_lbl = QLabel("current")
+            cur_lbl.setStyleSheet("color: #888; font-size: 11px;")
+            self._hpsb_current_labels.append(cur_lbl)
+            col.addWidget(cur_lbl)
+            hpsb_row.addLayout(col)
+        lay_hpsb.addLayout(hpsb_row)
+        self._hpsb_comm_label = QLabel("Comm: -")
+        lay_hpsb.addWidget(self._hpsb_comm_label)
+        right_layout.addWidget(gb_hpsb)
+
+        gb_lpsb = QGroupBox("LPSB")
+        lay_lpsb = QVBoxLayout(gb_lpsb)
+        self._lpsb_select_btns = []
+        lpsb_sel_row = QHBoxLayout()
+        for i, name in enumerate(["LPSB 2", "LPSB 3", "LPSB 4"]):
+            b = QPushButton(name)
+            b.setCheckable(True)
+            b.clicked.connect(lambda checked, idx=i: self._on_lpsb_select(idx))
+            self._lpsb_select_btns.append(b)
+            lpsb_sel_row.addWidget(b)
+        self._lpsb_select_btns[0].setChecked(True)
+        self._lpsb_select_btns[0].setStyleSheet("background-color: #1976D2; color: white;")
+        self._selected_lpsb_index = 0
+        lay_lpsb.addLayout(lpsb_sel_row)
+        self._lpsb_strips = []
+        self._lpsb_ssr_btns = []
+        self._lpsb_current_labels = []
+        lpsb_ssr_row = QHBoxLayout()
+        for i, name in enumerate(["SSR1 EN", "SSR2 EN", "SSR3 EN"]):
+            col = QVBoxLayout()
+            strip = ColorStrip()
+            self._lpsb_strips.append(strip)
+            btn = QPushButton(name)
+            btn.setCheckable(True)
+            btn.clicked.connect(lambda checked, idx=i: self._on_lpsb_ssr_click(idx))
+            self._lpsb_ssr_btns.append(btn)
+            row1 = QHBoxLayout()
+            row1.addWidget(strip)
+            row1.addWidget(btn)
+            col.addLayout(row1)
+            cur_lbl = QLabel("current")
+            cur_lbl.setStyleSheet("color: #888; font-size: 11px;")
+            self._lpsb_current_labels.append(cur_lbl)
+            col.addWidget(cur_lbl)
+            lpsb_ssr_row.addLayout(col)
+        lay_lpsb.addLayout(lpsb_ssr_row)
+        self._lpsb_comm_label = QLabel("Comm: -")
+        lay_lpsb.addWidget(self._lpsb_comm_label)
+        right_layout.addWidget(gb_lpsb)
+        right_layout.addStretch()
+        content_row.addWidget(right_w)
+
+        main_layout.addLayout(content_row)
 
         # ---- F) Log ----
         card_log, lay_log = card_frame("Log")
@@ -283,10 +429,42 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(card_log)
 
         self.setCentralWidget(central)
-        self.resize(560, 640)
-        self.setMinimumSize(480, 500)
+        self.resize(880, 640)
+        self.setMinimumSize(720, 500)
 
         self._log.log_line.connect(self._on_log_line)
+
+    def _tag_for_request(self, func: str, addr: int | str, count_or_value: int | str) -> str:
+        """보드 태그: [MAIN], [HPSB], [LPSB1], [LPSB2], [LPSB3]. PC는 메인보드와만 통신하며, 메인보드가 UART2로 HPSB/LPSB 폴링한 결과를 보여줌."""
+        try:
+            a = int(addr)
+        except (TypeError, ValueError):
+            a = -1
+        if a == SUB_SENSE_REG or a == SUB_COIL_STATUS_START or (func == "FC02" and 868 <= a <= 879):
+            return "[HPSB][LPSB1][LPSB2][LPSB3]"
+        if func == "FC05" and SUB_HPSB_COIL_BASE <= a < SUB_HPSB_COIL_BASE + 3:
+            return "[HPSB]"
+        if func == "FC05" and SUB_LPSB_COIL_BASE <= a < SUB_LPSB_COIL_BASE + 9:
+            if a < SUB_LPSB_COIL_BASE + 3:
+                return "[LPSB1]"
+            if a < SUB_LPSB_COIL_BASE + 6:
+                return "[LPSB2]"
+            return "[LPSB3]"
+        if func == "FC05" and SUB_VB_COIL_BASE <= a < SUB_VB_COIL_BASE + SUB_VB_COIL_COUNT:
+            idx = a - SUB_VB_COIL_BASE
+            if idx == 0:
+                return "[LPSB1]"
+            if 1 <= idx <= 3:
+                return "[LPSB2]"
+            return "[LPSB3]"
+        return "[MAIN]"
+
+    def _on_request_log(self, unit: int, func: str, addr: int | str, count_or_value: int | str):
+        self._last_log_tag = self._tag_for_request(func, addr, count_or_value)
+        self._log.log_request(self._last_log_tag, unit, func, addr, count_or_value)
+
+    def _on_response_log(self, ok: bool, exception_code: int | None):
+        self._log.log_response(self._last_log_tag, ok, exception_code)
 
     def _on_log_line(self, line: str):
         self._log_lines.append(line)
@@ -311,6 +489,14 @@ class MainWindow(QMainWindow):
         self._btn_read_di.setEnabled(connected)
         self._btn_read_pc_led.setEnabled(connected)
         self._btn_read_env.setEnabled(connected)
+        self._btn_read_sub.setEnabled(connected)
+        self._chk_auto_poll.setEnabled(connected)
+        for b in self._hpsb_btns:
+            b.setEnabled(connected)
+        for b in self._lpsb_select_btns:
+            b.setEnabled(connected)
+        for b in self._lpsb_ssr_btns:
+            b.setEnabled(connected)
         for chk in self._relay_checks:
             chk.setEnabled(connected)
         self._btn_pc_on.setEnabled(connected)
@@ -326,6 +512,9 @@ class MainWindow(QMainWindow):
         else:
             self._raw_poll_timer.stop()
             self._env_poll_timer.stop()
+            self._sub_poll_timer.stop()
+            self._sub_auto_poll = False
+            self._chk_auto_poll.setChecked(False)
             self._status_badge.setText("Disconnected")
             self._status_badge.setStyleSheet("color: #555555; font-weight: bold; padding: 4px 8px;")
 
@@ -350,16 +539,16 @@ class MainWindow(QMainWindow):
             )
             if ok:
                 self._set_connected_ui(True)
-                self._log.log("Connect", port, self._baud.value(), "OK")
+                self._log.log_tagged("[MAIN]", "Connect", port, self._baud.value(), "OK")
                 if self._slave_id.value() != MAINBOARD_SLAVE_ID_DEFAULT:
                     self._log.log_info(f"경고: 메인보드 Slave ID는 {MAINBOARD_SLAVE_ID_DEFAULT}입니다. 현재 {self._slave_id.value()}이면 Read DI/Relay 응답이 없을 수 있습니다.")
             else:
                 QMessageBox.warning(self, "Connection", msg or "No response/timeout")
-                self._log.log("Connect", port, self._baud.value(), "Fail", msg or "No response/timeout")
+                self._log.log_tagged("[MAIN]", "Connect", port, self._baud.value(), "Fail", msg or "No response/timeout")
         except Exception as e:
             err = f"{type(e).__name__}: {e}"
             QMessageBox.warning(self, "Connection", err)
-            self._log.log("Connect", port, self._baud.value(), "Fail", err)
+            self._log.log_tagged("[MAIN]", "Connect", port, self._baud.value(), "Fail", err)
 
     def _do_disconnect(self):
         try:
@@ -367,7 +556,7 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         self._set_connected_ui(False)
-        self._log.log("Disconnect", "", "", "OK")
+        self._log.log_tagged("[MAIN]", "Disconnect", "", "", "OK")
 
     def _poll_raw_rx(self):
         """주기적으로 시리얼 버퍼에서 raw 수신 확인 (보드 0xAA 등)."""
@@ -409,12 +598,12 @@ class MainWindow(QMainWindow):
                 self._di_leds[i].set_di_state(bool(bits[i]))  # 1=입력 있음(빨강), 0=없음(파랑)
             for i in range(len(bits), 8):
                 self._di_leds[i].set_di_state(False)
-            self._log.log("FC03", MAIN_DI_REG, 2, "OK")
+            self._log.log_tagged("[MAIN]", "FC03", MAIN_DI_REG, 2, "OK")
         else:
             for led in self._di_leds:
                 led.set_di_state(None)  # 미확인 = 회색
             msg = err or "No response/timeout"
-            self._log.log("FC03", MAIN_DI_REG, 2, "Fail", msg)
+            self._log.log_tagged("[MAIN]", "FC03", MAIN_DI_REG, 2, "Fail", msg)
             self._show_0xaa_mode_hint_if_needed(msg)
             if msg and ("No response" in msg or "0 received" in msg):
                 self._log.log_info("힌트: 메인보드 빌드에서 ENABLE_PC_TEST_AA_STREAM=0, USE_PC_TEST_UART1_SLAVE=1 인지 확인하세요.")
@@ -423,11 +612,11 @@ class MainWindow(QMainWindow):
         if ok and state is not None:
             # high=빨강, low=파랑
             self._pc_led_led.set_di_state(True if state else False)
-            self._log.log("FC03", PC_LED_IN_REG, 1, "OK")
+            self._log.log_tagged("[MAIN]", "FC03", PC_LED_IN_REG, 1, "OK")
         else:
             self._pc_led_led.set_di_state(None)  # 미확인 = 회색
             msg = err or "No response/timeout"
-            self._log.log("FC03", PC_LED_IN_REG, 1, "Fail", msg)
+            self._log.log_tagged("[MAIN]", "FC03", PC_LED_IN_REG, 1, "Fail", msg)
             self._show_0xaa_mode_hint_if_needed(msg)
             if msg and ("No response" in msg or "0 received" in msg):
                 self._log.log_info("힌트: 메인보드 빌드에서 ENABLE_PC_TEST_AA_STREAM=0, USE_PC_TEST_UART1_SLAVE=1 인지 확인하세요.")
@@ -448,25 +637,106 @@ class MainWindow(QMainWindow):
                 self._lbl_env_flags.setText(f"Flags: 0x{int(flags) & 0xFFFF:04X}")
             except Exception:
                 pass
-            self._log.log("FC03", 2110, 3, "OK")
+            self._log.log_tagged("[MAIN]", "FC03", MAIN_ENV_REG, 3, "OK")
         else:
             msg = err or "No response/timeout"
             try:
                 self._lbl_env_status.setText("Status: (read fail)")
             except Exception:
                 pass
-            self._log.log("FC03", 2110, 3, "Fail", msg)
+            self._log.log_tagged("[MAIN]", "FC03", MAIN_ENV_REG, 3, "Fail", msg)
             self._show_0xaa_mode_hint_if_needed(msg)
 
     def _on_write_result(self, ok: bool, err: str | None):
+        tag = self._last_log_tag
         if ok:
-            self._log.log("Write", "FC06", "OK", "OK")  # Relay/PC_CTRL 쓰기 성공
+            self._log.log_tagged(tag, "Write", "FC05/06", "-", "Response: OK")
         else:
             msg = err or "No response/timeout"
-            self._log.log("Write", "", "", "Fail", msg)
+            self._log.log_tagged(tag, "Write", "FC05/06", "-", "Response: Fail", msg)
             self._show_0xaa_mode_hint_if_needed(msg)
             if msg and ("No response" in msg or "0 received" in msg):
                 self._log.log_info("힌트: 메인보드 빌드에서 ENABLE_PC_TEST_AA_STREAM=0, USE_PC_TEST_UART1_SLAVE=1 인지 확인하세요. (0xAA 전용 모드면 Modbus 응답 없음)")
+
+    def _on_hpsb_relay_click(self, idx: int):
+        """HPSB RELAY 버튼: FC05 addr 898+idx, value=checked → Mainboard가 HPSB(slave 1)에 전달."""
+        btn = self._hpsb_btns[idx]
+        value = btn.isChecked()
+        self._hpsb_strips[idx].set_state(value)
+        addr = SUB_HPSB_COIL_BASE + idx
+        self._log.log_info(f"[DEBUG] Button: HPSB RELAY{idx + 1} EN -> FC05 addr={addr} val={1 if value else 0}")
+        self.request_write_sub_coil.emit(addr, value)
+
+    def _on_lpsb_select(self, idx: int):
+        """LPSB 2/3/4 선택. 하나만 선택되도록. 선택 시 해당 보드 데이터로 SSR/current 갱신."""
+        self._selected_lpsb_index = idx
+        for i, b in enumerate(self._lpsb_select_btns):
+            b.setChecked(i == idx)
+            b.setStyleSheet("background-color: #1976D2; color: white;" if i == idx else "")
+        sense = getattr(self, "_last_sense", None)
+        coils = getattr(self, "_last_coils", None)
+        if sense and coils and len(sense) >= 12 and len(coils) >= 12:
+            base_s = 3 + idx * 3
+            base_c = 3 + idx * 3
+            for i in range(3):
+                on = base_c + i < len(coils) and coils[base_c + i]
+                self._lpsb_strips[i].set_state(on)
+                self._lpsb_ssr_btns[i].setChecked(on)
+                v = sense[base_s + i] if base_s + i < len(sense) else 0
+                self._lpsb_current_labels[i].setText(f"current: {v}")
+
+    def _on_lpsb_ssr_click(self, ssr_idx: int):
+        """LPSB SSR 버튼: FC05 addr 901 + selected_board*3 + ssr_idx, value=checked → Mainboard가 LPSB(2/4/8)에 전달."""
+        btn = self._lpsb_ssr_btns[ssr_idx]
+        value = btn.isChecked()
+        self._lpsb_strips[ssr_idx].set_state(value)
+        sel = getattr(self, "_selected_lpsb_index", 0)
+        addr = SUB_LPSB_COIL_BASE + sel * 3 + ssr_idx
+        self._log.log_info(f"[DEBUG] Button: LPSB SSR{ssr_idx + 1} EN (board {sel}) -> FC05 addr={addr} val={1 if value else 0}")
+        self.request_write_sub_coil.emit(addr, value)
+
+    def _on_auto_poll_changed(self, state):
+        self._sub_auto_poll = state == Qt.CheckState.Checked
+        if self._sub_auto_poll and self._client.connected:
+            self._sub_poll_timer.start()
+            self.request_read_sub.emit()
+        else:
+            self._sub_poll_timer.stop()
+
+    def _on_sub_data_result(self, ok: bool, sense: list | None, coils: list | None, flags: int | None, err: str | None):
+        AGG_ERR_COMM_HPSB = 1
+        AGG_ERR_COMM_LPSB = 2
+        if not ok:
+            self._hpsb_comm_label.setText("Comm: (read fail)")
+            self._lpsb_comm_label.setText("Comm: (read fail)")
+            if err:
+                self._log.log_tagged("[HPSB][LPSB1][LPSB2][LPSB3]", "FC03/FC02", SUB_SENSE_REG, "sub", "Fail", err)
+            return
+        sense = sense or [0] * 14
+        coils = coils or [False] * 14
+        flags = flags if flags is not None else 0
+        # HPSB: RELAY1~3 상태 → 왼쪽 색상(빨강/파랑), 버튼 체크, current 표시
+        for i in range(3):
+            on = i < len(coils) and coils[i]
+            self._hpsb_strips[i].set_state(on)
+            self._hpsb_btns[i].setChecked(on)
+            v = sense[i] if i < len(sense) else 0
+            self._hpsb_current_labels[i].setText(f"current: {v}")
+        self._hpsb_comm_label.setText("Comm: OK" if not (flags & AGG_ERR_COMM_HPSB) else "Comm: Timeout/CRC")
+        # LPSB: 선택된 보드(LPSB2/3/4)에 대해 SSR1~3 상태·current 표시
+        sel = getattr(self, "_selected_lpsb_index", 0)
+        base_s = 3 + sel * 3
+        base_c = 3 + sel * 3
+        for i in range(3):
+            on = base_c + i < len(coils) and coils[base_c + i]
+            self._lpsb_strips[i].set_state(on)
+            self._lpsb_ssr_btns[i].setChecked(on)
+            v = sense[base_s + i] if base_s + i < len(sense) else 0
+            self._lpsb_current_labels[i].setText(f"current: {v}")
+        self._lpsb_comm_label.setText("Comm: OK" if not (flags & AGG_ERR_COMM_LPSB) else "Comm: Timeout/CRC")
+        self._last_sense = sense
+        self._last_coils = coils
+        self._log.log_tagged("[HPSB][LPSB1][LPSB2][LPSB3]", "FC03/FC02", SUB_SENSE_REG, "sub", "OK")
 
     def closeEvent(self, event):
         try:

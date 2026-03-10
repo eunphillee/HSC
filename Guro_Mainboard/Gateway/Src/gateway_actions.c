@@ -5,6 +5,7 @@
  */
 #include "gateway_actions.h"
 #include "h2tech_address_map.h"
+#include "gateway_write_log.h"
 #include "io_map.h"
 #include "modbus_table.h"
 #include "modbus_master.h"
@@ -113,4 +114,20 @@ uint8_t Gateway_Action_PollDownstreamWriteFail(void)
 void Gateway_Action_ClearDownstreamWriteFailAlarm(void)
 {
     s_downstream_write_fail = 0;
+}
+
+/* PC→Mainboard FC05 to coil 898..909: forward to HPSB/LPSB (Slave 1,2,4,8). */
+void Gateway_Action_WriteSubCoil(uint8_t slave_id, uint16_t coil_index, uint8_t value)
+{
+    SlaveId_t s = (SlaveId_t)slave_id;
+    if (slave_id != 1 && slave_id != 2 && slave_id != 4 && slave_id != 8) return;
+    if (coil_index >= MODBUS_COIL_COUNT) return;
+    Gateway_LogWriteMapped(slave_id, coil_index, value);
+    Gateway_LogUart2TxStart(slave_id, coil_index, value ? 1 : 0);
+    int ret = ModbusMaster_WriteCoil(s, coil_index, value ? 1 : 0);
+    Gateway_LogUart2TxResult(ret == 0);
+    if (ret == 0)
+        ModbusTable_SetCoil(s, coil_index, value ? 1 : 0);
+    else
+        s_downstream_write_fail = 1;
 }

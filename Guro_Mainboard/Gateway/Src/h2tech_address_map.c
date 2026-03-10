@@ -6,6 +6,7 @@
  */
 #include <stddef.h>
 #include "h2tech_address_map.h"
+#include "gateway_actions.h"
 
 static volatile uint8_t g_agg_bits[(AGG_BIT_COUNT + 7) / 8] = {0};
 
@@ -87,7 +88,7 @@ static const H2_MapEntry_t g_map[] = {
     H2E(H2_AREA_1X, 890, H2_RW_READ, H2_SRC_AGG_BIT, AGG_BIT_CMD_ONOFF_6, H2_ACT_NONE, "CMD_ONOFF_6"),
     H2E(H2_AREA_1X, 891, H2_RW_READ, H2_SRC_AGG_BIT, AGG_BIT_CMD_ONOFF_7, H2_ACT_NONE, "CMD_ONOFF_7"),
 
-    /* 1x0892~0898 : Virtual buttons / Door open control (WRITE). 0899/0900 not in table -> 0x02 */
+    /* 1x0892~0898 : Virtual buttons / Door open control (WRITE). */
     H2E(H2_AREA_1X, 892, H2_RW_WRITE, H2_SRC_ACTION_PULSE, 0, H2_ACT_PULSE_OUTPUT, "VB_ONOFF_8"),
     H2E(H2_AREA_1X, 893, H2_RW_WRITE, H2_SRC_ACTION_PULSE, 0, H2_ACT_PULSE_OUTPUT, "VB_ONOFF_9"),
     H2E(H2_AREA_1X, 894, H2_RW_WRITE, H2_SRC_ACTION_PULSE, 0, H2_ACT_PULSE_OUTPUT, "VB_ONOFF_10"),
@@ -95,6 +96,19 @@ static const H2_MapEntry_t g_map[] = {
     H2E(H2_AREA_1X, 896, H2_RW_WRITE, H2_SRC_ACTION_PULSE, 0, H2_ACT_PULSE_OUTPUT, "VB_ONOFF_12"),
     H2E(H2_AREA_1X, 897, H2_RW_WRITE, H2_SRC_ACTION_PULSE, 0, H2_ACT_PULSE_MAIN_DOOR1, "DOOR_OPEN_CTRL_1"),
     H2E(H2_AREA_1X, 898, H2_RW_WRITE, H2_SRC_ACTION_PULSE, 0, H2_ACT_PULSE_MAIN_DOOR2, "DOOR_OPEN_CTRL_2"),
+    /* 1x0899~0910 : HPSB/LPSB coil write (FC05 from PC). 899-901=HPSB coil 0-2, 902-904=LPSB1, 905-907=LPSB2, 908-910=LPSB3. */
+    H2E(H2_AREA_1X, 899, H2_RW_WRITE, H2_SRC_ACTION_PULSE, 0, H2_ACT_WRITE_SUB_COIL, "WR_HPSB_COIL_0"),
+    H2E(H2_AREA_1X, 900, H2_RW_WRITE, H2_SRC_ACTION_PULSE, 0, H2_ACT_WRITE_SUB_COIL, "WR_HPSB_COIL_1"),
+    H2E(H2_AREA_1X, 901, H2_RW_WRITE, H2_SRC_ACTION_PULSE, 0, H2_ACT_WRITE_SUB_COIL, "WR_HPSB_COIL_2"),
+    H2E(H2_AREA_1X, 902, H2_RW_WRITE, H2_SRC_ACTION_PULSE, 0, H2_ACT_WRITE_SUB_COIL, "WR_LPSB1_COIL_0"),
+    H2E(H2_AREA_1X, 903, H2_RW_WRITE, H2_SRC_ACTION_PULSE, 0, H2_ACT_WRITE_SUB_COIL, "WR_LPSB1_COIL_1"),
+    H2E(H2_AREA_1X, 904, H2_RW_WRITE, H2_SRC_ACTION_PULSE, 0, H2_ACT_WRITE_SUB_COIL, "WR_LPSB1_COIL_2"),
+    H2E(H2_AREA_1X, 905, H2_RW_WRITE, H2_SRC_ACTION_PULSE, 0, H2_ACT_WRITE_SUB_COIL, "WR_LPSB2_COIL_0"),
+    H2E(H2_AREA_1X, 906, H2_RW_WRITE, H2_SRC_ACTION_PULSE, 0, H2_ACT_WRITE_SUB_COIL, "WR_LPSB2_COIL_1"),
+    H2E(H2_AREA_1X, 907, H2_RW_WRITE, H2_SRC_ACTION_PULSE, 0, H2_ACT_WRITE_SUB_COIL, "WR_LPSB2_COIL_2"),
+    H2E(H2_AREA_1X, 908, H2_RW_WRITE, H2_SRC_ACTION_PULSE, 0, H2_ACT_WRITE_SUB_COIL, "WR_LPSB3_COIL_0"),
+    H2E(H2_AREA_1X, 909, H2_RW_WRITE, H2_SRC_ACTION_PULSE, 0, H2_ACT_WRITE_SUB_COIL, "WR_LPSB3_COIL_1"),
+    H2E(H2_AREA_1X, 910, H2_RW_WRITE, H2_SRC_ACTION_PULSE, 0, H2_ACT_WRITE_SUB_COIL, "WR_LPSB3_COIL_2"),
 };
 
 const H2_MapEntry_t* H2Map_FindByDec(H2_Area_t area, uint16_t h2_dec) {
@@ -112,25 +126,46 @@ __attribute__((weak)) void Gateway_Action_PulseOutputByOnOffIndex(uint8_t onoff_
     (void)onoff_index_1based; (void)pulse_ms;
 }
 
+/* 1x0899..0910 -> (slave_id, coil_index). 899-901=HPSB(1), 902-904=LPSB1(2), 905-907=LPSB2(4), 908-910=LPSB3(8). */
+static void h2_dec_to_sub_coil(uint16_t h2_dec, uint8_t *out_slave_id, uint16_t *out_coil_index) {
+    if (h2_dec < 899 || h2_dec > 910) { *out_slave_id = 0; *out_coil_index = 0; return; }
+    uint16_t offset = h2_dec - 899;
+    uint8_t board = (uint8_t)(offset / 3u);
+    uint8_t coil = (uint8_t)(offset % 3u);
+    static const uint8_t slave_ids[] = { 1, 2, 4, 8 };
+    *out_slave_id = slave_ids[board];
+    *out_coil_index = coil;
+}
+
 bool H2Map_ApplyWrite(const H2_MapEntry_t* e, bool value, uint16_t pulse_ms) {
     if (!e) return false;
     if (e->rw != H2_RW_WRITE) return false;
-    if (!value) return true;
 
     switch (e->action) {
     case H2_ACT_PULSE_MAIN_DOOR1:
+        if (!value) return true;
         Gateway_Action_PulseMainDoor1(pulse_ms);
         return true;
     case H2_ACT_PULSE_MAIN_DOOR2:
+        if (!value) return true;
         Gateway_Action_PulseMainDoor2(pulse_ms);
         return true;
     case H2_ACT_PULSE_OUTPUT:
+        if (!value) return true;
         if (e->h2_dec >= 892 && e->h2_dec <= 896) {
             uint8_t onoff_index = (uint8_t)(e->h2_dec - 884);
             Gateway_Action_PulseOutputByOnOffIndex(onoff_index, pulse_ms);
             return true;
         }
         return false;
+    case H2_ACT_WRITE_SUB_COIL: {
+        if (e->h2_dec < 899 || e->h2_dec > 910) return false;
+        uint8_t slave_id;
+        uint16_t coil_index;
+        h2_dec_to_sub_coil(e->h2_dec, &slave_id, &coil_index);
+        Gateway_Action_WriteSubCoil(slave_id, coil_index, value ? 1 : 0);
+        return true;
+    }
     default:
         return false;
     }

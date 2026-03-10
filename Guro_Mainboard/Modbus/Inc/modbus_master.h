@@ -24,6 +24,11 @@ int ModbusMaster_WriteHoldingReg(SlaveId_t slave, uint16_t reg_addr, uint16_t va
 uint8_t ModbusMaster_GetLastSlaveResponded(void);
 uint8_t ModbusMaster_IsCommOk(SlaveId_t slave);
 
+/* Optional debug log (UART2 하위 폴링): MODBUS_MASTER_DEBUG_LOG=1 시 구현체에서 UART 출력 */
+void ModbusMaster_LogSubPollStart(uint8_t slave_id);
+void ModbusMaster_LogSubPollOk(uint8_t slave_id);
+void ModbusMaster_LogSubPollFail(uint8_t slave_id, const char *reason);
+
 #ifdef __cplusplus
 }
 #endif

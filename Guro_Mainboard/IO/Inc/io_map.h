@@ -12,17 +12,22 @@
 extern "C" {
 #endif
 
-/* ========== Slave IDs (Modbus 0x address) ========== */
+/* ========== Slave IDs (Modbus 0x address on UART2 sub bus) ========== */
 typedef enum {
     SLAVE_ID_HPSB  = 1,
     SLAVE_ID_LPSB1 = 2,
-    SLAVE_ID_LPSB2 = 3,
-    SLAVE_ID_LPSB3 = 4,
+    SLAVE_ID_LPSB2 = 4,
+    SLAVE_ID_LPSB3 = 8,
     SLAVE_ID_COUNT = 4
 } SlaveId_t;
 
 #define SLAVE_ID_FIRST   SLAVE_ID_HPSB
 #define SLAVE_ID_LAST    SLAVE_ID_LPSB3
+
+/* Table index 0..3 for comm_ok / coil_img etc. (slave IDs 1,2,4,8 are non-contiguous) */
+#define SLAVE_ID_TO_TABLE_INDEX(s)  \
+    ((s)==1 ? 0u : (s)==2 ? 1u : (s)==4 ? 2u : (s)==8 ? 3u : 0u)
+#define IS_VALID_SLAVE_ID(s)  ((s) == 1 || (s) == 2 || (s) == 4 || (s) == 8)
 
 /* ========== Poll types (what MAIN reads/writes) ========== */
 typedef enum {
