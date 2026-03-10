@@ -241,10 +241,45 @@ __attribute__((weak)) void SystemConfig_LogSkipSave(void)
 	/* Override to log "CFG unchanged, skip save" e.g. via UART. */
 }
 
+#if SYSTEM_CONFIG_BOOT_LOG_FACTORY_RESET
+void SystemConfig_LogFactoryResetDone(void)
+{
+	extern UART_HandleTypeDef huart1;
+	const char *msg = "CFG factory reset done\r\n";
+	(void)HAL_UART_Transmit(&huart1, (const uint8_t *)msg, (uint16_t)strlen(msg), 100);
+}
+#else
 __attribute__((weak)) void SystemConfig_LogFactoryResetDone(void)
 {
 	/* Override to log "CFG factory reset done" e.g. via UART. */
 }
+#endif
+
+#ifndef SYSCFG_MODBUS_DEBUG_LOG
+#define SYSCFG_MODBUS_DEBUG_LOG  0
+#endif
+#if SYSCFG_MODBUS_DEBUG_LOG
+void UpstreamSlave_LogSyscfgRead(uint16_t id, uint16_t baud_code)
+{
+	extern UART_HandleTypeDef huart1;
+	char buf[64];
+	int n = snprintf(buf, sizeof(buf), "SYSCFG READ id=%u baud_code=%u\r\n", (unsigned)id, (unsigned)baud_code);
+	if (n > 0)
+		(void)HAL_UART_Transmit(&huart1, (uint8_t *)buf, (uint16_t)n, 100);
+}
+void UpstreamSlave_LogSyscfgWrite(uint16_t reg, uint16_t value, int result_ok)
+{
+	extern UART_HandleTypeDef huart1;
+	char buf[64];
+	int n = snprintf(buf, sizeof(buf), "SYSCFG WRITE reg=%u value=%u result=%s\r\n",
+	                 (unsigned)reg, (unsigned)value, result_ok ? "OK" : "ERR");
+	if (n > 0)
+		(void)HAL_UART_Transmit(&huart1, (uint8_t *)buf, (uint16_t)n, 100);
+}
+#else
+void UpstreamSlave_LogSyscfgRead(uint16_t id, uint16_t baud_code) { (void)id; (void)baud_code; }
+void UpstreamSlave_LogSyscfgWrite(uint16_t reg, uint16_t value, int result_ok) { (void)reg; (void)value; (void)result_ok; }
+#endif
 
 __attribute__((weak)) void SystemConfig_LogCurrent(const system_config_t *cfg)
 {

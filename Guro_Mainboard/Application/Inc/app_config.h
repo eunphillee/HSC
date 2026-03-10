@@ -69,4 +69,9 @@
 #define SYSTEM_CONFIG_BOOT_LOG_FACTORY_RESET  0
 #endif
 
+/* 4x3000~3002 FC03/FC06 접근 시 디버그 로그: SYSCFG READ id= baud_code= / SYSCFG WRITE reg= value= result= */
+#ifndef SYSCFG_MODBUS_DEBUG_LOG
+#define SYSCFG_MODBUS_DEBUG_LOG  0
+#endif
+
 #endif /* APP_CONFIG_H */

@@ -65,8 +65,10 @@
 - **FC03**: start=3000, count=1~3 → [slave_id], [slave_id, baudrate_code], [slave_id, baudrate_code, 0].
 - **FC06**: 단일 레지스터 쓰기. 성공 시 normal write response. 실패 시 0x03.
 - **baudrate code**: 0=9600, 1=19200, 2=38400, 3=57600, 4=115200.
-- **UART baud 적용**: 저장 즉시가 아닌 **다음 부팅 시** main.c에서 Load 후 huart1.Init.BaudRate 적용. 통신 중 재설정을 피하기 위한 안전 방식.
+- **UART baud 적용**: 저장 즉시가 아닌 **다음 부팅 시** main.c에서 Load 후 huart1.Init.BaudRate 적용. 통신 중 재설정을 피하기 위한 안전 방식. (코드 주석: upstream_slave_h2tech.c 4x3001 처리부에도 동일 내용 명시)
 - 부팅 로그 / UART 로그 옵션(`SYSTEM_CONFIG_BOOT_LOG` 등)으로 변경 결과 확인 가능.
+- **SYSCFG_MODBUS_DEBUG_LOG** (app_config.h): 1로 설정 시 FC03 read 3000~3002 → "SYSCFG READ id=%u baud_code=%u", FC06 write → "SYSCFG WRITE reg=%u value=%u result=OK/ERR" 한 줄씩 UART1 출력.
+- **SYSTEM_CONFIG_BOOT_LOG_FACTORY_RESET**: 1로 설정 시 Factory reset 직후 "CFG factory reset done" 한 줄 UART1 출력 (system_config.c에서 구현).
 
 ---
 

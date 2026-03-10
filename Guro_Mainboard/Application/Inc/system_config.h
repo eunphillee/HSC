@@ -96,7 +96,13 @@ void SystemConfig_LogSkipSave(void);
 /** Weak: override to log "CFG factory reset done" (when SYSTEM_CONFIG_BOOT_LOG_FACTORY_RESET=1). */
 void SystemConfig_LogFactoryResetDone(void);
 
-/* ---------- Modbus reserved registers (향후 PC 툴에서 설정 변경 예정) ----------
+/** SYSCFG debug log (when SYSCFG_MODBUS_DEBUG_LOG=1). FC03 read 3000~3002 시 id, baud_code 출력. */
+void UpstreamSlave_LogSyscfgRead(uint16_t id, uint16_t baud_code);
+
+/** SYSCFG debug log. FC06 write 3000/3001/3002 시 reg, value, result(1=OK 0=ERR) 출력. */
+void UpstreamSlave_LogSyscfgWrite(uint16_t reg, uint16_t value, int result_ok);
+
+/* ---------- Modbus system config registers (4x3000~3002 구현 완료) ----------
  * Holding registers; write 동작은 추후 구현.
  * 4x3000 : slave_id (1~247)
  * 4x3001 : baudrate code (0=9600, 1=19200, 2=38400, 3=57600, 4=115200)

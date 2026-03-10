@@ -12,6 +12,7 @@
 #include "reset_reason.h"
 #include "bsp_gpio.h"
 #include "system_config.h"
+#include "app_config.h"
 
 #define EX_ILLEGAL_FUNCTION  0x01
 #define EX_ILLEGAL_DATA_ADDR 0x02
@@ -226,6 +227,9 @@ static int handle_fc03(uint16_t start_addr, uint16_t count, const void *p_agg,
             response[6] = 0;
             response[7] = 0;  /* 4x3002 read: always 0 */
         }
+#if SYSCFG_MODBUS_DEBUG_LOG
+        UpstreamSlave_LogSyscfgRead(r0, r1);
+#endif
         return (int)(2 + count * 2u);
     }
 
@@ -315,6 +319,9 @@ static int handle_fc06(uint16_t start_addr, const uint8_t *write_data,
     if (start_addr == SYSCFG_MODBUS_SLAVE_ID_REG) {
         const system_config_t *cur = SystemConfig_Get();
         if (!cur || value < SYSTEM_CONFIG_SLAVE_ID_MIN || value > SYSTEM_CONFIG_SLAVE_ID_MAX) {
+#if SYSCFG_MODBUS_DEBUG_LOG
+            UpstreamSlave_LogSyscfgWrite(SYSCFG_MODBUS_SLAVE_ID_REG, value, 0);
+#endif
             response[0] = 0x86;
             response[1] = EX_ILLEGAL_DATA_VAL;
             return 2;
@@ -322,10 +329,16 @@ static int handle_fc06(uint16_t start_addr, const uint8_t *write_data,
         system_config_t cfg = *cur;
         cfg.slave_id = (uint8_t)(value & 0xFF);
         if (SystemConfig_Save(&cfg) != 0) {
+#if SYSCFG_MODBUS_DEBUG_LOG
+            UpstreamSlave_LogSyscfgWrite(SYSCFG_MODBUS_SLAVE_ID_REG, value, 0);
+#endif
             response[0] = 0x86;
             response[1] = EX_ILLEGAL_DATA_VAL;
             return 2;
         }
+#if SYSCFG_MODBUS_DEBUG_LOG
+        UpstreamSlave_LogSyscfgWrite(SYSCFG_MODBUS_SLAVE_ID_REG, value, 1);
+#endif
         response[0] = 0x06;
         response[1] = (uint8_t)(start_addr >> 8);
         response[2] = (uint8_t)(start_addr & 0xFF);
@@ -334,10 +347,14 @@ static int handle_fc06(uint16_t start_addr, const uint8_t *write_data,
         return 6;
     }
 
-    /* 4x3001: baudrate code (0~4) -> EEPROM save. UART baud는 재부팅 후 적용. */
+    /* 4x3001: baudrate code (0~4) -> EEPROM save only.
+     * 보드레이트는 즉시 적용되지 않음. 다음 재부팅 시 main.c에서 Load 후 huart1.Init.BaudRate 적용. */
     if (start_addr == SYSCFG_MODBUS_BAUDRATE_CODE_REG) {
         const system_config_t *cur = SystemConfig_Get();
         if (!cur || value > 4u) {
+#if SYSCFG_MODBUS_DEBUG_LOG
+            UpstreamSlave_LogSyscfgWrite(SYSCFG_MODBUS_BAUDRATE_CODE_REG, value, 0);
+#endif
             response[0] = 0x86;
             response[1] = EX_ILLEGAL_DATA_VAL;
             return 2;
@@ -346,10 +363,16 @@ static int handle_fc06(uint16_t start_addr, const uint8_t *write_data,
         system_config_t cfg = *cur;
         cfg.baudrate = baud;
         if (SystemConfig_Save(&cfg) != 0) {
+#if SYSCFG_MODBUS_DEBUG_LOG
+            UpstreamSlave_LogSyscfgWrite(SYSCFG_MODBUS_BAUDRATE_CODE_REG, value, 0);
+#endif
             response[0] = 0x86;
             response[1] = EX_ILLEGAL_DATA_VAL;
             return 2;
         }
+#if SYSCFG_MODBUS_DEBUG_LOG
+        UpstreamSlave_LogSyscfgWrite(SYSCFG_MODBUS_BAUDRATE_CODE_REG, value, 1);
+#endif
         response[0] = 0x06;
         response[1] = (uint8_t)(start_addr >> 8);
         response[2] = (uint8_t)(start_addr & 0xFF);
@@ -361,15 +384,24 @@ static int handle_fc06(uint16_t start_addr, const uint8_t *write_data,
     /* 4x3002: factory reset command. value=1 -> SystemConfig_FactoryReset() */
     if (start_addr == SYSCFG_MODBUS_FACTORY_RESET_REG) {
         if (value != 1u) {
+#if SYSCFG_MODBUS_DEBUG_LOG
+            UpstreamSlave_LogSyscfgWrite(SYSCFG_MODBUS_FACTORY_RESET_REG, value, 0);
+#endif
             response[0] = 0x86;
             response[1] = EX_ILLEGAL_DATA_VAL;
             return 2;
         }
         if (SystemConfig_FactoryReset() != 0) {
+#if SYSCFG_MODBUS_DEBUG_LOG
+            UpstreamSlave_LogSyscfgWrite(SYSCFG_MODBUS_FACTORY_RESET_REG, value, 0);
+#endif
             response[0] = 0x86;
             response[1] = EX_ILLEGAL_DATA_VAL;
             return 2;
         }
+#if SYSCFG_MODBUS_DEBUG_LOG
+        UpstreamSlave_LogSyscfgWrite(SYSCFG_MODBUS_FACTORY_RESET_REG, value, 1);
+#endif
         response[0] = 0x06;
         response[1] = (uint8_t)(start_addr >> 8);
         response[2] = (uint8_t)(start_addr & 0xFF);
