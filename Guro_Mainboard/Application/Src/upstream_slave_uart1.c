@@ -23,7 +23,7 @@
 
 extern UART_HandleTypeDef huart1;
 
-/* Actual pin level: Mode A (RS485_DE_ACTIVE_HIGH=1) TX=SET/RX=RESET, Mode B (=0) inverted. */
+/* Actual pin level: Mode A (RS485_DE_ACTIVE_HIGH=1) TX=SET/RX=RESET. main.h: RS485_DE_* = PC_RS485_DE_RE (PB1). */
 #if RS485_DE_ACTIVE_HIGH
 static void set_pin_tx(void) { HAL_GPIO_WritePin(RS485_DE_GPIO_Port, RS485_DE_Pin, GPIO_PIN_SET); }
 static void set_pin_rx(void) { HAL_GPIO_WritePin(RS485_DE_GPIO_Port, RS485_DE_Pin, GPIO_PIN_RESET); }

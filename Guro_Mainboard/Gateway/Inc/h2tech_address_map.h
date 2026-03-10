@@ -107,7 +107,8 @@ bool H2Map_ReadAggBit(uint16_t agg_bit_index);
 void H2Map_WriteAggBit(uint16_t agg_bit_index, bool v);
 bool H2Map_ApplyWrite(const H2_MapEntry_t* e, bool value, uint16_t pulse_ms);
 
-/* Modbus start_addr -> H2TECH dec: h2_dec = start_addr + 1 */
+/* Modbus start_addr -> H2TECH dec: h2_dec = start_addr + 1.
+ * PC tools send 0-based addresses (e.g. coil 0 = first coil); FC05/FC15 use this mapping. */
 static inline uint16_t H2Map_ModbusAddrToH2Dec(uint16_t start_addr) {
     return (uint16_t)(start_addr + 1);
 }

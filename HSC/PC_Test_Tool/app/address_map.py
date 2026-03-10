@@ -20,3 +20,10 @@ MAIN_DO_COUNT = 4
 PC_CTRL_REG = 2102
 # FC03 read 1 register: bit0=PC_LED_IN
 PC_LED_IN_REG = 2103
+
+# ---- MAIN Env (SHTC3) ----
+# FC03 read start=MAIN_ENV_REG count=2
+# Reg0: temp_c_x10 (signed)
+# Reg1: rh_x10 (unsigned)
+MAIN_ENV_REG = 2110
+MAIN_ENV_COUNT = 3  # + error_flags

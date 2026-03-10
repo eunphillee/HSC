@@ -31,7 +31,6 @@ void PcTestAA_Init(void)
 {
 	last_send_tick = HAL_GetTick();
 	set_de_rx();  /* PB1=0 */
-	LED_Status_BootBlinkPcTestAA(3);  /* ENABLE_PC_TEST_AA_STREAM=1 빌드 확인: LED2 3회 빠른 점멸 */
 }
 
 void PcTestAA_Tick(const aggregated_status_t *agg)

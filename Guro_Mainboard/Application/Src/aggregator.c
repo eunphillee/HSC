@@ -3,6 +3,7 @@
 #include "modbus_table.h"
 #include "modbus_master.h"
 #include "main.h"
+#include "shtc3.h"
 #include "h2tech_address_map.h"
 #include "gateway_actions.h"
 
@@ -26,9 +27,25 @@ void Aggregator_Update(aggregated_status_t *out)
 	if (!out) return;
 
 	out->timestamp_ms = HAL_GetTick();
+	out->error_flags = 0;
 
-	out->env_temp_cx10 = -32768;
-	out->env_rh_x10    = 0xFFFF;
+	/* Env sensor (SHTC3 on I2C1): update at most 1 Hz */
+	static uint32_t last_env_tick;
+	if ((out->timestamp_ms - last_env_tick) >= 1000u) {
+		last_env_tick = out->timestamp_ms;
+		extern I2C_HandleTypeDef hi2c1; /* I2C1 = SHTC3 */
+		float t = 0.0f, rh = 0.0f;
+		if (SHTC3_Measure(&hi2c1, &t, &rh) == 0) {
+			/* store x10 */
+			out->env_temp_cx10 = (int16_t)(t * 10.0f);
+			out->env_rh_x10    = (uint16_t)(rh * 10.0f);
+			out->error_flags &= (uint16_t)~AGG_ERR_SHTC3;
+		} else {
+			out->env_temp_cx10 = -32768;
+			out->env_rh_x10    = 0xFFFF;
+			out->error_flags |= AGG_ERR_SHTC3;
+		}
+	}
 
 	out->main_di = 0;
 	for (int i = 0; i < MAIN_DI_COUNT; i++)
@@ -74,7 +91,6 @@ void Aggregator_Update(aggregated_status_t *out)
 	out->lpsb3_sense_raw[1] = ModbusTable_GetInputReg(SLAVE_ID_LPSB3, 2);
 	out->lpsb3_sense_raw[2] = ModbusTable_GetInputReg(SLAVE_ID_LPSB3, 3);
 
-	out->error_flags = 0;
 	if (!ModbusMaster_IsCommOk(SLAVE_ID_HPSB)) out->error_flags |= AGG_ERR_COMM_HPSB;
 	if (!ModbusMaster_IsCommOk(SLAVE_ID_LPSB1) || !ModbusMaster_IsCommOk(SLAVE_ID_LPSB2) || !ModbusMaster_IsCommOk(SLAVE_ID_LPSB3))
 		out->error_flags |= AGG_ERR_COMM_LPSB;

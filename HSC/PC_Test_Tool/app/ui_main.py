@@ -46,7 +46,7 @@ def list_serial_ports():
 
 
 class LedIndicator(QFrame):
-    """Small LED: on=#00c853, off=#555555."""
+    """Small LED: on=#00c853, off=#555555. For generic on/off."""
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setFixedSize(14, 14)
@@ -59,6 +59,25 @@ class LedIndicator(QFrame):
             self.setStyleSheet("border-radius: 7px; background-color: #00c853;")
         else:
             self.setStyleSheet("border-radius: 7px; background-color: #555555;")
+
+
+class DiLedIndicator(QFrame):
+    """DI/PC_LED용 원: 입력 없음=파란색, 입력 있음=빨간색, 미확인=회색."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(14, 14)
+        self.setStyleSheet("border-radius: 7px; background-color: #555555;")
+        self._state = None  # None=미확인, True=입력 있음(빨강), False=입력 없음(파랑)
+
+    def set_di_state(self, has_input: bool | None):
+        """has_input: True=입력 있음(빨강), False=입력 없음(파랑), None=미확인(회색)."""
+        self._state = has_input
+        if has_input is None:
+            self.setStyleSheet("border-radius: 7px; background-color: #555555;")
+        elif has_input:
+            self.setStyleSheet("border-radius: 7px; background-color: #e53935;")
+        else:
+            self.setStyleSheet("border-radius: 7px; background-color: #2196F3;")
 
 
 def card_frame(title: str = "") -> tuple[QFrame, QVBoxLayout]:
@@ -78,8 +97,9 @@ class MainWindow(QMainWindow):
     request_read_di = pyqtSignal()
     request_read_pc_led = pyqtSignal()
     request_write_relay = pyqtSignal(int, bool)
-    request_write_pc_on_en = pyqtSignal(bool)
-    request_write_pc_reset_en = pyqtSignal(bool)
+    request_pc_on_pulse = pyqtSignal()   # 클릭 시 100ms high 펄스
+    request_pc_reset_pulse = pyqtSignal()
+    request_read_env = pyqtSignal()      # SHTC3 env read (FC03 2110 cnt=2)
     request_read_raw = pyqtSignal()  # 보드→PC raw 수신 (0xAA 등) 로그용
 
     def __init__(self):
@@ -103,6 +123,11 @@ class MainWindow(QMainWindow):
         self._raw_poll_timer = QTimer(self)
         self._raw_poll_timer.setInterval(100)
         self._raw_poll_timer.timeout.connect(self._poll_raw_rx)
+        self._env_poll_timer = QTimer(self)
+        self._env_poll_timer.setInterval(1000)
+        self._env_poll_timer.timeout.connect(lambda: self.request_read_env.emit())
+        self._seen_0xaa_since_connect = False
+        self._modbus_fail_0xaa_hint_shown = False
         self._build_ui()
         self._refresh_ports()
         self._set_connected_ui(False)
@@ -111,11 +136,13 @@ class MainWindow(QMainWindow):
         self.request_read_di.connect(self._worker.on_request_read_di, Qt.ConnectionType.QueuedConnection)
         self.request_read_pc_led.connect(self._worker.on_request_read_pc_led, Qt.ConnectionType.QueuedConnection)
         self.request_write_relay.connect(self._worker.on_request_write_relay, Qt.ConnectionType.QueuedConnection)
-        self.request_write_pc_on_en.connect(self._worker.on_request_write_pc_on_en, Qt.ConnectionType.QueuedConnection)
-        self.request_write_pc_reset_en.connect(self._worker.on_request_write_pc_reset_en, Qt.ConnectionType.QueuedConnection)
+        self.request_pc_on_pulse.connect(self._worker.on_request_pc_on_pulse, Qt.ConnectionType.QueuedConnection)
+        self.request_pc_reset_pulse.connect(self._worker.on_request_pc_reset_pulse, Qt.ConnectionType.QueuedConnection)
+        self.request_read_env.connect(self._worker.on_request_read_env, Qt.ConnectionType.QueuedConnection)
         self.request_read_raw.connect(self._worker.on_request_read_raw, Qt.ConnectionType.QueuedConnection)
         self._worker.di_result.connect(self._on_di_result)
         self._worker.pc_led_result.connect(self._on_pc_led_result)
+        self._worker.env_result.connect(self._on_env_result)
         self._worker.write_result.connect(self._on_write_result)
         self._worker.raw_bytes_received.connect(self._on_raw_bytes)
 
@@ -181,7 +208,7 @@ class MainWindow(QMainWindow):
         self._di_leds = []
         grid_di = QGridLayout()
         for i in range(8):
-            led = LedIndicator()
+            led = DiLedIndicator()
             lbl = QLabel(f"DI_{i+1:02d}")
             lbl.setStyleSheet("color: #e0e0e0;")
             grid_di.addWidget(led, i // 4, (i % 4) * 2)
@@ -196,20 +223,18 @@ class MainWindow(QMainWindow):
 
         # ---- D) PC Status ----
         card_pc, lay_pc = card_frame("PC Status")
-        lay_pc.addWidget(QLabel("Outputs:"))
-        self._pc_on_check = QCheckBox("PC_ON_EN")
-        self._pc_on_check.stateChanged.connect(
-            lambda s: self.request_write_pc_on_en.emit(s == Qt.CheckState.Checked.value)
-        )
-        self._pc_reset_check = QCheckBox("PC_RESET_EN")
-        self._pc_reset_check.stateChanged.connect(
-            lambda s: self.request_write_pc_reset_en.emit(s == Qt.CheckState.Checked.value)
-        )
-        lay_pc.addWidget(self._pc_on_check)
-        lay_pc.addWidget(self._pc_reset_check)
+        lay_pc.addWidget(QLabel("Outputs (클릭 시 100ms high 출력):"))
+        btn_pc_on = QPushButton("PC_ON_EN (100ms)")
+        btn_pc_on.clicked.connect(lambda: self.request_pc_on_pulse.emit())
+        btn_pc_reset = QPushButton("PC_RESET_EN (100ms)")
+        btn_pc_reset.clicked.connect(lambda: self.request_pc_reset_pulse.emit())
+        lay_pc.addWidget(btn_pc_on)
+        lay_pc.addWidget(btn_pc_reset)
+        self._btn_pc_on = btn_pc_on
+        self._btn_pc_reset = btn_pc_reset
         lay_pc.addWidget(QLabel("Input:"))
         row_pc_led = QHBoxLayout()
-        self._pc_led_led = LedIndicator()
+        self._pc_led_led = DiLedIndicator()  # high=빨강, low=파랑
         row_pc_led.addWidget(self._pc_led_led)
         row_pc_led.addWidget(QLabel("PC_LED_IN"))
         row_pc_led.addStretch()
@@ -220,7 +245,29 @@ class MainWindow(QMainWindow):
         self._btn_read_pc_led = btn_read_pc_led
         main_layout.addWidget(card_pc)
 
-        # ---- E) Log ----
+        # ---- E) Env Sensor (SHTC3) ----
+        card_env, lay_env = card_frame("Env Sensor (SHTC3)")
+        row_env = QHBoxLayout()
+        self._lbl_temp = QLabel("Temp: -.- °C")
+        self._lbl_rh = QLabel("RH: -.- %")
+        self._lbl_env_status = QLabel("Status: (not read)")
+        self._lbl_env_flags = QLabel("Flags: ----")
+        row_env.addWidget(self._lbl_temp)
+        row_env.addSpacing(16)
+        row_env.addWidget(self._lbl_rh)
+        row_env.addSpacing(16)
+        row_env.addWidget(self._lbl_env_status)
+        row_env.addSpacing(16)
+        row_env.addWidget(self._lbl_env_flags)
+        row_env.addStretch()
+        lay_env.addLayout(row_env)
+        btn_read_env = QPushButton("Read Sensor (1s auto)")
+        btn_read_env.clicked.connect(lambda: self.request_read_env.emit())
+        lay_env.addWidget(btn_read_env)
+        self._btn_read_env = btn_read_env
+        main_layout.addWidget(card_env)
+
+        # ---- F) Log ----
         card_log, lay_log = card_frame("Log")
         self._log_edit = QPlainTextEdit()
         self._log_edit.setReadOnly(True)
@@ -236,7 +283,7 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(card_log)
 
         self.setCentralWidget(central)
-        self.resize(520, 560)
+        self.resize(560, 640)
         self.setMinimumSize(480, 500)
 
         self._log.log_line.connect(self._on_log_line)
@@ -263,17 +310,22 @@ class MainWindow(QMainWindow):
         self._slave_id.setEnabled(not connected)
         self._btn_read_di.setEnabled(connected)
         self._btn_read_pc_led.setEnabled(connected)
+        self._btn_read_env.setEnabled(connected)
         for chk in self._relay_checks:
             chk.setEnabled(connected)
-        self._pc_on_check.setEnabled(connected)
-        self._pc_reset_check.setEnabled(connected)
+        self._btn_pc_on.setEnabled(connected)
+        self._btn_pc_reset.setEnabled(connected)
         if connected:
             self._status_badge.setText("Connected")
             self._status_badge.setStyleSheet("color: #00c853; font-weight: bold; padding: 4px 8px;")
+            self._seen_0xaa_since_connect = False
+            self._modbus_fail_0xaa_hint_shown = False
             self._raw_poll_timer.start()
+            self._env_poll_timer.start()
             self._log.log_info("→ Read DI 버튼을 눌러 보드 응답을 확인하세요. (보드는 요청 받을 때만 응답 전송)")
         else:
             self._raw_poll_timer.stop()
+            self._env_poll_timer.stop()
             self._status_badge.setText("Disconnected")
             self._status_badge.setStyleSheet("color: #555555; font-weight: bold; padding: 4px 8px;")
 
@@ -322,8 +374,30 @@ class MainWindow(QMainWindow):
         if self._client.connected:
             self.request_read_raw.emit()
 
+    def _show_0xaa_mode_hint_if_needed(self, msg: str):
+        """Modbus 실패 시 로그에 'No response'/'Unable to decode' 있고 0xAA를 받은 적 있으면 한 번만 팝업 안내."""
+        if self._modbus_fail_0xaa_hint_shown or not msg:
+            return
+        if "No response" not in msg and "Unable to decode" not in msg:
+            return
+        if not self._seen_0xaa_since_connect:
+            return
+        self._modbus_fail_0xaa_hint_shown = True
+        QMessageBox.warning(
+            self,
+            "Modbus 응답 없음",
+            "지금 보드가 0xAA 전용 모드로 동작 중입니다.\n\n"
+            "Read DI / Relay / PC Status를 쓰려면 메인보드를 Modbus 모드로 바꿔야 합니다.\n\n"
+            "→ Guro_Mainboard 프로젝트에서 app_config.h 를 열고\n"
+            "   ENABLE_PC_TEST_AA_STREAM 을 0 으로 설정한 뒤\n"
+            "   빌드 → Run(다운로드) 하세요.\n\n"
+            "그 다음 PC 툴에서 Disconnect 후 다시 Connect 하면 됩니다."
+        )
+
     def _on_raw_bytes(self, bytes_list: list):
         """보드에서 보낸 raw 바이트를 로그에 표시."""
+        if bytes_list and 0xAA in bytes_list:
+            self._seen_0xaa_since_connect = True
         self._log.log_raw_rx(bytes_list)
 
     def _on_relay_toggle(self, ch: int, onoff: bool):
@@ -332,28 +406,57 @@ class MainWindow(QMainWindow):
     def _on_di_result(self, ok: bool, bits: list | None, err: str | None):
         if ok and bits is not None:
             for i in range(min(8, len(bits))):
-                self._di_leds[i].set_state(bool(bits[i]))
+                self._di_leds[i].set_di_state(bool(bits[i]))  # 1=입력 있음(빨강), 0=없음(파랑)
             for i in range(len(bits), 8):
-                self._di_leds[i].set_state(False)
+                self._di_leds[i].set_di_state(False)
             self._log.log("FC03", MAIN_DI_REG, 2, "OK")
         else:
             for led in self._di_leds:
-                led.set_state(False)
+                led.set_di_state(None)  # 미확인 = 회색
             msg = err or "No response/timeout"
             self._log.log("FC03", MAIN_DI_REG, 2, "Fail", msg)
+            self._show_0xaa_mode_hint_if_needed(msg)
             if msg and ("No response" in msg or "0 received" in msg):
                 self._log.log_info("힌트: 메인보드 빌드에서 ENABLE_PC_TEST_AA_STREAM=0, USE_PC_TEST_UART1_SLAVE=1 인지 확인하세요.")
 
     def _on_pc_led_result(self, ok: bool, state: bool | None, err: str | None):
         if ok and state is not None:
-            self._pc_led_led.set_state(state)
+            # high=빨강, low=파랑
+            self._pc_led_led.set_di_state(True if state else False)
             self._log.log("FC03", PC_LED_IN_REG, 1, "OK")
         else:
-            self._pc_led_led.set_state(False)
+            self._pc_led_led.set_di_state(None)  # 미확인 = 회색
             msg = err or "No response/timeout"
             self._log.log("FC03", PC_LED_IN_REG, 1, "Fail", msg)
+            self._show_0xaa_mode_hint_if_needed(msg)
             if msg and ("No response" in msg or "0 received" in msg):
                 self._log.log_info("힌트: 메인보드 빌드에서 ENABLE_PC_TEST_AA_STREAM=0, USE_PC_TEST_UART1_SLAVE=1 인지 확인하세요.")
+
+    def _on_env_result(self, ok: bool, val: tuple | None, err: str | None):
+        if ok and val is not None:
+            t, rh, flags = val
+            invalid = (abs(t + 3276.8) < 0.05) or (abs(rh - 6553.5) < 0.05)
+            try:
+                if invalid:
+                    self._lbl_temp.setText("Temp: --.- °C")
+                    self._lbl_rh.setText("RH: --.- %")
+                    self._lbl_env_status.setText("Status: SENSOR ERROR")
+                else:
+                    self._lbl_temp.setText(f"Temp: {t:.1f} °C")
+                    self._lbl_rh.setText(f"RH: {rh:.1f} %")
+                    self._lbl_env_status.setText("Status: OK")
+                self._lbl_env_flags.setText(f"Flags: 0x{int(flags) & 0xFFFF:04X}")
+            except Exception:
+                pass
+            self._log.log("FC03", 2110, 3, "OK")
+        else:
+            msg = err or "No response/timeout"
+            try:
+                self._lbl_env_status.setText("Status: (read fail)")
+            except Exception:
+                pass
+            self._log.log("FC03", 2110, 3, "Fail", msg)
+            self._show_0xaa_mode_hint_if_needed(msg)
 
     def _on_write_result(self, ok: bool, err: str | None):
         if ok:
@@ -361,6 +464,7 @@ class MainWindow(QMainWindow):
         else:
             msg = err or "No response/timeout"
             self._log.log("Write", "", "", "Fail", msg)
+            self._show_0xaa_mode_hint_if_needed(msg)
             if msg and ("No response" in msg or "0 received" in msg):
                 self._log.log_info("힌트: 메인보드 빌드에서 ENABLE_PC_TEST_AA_STREAM=0, USE_PC_TEST_UART1_SLAVE=1 인지 확인하세요. (0xAA 전용 모드면 Modbus 응답 없음)")
 

@@ -18,7 +18,7 @@ extern "C" {
 #define UPSTREAM_TX_BUF_SIZE  128
 
 void UpstreamPC_Init(void);
-void UpstreamPC_Poll(void);
+void UpstreamPC_Poll(const aggregated_status_t *agg);
 int  UpstreamPC_SendStatus(const aggregated_status_t *status);
 
 typedef void (*upstream_cmd_cb_t)(uint8_t cmd, const uint8_t *data, uint8_t len);
@@ -26,6 +26,9 @@ void UpstreamPC_SetCommandCallback(upstream_cmd_cb_t cb);
 
 void UpstreamPC_UART_RxEventCallback(uint16_t Size);
 void UpstreamPC_TxCpltCallback(void);
+
+/** Optional debug: get invalid frame counts (length / CRC). Implemented when UPSTREAM_DEBUG_LOG=1 in .c. */
+void UpstreamPC_GetInvalidCounts(uint32_t *p_len, uint32_t *p_crc);
 
 #ifdef __cplusplus
 }

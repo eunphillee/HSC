@@ -58,6 +58,13 @@ int ModbusRTU_ParseFC16Request(const uint8_t *frame, size_t len, uint16_t *start
 /* Get PDU from full frame (strip addr+FC+data; for exception check). Slave/FC match optional. */
 int ModbusRTU_IsExceptionResponse(const uint8_t *frame, size_t frame_len, uint8_t expected_slave, uint8_t expected_fc);
 
+/**
+ * Get expected Modbus RTU request frame length (including CRC).
+ * Used for frame boundary: only run CRC/process when this many bytes received.
+ * @return expected length, or 0 if need more bytes / unknown FC.
+ */
+size_t ModbusRTU_GetExpectedRequestLength(const uint8_t *frame, size_t len);
+
 #ifdef __cplusplus
 }
 #endif

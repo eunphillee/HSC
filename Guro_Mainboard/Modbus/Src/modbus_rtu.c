@@ -242,6 +242,33 @@ int ModbusRTU_IsExceptionResponse(const uint8_t *frame, size_t frame_len, uint8_
     return (frame[1] & 0x80) ? 1 : 0;
 }
 
+/* Expected request length (slave+FC+payload+CRC) for frame boundary / validation. */
+size_t ModbusRTU_GetExpectedRequestLength(const uint8_t *frame, size_t len)
+{
+    if (len < 2) return 0;
+    uint8_t fc = frame[1];
+    switch (fc) {
+    case 0x01:
+    case 0x02:
+    case 0x03:
+    case 0x04:
+    case 0x05:
+    case 0x06:
+        return 8;
+    case 0x0F: /* FC15 */
+        if (len < 7) return 0;
+        return (size_t)(7 + (uint16_t)frame[6] + 2);
+    case 0x10: /* FC16 */
+        if (len < 6) return 0;
+        {
+            uint16_t num_regs = (uint16_t)((frame[4] << 8) | frame[5]);
+            return (size_t)(7 + num_regs * 2 + 2);
+        }
+    default:
+        return 0;
+    }
+}
+
 /* --- Slave response builders --- */
 size_t ModbusRTU_BuildFC01Response(uint8_t *pdu, uint8_t slave_addr, const uint8_t *coil_bytes, uint16_t num_coils)
 {

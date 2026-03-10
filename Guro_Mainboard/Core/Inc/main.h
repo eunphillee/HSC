@@ -73,12 +73,12 @@ void Error_Handler(void);
 #define PC_ON_EN_GPIO_Port GPIOC
 #define PC_LED_IN_Pin GPIO_PIN_2
 #define PC_LED_IN_GPIO_Port GPIOC
-#define PC_RS485_TX_Pin GPIO_PIN_2
-#define PC_RS485_TX_GPIO_Port GPIOA
-#define PC_RS485_RX_Pin GPIO_PIN_3
-#define PC_RS485_RX_GPIO_Port GPIOA
-#define RS485_DE_Pin GPIO_PIN_1
-#define RS485_DE_GPIO_Port GPIOB
+#define RS485_TX_Pin GPIO_PIN_2
+#define RS485_TX_GPIO_Port GPIOA
+#define RS485_RX_Pin GPIO_PIN_3
+#define RS485_RX_GPIO_Port GPIOA
+#define PC_RS485_DE_RE_Pin GPIO_PIN_1
+#define PC_RS485_DE_RE_GPIO_Port GPIOB
 #define DI_04_Pin GPIO_PIN_7
 #define DI_04_GPIO_Port GPIOE
 #define DI_05_Pin GPIO_PIN_8
@@ -93,14 +93,16 @@ void Error_Handler(void);
 #define LED03_GPIO_Port GPIOB
 #define LED04_Pin GPIO_PIN_11
 #define LED04_GPIO_Port GPIOB
+#define RS_485_DE_RE_Pin GPIO_PIN_12
+#define RS_485_DE_RE_GPIO_Port GPIOB
 #define EEP_I2C_SDA_Pin GPIO_PIN_9
 #define EEP_I2C_SDA_GPIO_Port GPIOC
 #define EEP_I2C_SCL_Pin GPIO_PIN_8
 #define EEP_I2C_SCL_GPIO_Port GPIOA
-#define RS485_RX_Pin GPIO_PIN_9
-#define RS485_RX_GPIO_Port GPIOA
-#define RS485_TX_Pin GPIO_PIN_10
-#define RS485_TX_GPIO_Port GPIOA
+#define PC_RS485_TX_Pin GPIO_PIN_9
+#define PC_RS485_TX_GPIO_Port GPIOA
+#define PC_RS485_RX_Pin GPIO_PIN_10
+#define PC_RS485_RX_GPIO_Port GPIOA
 #define SEN1_I2C_SCL_Pin GPIO_PIN_6
 #define SEN1_I2C_SCL_GPIO_Port GPIOB
 #define SEN1_I2C_SDA_Pin GPIO_PIN_7
@@ -115,7 +117,12 @@ void Error_Handler(void);
 #define RELAY2_EN_GPIO_Port GPIOE
 
 /* USER CODE BEGIN Private defines */
-
+/* Subboard RS485 DE/RE = PB12 (initial LOW = RX). See MAINBOARD_HW_REFERENCE. */
+#define RS485_DE_SUB_GPIO_Port  GPIOB
+#define RS485_DE_SUB_Pin        GPIO_PIN_12
+/* PC RS485 DE/RE = PB1 (CubeMX: PC_RS485_DE_RE_*). Alias for upstream_slave_uart1, pc_test_aa_stream, bsp_rs485_pc. */
+#define RS485_DE_GPIO_Port      PC_RS485_DE_RE_GPIO_Port
+#define RS485_DE_Pin            PC_RS485_DE_RE_Pin
 /* USER CODE END Private defines */
 
 #ifdef __cplusplus

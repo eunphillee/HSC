@@ -1,6 +1,7 @@
 /**
  * @file modbus_cfg.h
- * @brief Modbus configuration (MAIN board = Master)
+ * @brief Modbus configuration (MAIN board = Master for Subboard).
+ *        HW: USART2 (PA2/PA3), DE/RE = PB12. main.h CubeMX: RS_485_DE_RE_*.
  */
 #ifndef MODBUS_CFG_H
 #define MODBUS_CFG_H
@@ -12,9 +13,10 @@ extern "C" {
 #define MODBUS_MASTER         1
 #define MODBUS_SLAVE          0
 
-#define MODBUS_UART           huart1
-#define MODBUS_DE_GPIO_PORT   RS485_DE_GPIO_Port
-#define MODBUS_DE_GPIO_PIN    RS485_DE_Pin
+/* Subboard RS485: USART2, DE/RE = PB12 (CubeMX label: RS_485_DE_RE) */
+#define MODBUS_UART           huart2
+#define MODBUS_DE_GPIO_PORT   RS_485_DE_RE_GPIO_Port
+#define MODBUS_DE_GPIO_PIN    RS_485_DE_RE_Pin
 
 /* Timing (character time at 9600 baud ~ 1.04 ms per char) */
 #define MODBUS_RESPONSE_TIMEOUT_MS    50

@@ -30,10 +30,10 @@
 #endif
 
 /* Force PB1(RS485_DE_RE) at boot and during operation: RX only or TX only (for receive test).
- * FORCE_RS485_RX=1: PB1 kept in RX (set_de_rx only; set_de_tx is no-op). Default 1.
- * FORCE_RS485_TX=1: PB1 kept in TX (set_de_tx only; set_de_rx is no-op). */
+ * FORCE_RS485_RX=1: PB1 kept in RX (set_de_tx no-op) → Modbus 응답을 보낼 수 없음, PC에서 0 received.
+ * Modbus 슬레이브(Read DI/Relay 응답)를 쓰려면 반드시 FORCE_RS485_RX=0. */
 #ifndef FORCE_RS485_RX
-#define FORCE_RS485_RX  1
+#define FORCE_RS485_RX  0   /* 0=정상 송수신. 1이면 응답 전송 안 됨(0 received). */
 #endif
 #ifndef FORCE_RS485_TX
 #define FORCE_RS485_TX  0
@@ -51,7 +51,7 @@
 
 /* 연결 확인용: 메인보드 → PC 500ms마다 0xAA 전송, PC는 수신 현시. 1=이 모드(0xAA만 송신), 0=Modbus 슬레이브 동작(Read DI/Relay 가능). */
 #ifndef ENABLE_PC_TEST_AA_STREAM
-#define ENABLE_PC_TEST_AA_STREAM  1
+#define ENABLE_PC_TEST_AA_STREAM  0   /* 0=Modbus 테스트(Read DI/Relay/PC Status). 연결 확인만 할 때만 1로. */
 #endif
 
 #endif /* APP_CONFIG_H */

@@ -16,6 +16,8 @@ from .address_map import (
     MAIN_DO_COUNT,
     PC_CTRL_REG,
     PC_LED_IN_REG,
+    MAIN_ENV_REG,
+    MAIN_ENV_COUNT,
 )
 
 
@@ -214,6 +216,41 @@ class ModbusClient:
                 regs = list(rr.registers) if rr.registers else [0]
                 state = bool(regs[0] & 1) if regs else False
                 return True, state, None
+            except Exception as e:
+                if self._response_logger:
+                    self._response_logger(False, None)
+                return False, None, format_modbus_error(exc=e)
+
+    def read_env_shtc3(self) -> tuple[bool, tuple[float, float] | None, str | None]:
+        """FC03 read MAIN_ENV_REG count=3 → (temp_c, rh_pct, error_flags). Returns (ok, (t,rh,flags) or None, err)."""
+        with self._lock:
+            ok, err = self._ensure_socket_open()
+            if not ok:
+                return False, None, err or "Not connected"
+            if self._request_logger:
+                self._request_logger(self._slave_id, "FC03", MAIN_ENV_REG, MAIN_ENV_COUNT)
+            try:
+                rr = self._client.read_holding_registers(
+                    address=MAIN_ENV_REG,
+                    count=MAIN_ENV_COUNT,
+                    unit=self._slave_id,
+                )
+                if self._response_logger:
+                    self._response_logger(not rr.isError(), _response_exception_code(rr))
+                if rr.isError():
+                    return False, None, format_modbus_error(resp=rr)
+                regs = list(rr.registers) if rr.registers else [0, 0, 0]
+                if len(regs) < 3:
+                    regs = (regs + [0, 0, 0])[:3]
+                raw_t = regs[0] & 0xFFFF
+                # signed int16
+                if raw_t & 0x8000:
+                    raw_t = raw_t - 0x10000
+                raw_rh = regs[1] & 0xFFFF
+                flags = regs[2] & 0xFFFF
+                temp_c = float(raw_t) / 10.0
+                rh_pct = float(raw_rh) / 10.0
+                return True, (temp_c, rh_pct, flags), None
             except Exception as e:
                 if self._response_logger:
                     self._response_logger(False, None)

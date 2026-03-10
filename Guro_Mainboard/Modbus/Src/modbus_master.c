@@ -9,7 +9,7 @@
 #include "led_status.h"
 #include <string.h>
 
-extern UART_HandleTypeDef huart1;
+extern UART_HandleTypeDef huart2;  /* Modbus Master = Subboard = USART2 */
 
 typedef enum {
     MST_IDLE,

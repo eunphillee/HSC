@@ -31,6 +31,8 @@
 #include "gateway_actions.h"
 #include "led_status.h"
 #include "pc_test_aa_stream.h"
+#include "reset_reason.h"
+#include "wwdg_service.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -95,6 +97,7 @@ int main(void)
   HAL_Init();
 
   /* USER CODE BEGIN Init */
+  ResetReason_CaptureAndClear();
 
   /* USER CODE END Init */
 
@@ -107,14 +110,14 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
-#if !USE_PC_TEST_UART1_SLAVE
   MX_WWDG_Init();
-#endif
   MX_I2C1_Init();
   MX_I2C3_Init();
   MX_USART1_UART_Init();
   MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
+  /* 정상 동작 모드: 스케줄러/통신/집계/LED 상태 및 WWDG 서비스 초기화. */
+  WwdgService_Init(&hwwdg);
   AppScheduler_Init();
   ModbusMaster_Init();
   AggregatedStatus_Clear(&aggregated_status);
@@ -140,9 +143,7 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-#if !USE_PC_TEST_UART1_SLAVE
-    HAL_WWDG_Refresh(&hwwdg);   /* 테스트 모드에서는 WWDG 미사용 */
-#endif
+    /* 1ms 주기 기반 스케줄러/업무 처리 */
     LED_Status_Tick_1ms();
     AppScheduler_Update();
 
@@ -164,6 +165,16 @@ int main(void)
     Gateway_Action_Update();
     if (AppScheduler_IsDue(TASK_UPSTREAM_SEND_STATUS))
       UpstreamPC_SendStatus(&aggregated_status);
+
+    /* 진단 단계(윈도우 위반 배제):
+     * - 비즈니스 루프는 유지
+     * - 리프레시는 20ms마다 1회만 수행(5.5ms~49ms 윈도우 내) */
+    static uint32_t last_wwdg_ms = 0;
+    uint32_t now_ms = HAL_GetTick();
+    if ((uint32_t)(now_ms - last_wwdg_ms) >= 20u) {
+      (void)HAL_WWDG_Refresh(&hwwdg);
+      last_wwdg_ms = now_ms;
+    }
   }
   /* USER CODE END 3 */
 }
@@ -358,9 +369,9 @@ static void MX_WWDG_Init(void)
 
   /* USER CODE END WWDG_Init 1 */
   hwwdg.Instance = WWDG;
-  hwwdg.Init.Prescaler = WWDG_PRESCALER_1;
-  hwwdg.Init.Window = 64;
-  hwwdg.Init.Counter = 64;
+  hwwdg.Init.Prescaler = WWDG_PRESCALER_8;
+  hwwdg.Init.Window = 120;
+  hwwdg.Init.Counter = 127;
   hwwdg.Init.EWIMode = WWDG_EWI_DISABLE;
   if (HAL_WWDG_Init(&hwwdg) != HAL_OK)
   {
@@ -397,9 +408,9 @@ static void MX_GPIO_Init(void)
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOC, PC_RESET_EN_Pin|PC_ON_EN_Pin, GPIO_PIN_RESET);
 
-  /*Configure GPIO pin Output Level (LOW active: LED01=ON(LOW), LED02~04=OFF(HIGH)) */
-  HAL_GPIO_WritePin(GPIOB, RS485_DE_Pin|LED01_Pin, GPIO_PIN_RESET);
-  HAL_GPIO_WritePin(GPIOB, LED02_Pin|LED03_Pin|LED04_Pin, GPIO_PIN_SET);
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOB, PC_RS485_DE_RE_Pin|LED03_Pin|LED04_Pin|RS_485_DE_RE_Pin
+                          |LED01_Pin|LED02_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pins : RELAY3_EN_Pin RELAY4_EN_Pin RELAY1_EN_Pin RELAY2_EN_Pin */
   GPIO_InitStruct.Pin = RELAY3_EN_Pin|RELAY4_EN_Pin|RELAY1_EN_Pin|RELAY2_EN_Pin;
@@ -429,12 +440,12 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(PC_LED_IN_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : RS485_DE_Pin */
-  GPIO_InitStruct.Pin = RS485_DE_Pin;
+  /*Configure GPIO pins : PC_RS485_DE_RE_Pin RS_485_DE_RE_Pin */
+  GPIO_InitStruct.Pin = PC_RS485_DE_RE_Pin|RS_485_DE_RE_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
-  HAL_GPIO_Init(RS485_DE_GPIO_Port, &GPIO_InitStruct);
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
   /*Configure GPIO pins : LED03_Pin LED04_Pin LED01_Pin LED02_Pin */
   GPIO_InitStruct.Pin = LED03_Pin|LED04_Pin|LED01_Pin|LED02_Pin;

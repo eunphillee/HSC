@@ -9,6 +9,7 @@
 #include "gateway_actions.h"
 #include "aggregated_status.h"
 #include "io_map.h"
+#include "reset_reason.h"
 
 #define EX_ILLEGAL_FUNCTION  0x01
 #define EX_ILLEGAL_DATA_ADDR 0x02
@@ -23,6 +24,15 @@
 #define UPSTREAM_MAIN_IO_DI_REG  2100u
 #define UPSTREAM_MAIN_IO_DO_REG  2101u
 #define UPSTREAM_MAIN_IO_REG_COUNT 2u
+
+/* MAIN ENV (SHTC3):
+ * 4x2110=temp_c_x10 (signed), 4x2111=rh_x10 (unsigned), 4x2112=error_flags (AGG_ERR_SHTC3 bit 포함). */
+#define UPSTREAM_MAIN_ENV_START   2110u
+#define UPSTREAM_MAIN_ENV_COUNT   3u
+
+/* Reset reason (RCC->CSR snapshot): 4x2113 = low16, 4x2114 = high16 */
+#define UPSTREAM_RESET_CSR_START  2113u
+#define UPSTREAM_RESET_CSR_COUNT  2u
 
 /* FC02 Read Discrete Inputs: H2TECH 1x, h2_dec = start_addr + 1 + i */
 static int handle_fc02(uint16_t start_addr, uint16_t count, uint8_t *response, uint16_t resp_max)
@@ -64,15 +74,69 @@ static int handle_fc02(uint16_t start_addr, uint16_t count, uint8_t *response, u
 static int handle_fc03(uint16_t start_addr, uint16_t count, const void *p_agg,
                        uint8_t *response, uint16_t resp_max)
 {
-    /* MAIN I/O block: 4x2100, 4x2101 */
-    if (start_addr == UPSTREAM_MAIN_IO_DI_REG) {
-        if (count != UPSTREAM_MAIN_IO_REG_COUNT) {
+    /* Reset flags: RCC->CSR snapshot (2 regs) */
+    if (start_addr == UPSTREAM_RESET_CSR_START) {
+        if (count != UPSTREAM_RESET_CSR_COUNT) {
             response[0] = 0x83;
             response[1] = EX_ILLEGAL_DATA_VAL;
             return 2;
         }
         if (resp_max < 2u + 4u) return -1;
+        uint32_t csr = ResetReason_GetRccCsr();
+        response[0] = 0x03;
+        response[1] = 4u;
+        response[2] = (uint8_t)((csr >> 24) & 0xFF);
+        response[3] = (uint8_t)((csr >> 16) & 0xFF);
+        response[4] = (uint8_t)((csr >> 8) & 0xFF);
+        response[5] = (uint8_t)(csr & 0xFF);
+        return 6;
+    }
+
+    /* MAIN ENV block: 4x2110 count=2 or 3 */
+    if (start_addr == UPSTREAM_MAIN_ENV_START) {
+        if (count != 2u && count != UPSTREAM_MAIN_ENV_COUNT) {
+            response[0] = 0x83;
+            response[1] = EX_ILLEGAL_DATA_VAL;
+            return 2;
+        }
+        if (resp_max < (uint16_t)(2u + count * 2u)) return -1;
+        const aggregated_status_t *agg = (const aggregated_status_t *)p_agg;
+        int16_t t_x10 = agg ? agg->env_temp_cx10 : (int16_t)-32768;
+        uint16_t rh_x10 = agg ? agg->env_rh_x10 : (uint16_t)0xFFFF;
+        uint16_t flags = agg ? agg->error_flags : 0xFFFF;
+        response[0] = 0x03;
+        response[1] = (uint8_t)(count * 2u);
+        response[2] = (uint8_t)(((uint16_t)t_x10) >> 8);
+        response[3] = (uint8_t)(((uint16_t)t_x10) & 0xFF);
+        response[4] = (uint8_t)(rh_x10 >> 8);
+        response[5] = (uint8_t)(rh_x10 & 0xFF);
+        if (count == 3u) {
+            response[6] = (uint8_t)(flags >> 8);
+            response[7] = (uint8_t)(flags & 0xFF);
+            return 8;
+        }
+        return 6; /* count==2 */
+    }
+
+    /* MAIN I/O block: 4x2100 (and optionally 4x2101). Accept count=1 (DI only) or count=2 (DI+DO). */
+    if (start_addr == UPSTREAM_MAIN_IO_DI_REG) {
+        if (count != 1u && count != UPSTREAM_MAIN_IO_REG_COUNT) {
+            response[0] = 0x83;
+            response[1] = EX_ILLEGAL_DATA_VAL;
+            return 2;
+        }
         uint16_t di = IO_Main_ReadDI_Bitmap();
+        if (count == 1u) {
+            /* FC03 addr=2100 cnt=1: SlaveID + FC + ByteCount(2) + Data(2B) + CRC */
+            if (resp_max < 2u + 2u) return -1;
+            response[0] = 0x03;
+            response[1] = 2u;
+            response[2] = (uint8_t)(di >> 8);
+            response[3] = (uint8_t)(di & 0xFF);
+            return 4;
+        }
+        /* count == 2 */
+        if (resp_max < 2u + 4u) return -1;
         uint16_t do_val = IO_Main_ReadDO_Bitmap();
         response[0] = 0x03;
         response[1] = 4u;

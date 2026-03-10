@@ -314,6 +314,13 @@ Guro_HPSB/   (또는 Guro_LPSB/)
 
 ---
 
+### 6.6 Upstream PC 링크 (USART2, MAIN 보드)
+
+- **물리:** USART2 (PA2=TX, PA3=RX). PC ↔ USB-RS485 ↔ TTL-RS485 모듈 ↔ MAIN 연결.
+- **프로토콜:** Modbus RTU **Slave** (Slave ID 9). PC 테스트 툴에서 Relay/레지스터 제어 시 이 경로로 요청·응답.
+- **RS485 방향 제어:** USART2에는 **DE(Driver Enable) 핀을 사용하지 않음**. TTL-RS485 모듈이 하드웨어 자동 방향 제어 방식일 경우 코드에서 DE/RTS 제어가 없어야 수신이 가능하므로, 펌웨어는 USART1(다운스트림 HPSB/LPSB)에만 DE 제어를 적용함.
+- **이중 프로토콜:** 수신 프레임 첫 바이트가 `0x09`(Slave ID)이고 CRC가 유효하면 Modbus RTU로 처리·응답; 그 외 `0x02`(STX)로 시작하면 기존 STX/ETX 프레임으로 처리.
+
 ## 7. SHTC3 드라이버 구조 (CRC 포함)
 
 ### 7.1 역할
