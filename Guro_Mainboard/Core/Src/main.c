@@ -33,6 +33,7 @@
 #include "pc_test_aa_stream.h"
 #include "reset_reason.h"
 #include "wwdg_service.h"
+#include "system_config.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -116,6 +117,19 @@ int main(void)
   MX_USART1_UART_Init();
   MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
+  /* EEPROM 설정 로드: 실패 또는 검증 실패 시 기본값 저장 후 적용 */
+  {
+    system_config_t cfg;
+    if (SystemConfig_Load(&cfg) != 0 || SystemConfig_Validate(&cfg) != 0) {
+      SystemConfig_SetDefaults(&cfg);
+      SystemConfig_Save(&cfg);
+    }
+    huart1.Init.BaudRate = (uint32_t)cfg.baudrate;
+    (void)HAL_UART_Init(&huart1);
+#if SYSTEM_CONFIG_BOOT_LOG
+    SystemConfig_LogToUart((void *)&huart1);
+#endif
+  }
   /* 정상 동작 모드: 스케줄러/통신/집계/LED 상태 및 WWDG 서비스 초기화. */
   WwdgService_Init(&hwwdg);
   AppScheduler_Init();

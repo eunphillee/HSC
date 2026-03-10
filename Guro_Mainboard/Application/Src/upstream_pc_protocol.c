@@ -9,10 +9,15 @@
 #include "led_status.h"
 #include "modbus_rtu.h"
 #include "upstream_slave_h2tech.h"
+#include "system_config.h"
 #include <string.h>
 #include <stdio.h>
 
-#define UPSTREAM_MODBUS_SLAVE_ID  9
+#define UPSTREAM_MODBUS_SLAVE_ID_DEFAULT  9
+static inline uint8_t get_upstream_slave_id(void) {
+  const system_config_t *c = SystemConfig_Get();
+  return c ? (uint8_t)c->slave_id : UPSTREAM_MODBUS_SLAVE_ID_DEFAULT;
+}
 #define MODBUS_RESP_BUF_SIZE     (1 + 64 + 2)   /* slave_id + PDU + CRC */
 #define RX_RING_SIZE             256
 #define FRAME_END_MS              4             /* 3.5 char time at 9600 bps */
@@ -162,7 +167,7 @@ static void process_modbus_frame(const uint8_t *frame, size_t frame_len, const a
 	}
 
 	if (resp_len > 0 && (size_t)(1 + resp_len + 2) <= sizeof(modbus_resp_buf)) {
-		modbus_resp_buf[0] = UPSTREAM_MODBUS_SLAVE_ID;
+		modbus_resp_buf[0] = get_upstream_slave_id();
 		memcpy(&modbus_resp_buf[1], resp_pdu, (size_t)resp_len);
 		ModbusRTU_AppendCRC(modbus_resp_buf, (size_t)(1 + resp_len));
 		(void)HAL_UART_Transmit(&huart2, modbus_resp_buf,
@@ -189,7 +194,7 @@ void UpstreamPC_Poll(const aggregated_status_t *agg)
 
 #if UPSTREAM_PC_MODBUS_SLAVE_ENABLE
 	/* Modbus RTU (slave 9): require expected length then CRC */
-	if (frame_len >= 4 && frame_buf[0] == UPSTREAM_MODBUS_SLAVE_ID) {
+	if (frame_len >= 4 && frame_buf[0] == get_upstream_slave_id()) {
 		size_t expected = ModbusRTU_GetExpectedRequestLength(frame_buf, (size_t)frame_len);
 		if (expected == 0 || (size_t)frame_len < expected) {
 #if UPSTREAM_DEBUG_LOG

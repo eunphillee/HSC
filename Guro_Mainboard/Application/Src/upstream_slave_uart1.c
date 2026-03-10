@@ -9,9 +9,14 @@
 #include "led_status.h"
 #include "modbus_rtu.h"
 #include "upstream_slave_h2tech.h"
+#include "system_config.h"
 #include <string.h>
 
-#define SLAVE_ID           9
+#define SLAVE_ID_DEFAULT   9
+static inline uint8_t get_slave_id(void) {
+  const system_config_t *c = SystemConfig_Get();
+  return c ? (uint8_t)c->slave_id : SLAVE_ID_DEFAULT;
+}
 #define RX_BUF_SIZE        64
 #define RING_SIZE          256
 #define FRAME_END_MS       4
@@ -130,7 +135,7 @@ static void process_modbus_frame(const uint8_t *frame, size_t frame_len, const a
 	}
 
 	if (resp_len > 0 && (size_t)(1 + resp_len + 2) <= sizeof(tx_frame)) {
-		tx_frame[0] = SLAVE_ID;
+		tx_frame[0] = get_slave_id();
 		memcpy(&tx_frame[1], resp_pdu, (size_t)resp_len);
 		ModbusRTU_AppendCRC(tx_frame, (size_t)(1 + resp_len));
 		uint16_t tx_len = (uint16_t)(1 + resp_len + 2);
@@ -213,7 +218,7 @@ void UpstreamSlaveUart1_Poll(const aggregated_status_t *agg)
 
 		/* FC03 addr=2100 cnt=2 요청: 8바이트 (SlaveId=9 + FC=03 + Addr 0x0834 + Cnt 2 + CRC2).
 		 * ModbusRTU_GetExpectedRequestLength(FC03) = 8. CRC = Modbus RTU (poly 0xA001), LSB first. */
-		if (frame_len >= 4 && frame_buf[0] == SLAVE_ID) {
+		if (frame_len >= 4 && frame_buf[0] == get_slave_id()) {
 			size_t expected = ModbusRTU_GetExpectedRequestLength(frame_buf, (size_t)frame_len);
 			if (expected != 0 && (size_t)frame_len >= expected) {
 				if (ModbusRTU_CRC16Check(frame_buf, expected) == 0) {

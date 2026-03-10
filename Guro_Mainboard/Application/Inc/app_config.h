@@ -54,4 +54,19 @@
 #define ENABLE_PC_TEST_AA_STREAM  0   /* 0=Modbus 테스트(Read DI/Relay/PC Status). 연결 확인만 할 때만 1로. */
 #endif
 
+/* 부팅 후 EEPROM 설정 로드/저장 결과를 UART1로 한 줄 로그 출력. 1=테스트 시 활성화 (CFG[A/B] seq= id= baud= valid=1) */
+#ifndef SYSTEM_CONFIG_BOOT_LOG
+#define SYSTEM_CONFIG_BOOT_LOG  0
+#endif
+
+/* Save 시 값이 동일하면 EEPROM 쓰기 생략. 1=생략 시 "CFG unchanged, skip save" 로그 출력 옵션 사용 */
+#ifndef SYSTEM_CONFIG_LOG_SKIP_SAVE
+#define SYSTEM_CONFIG_LOG_SKIP_SAVE  0
+#endif
+
+/* Factory reset 수행 후 "CFG factory reset done" 부팅 로그 출력. 1=출력 */
+#ifndef SYSTEM_CONFIG_BOOT_LOG_FACTORY_RESET
+#define SYSTEM_CONFIG_BOOT_LOG_FACTORY_RESET  0
+#endif
+
 #endif /* APP_CONFIG_H */
