@@ -18,6 +18,7 @@
 #define EX_ILLEGAL_FUNCTION  0x01
 #define EX_ILLEGAL_DATA_ADDR 0x02
 #define EX_ILLEGAL_DATA_VAL  0x03  /* Write to read-only */
+#define EX_SLAVE_DEVICE_FAIL 0x04  /* Address valid but gateway/downstream write failed */
 #define PULSE_MS_DEFAULT     300u
 
 /* Upstream current block: 4x2000..4x200D (read-only). Modbus start_addr 2000, 14 registers. */
@@ -280,6 +281,10 @@ static int handle_fc06(uint16_t start_addr, const uint8_t *write_data,
     if (resp_max < 6u || !write_data) return -1;
     uint16_t value = (uint16_t)((write_data[0] << 8) | write_data[1]);
 
+#if FC06_DEBUG_LOG
+    Gateway_LogFc06Received(start_addr, value);
+#endif
+
     if (start_addr == UPSTREAM_MAIN_IO_DI_REG) {
         response[0] = 0x86;
         response[1] = EX_ILLEGAL_DATA_VAL;
@@ -416,6 +421,9 @@ static int handle_fc06(uint16_t start_addr, const uint8_t *write_data,
         response[1] = EX_ILLEGAL_DATA_ADDR;
         return 2;
     }
+#if FC06_DEBUG_LOG
+    Gateway_LogFc06MappedLocal(start_addr, value);
+#endif
     value &= 0x0Fu;
     IO_Main_WriteDO_Bitmap(value);
     response[0] = 0x06;
@@ -432,27 +440,95 @@ static int handle_fc05(uint16_t start_addr, const uint8_t *write_data,
 {
     if (resp_max < 5u || !write_data) return -1;
 
+    uint8_t value_u8 = (write_data[0] != 0) ? 1u : 0u;
+#if FC05_GW_STEP_LOG
+    Gateway_LogFc05StepRecvFromPc();
+    Gateway_LogFc05StepRawCoilValue(start_addr, value_u8);
+#endif
+#if GATEWAY_WRITE_DEBUG_LOG
+    Gateway_LogFc05RecvAddr(start_addr, value_u8);
+    Gateway_LogFc05Range(892, 910);
+#endif
+#if FC05_COIL_DIAG_LOG
+    Gateway_LogFc05DiagRecv(start_addr, value_u8);
+    Gateway_LogFc05DiagRange(892, 910);
+#endif
+
     uint16_t h2_dec = H2Map_ModbusAddrToH2Dec(start_addr);
     const H2_MapEntry_t *e = H2Map_FindByDec(H2_AREA_1X, h2_dec);
     if (!e) {
+#if FC05_GW_STEP_LOG
+        Gateway_LogFc05StepNoMapping(start_addr);
+        Gateway_LogFc05StepBeforeSendExceptionToPc(EX_ILLEGAL_DATA_ADDR);
+#endif
+#if GATEWAY_WRITE_DEBUG_LOG
+        Gateway_LogFc05NoMapping(start_addr);
+#endif
+#if FC05_COIL_DIAG_LOG
+        Gateway_LogFc05DiagNoMapping(start_addr);
+#endif
         response[0] = 0x85;
         response[1] = EX_ILLEGAL_DATA_ADDR;
         return 2;
     }
     /* Defensive: write to read-only range (0821~0836, 0853~0860, 0869~0880) -> 0x03 */
     if (e->rw != H2_RW_WRITE) {
+#if FC05_GW_STEP_LOG
+        Gateway_LogFc05StepBeforeSendExceptionToPc(EX_ILLEGAL_DATA_VAL);
+#endif
         response[0] = 0x85;
         response[1] = EX_ILLEGAL_DATA_VAL;
         return 2;
     }
     bool value = (write_data[0] != 0);
-    if (e->action == H2_ACT_WRITE_SUB_COIL)
+    if (e->action == H2_ACT_WRITE_SUB_COIL) {
+#if FC05_GW_STEP_LOG
+        if (e->h2_dec >= 899u && e->h2_dec <= 910u) {
+            uint16_t offset = e->h2_dec - 899u;
+            static const uint8_t sid_step[] = { 1, 2, 4, 8 };
+            uint8_t slave_id = sid_step[offset / 3u];
+            uint16_t sub_coil = offset % 3u;
+            Gateway_LogFc05StepMappingResult(slave_id, 0x05, sub_coil);
+        }
+#endif
         Gateway_LogWriteUpstream(start_addr, value ? 1u : 0u);
+#if GATEWAY_WRITE_DEBUG_LOG
+        if (e->h2_dec >= 899u && e->h2_dec <= 910u) {
+            uint16_t offset = e->h2_dec - 899u;
+            static const uint8_t sid[] = { 1, 2, 4, 8 };
+            uint8_t slave_id = sid[offset / 3u];
+            uint16_t sub_coil = offset % 3u;
+            Gateway_LogFc05Mapped(start_addr, slave_id, sub_coil);
+        }
+#endif
+#if FC05_COIL_DIAG_LOG
+        if (e->h2_dec >= 899u && e->h2_dec <= 910u) {
+            uint16_t offset = e->h2_dec - 899u;
+            static const uint8_t sid_diag[] = { 1, 2, 4, 8 };
+            uint8_t slave_id = sid_diag[offset / 3u];
+            uint16_t sub_coil = offset % 3u;
+            Gateway_LogFc05DiagMapped(start_addr, slave_id, sub_coil);
+        }
+#endif
+    }
     if (!H2Map_ApplyWrite(e, value, PULSE_MS_DEFAULT)) {
+#if FC05_GW_STEP_LOG
+        Gateway_LogFc05StepLocalException04();
+        Gateway_LogFc05StepBeforeSendExceptionToPc(EX_SLAVE_DEVICE_FAIL);
+#endif
+#if GATEWAY_WRITE_DEBUG_LOG
+        Gateway_LogFc05ApplyWriteFail(start_addr);
+#endif
+#if FC05_COIL_DIAG_LOG
+        Gateway_LogFc05DiagApplyFail(start_addr);
+#endif
         response[0] = 0x85;
-        response[1] = EX_ILLEGAL_DATA_ADDR;
+        response[1] = EX_SLAVE_DEVICE_FAIL;  /* 주소는 유효, 하위버스/게이트웨이 쓰기 실패 → 0x04 구분 */
         return 2;
     }
+#if FC05_GW_STEP_LOG
+    Gateway_LogFc05StepBeforeSendNormalToPc();
+#endif
     response[0] = 0x05;
     response[1] = (uint8_t)(start_addr >> 8);
     response[2] = (uint8_t)(start_addr & 0xFF);

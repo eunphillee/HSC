@@ -25,7 +25,7 @@ void Gateway_Action_StartPulsePC_ON_EN(void);
 void Gateway_Action_StartPulsePC_RESET_EN(void);
 
 /** Write sub-board coil (HPSB=1, LPSB1=2, LPSB2=4, LPSB3=8). Called when PC sends FC05 to Mainboard. */
-void Gateway_Action_WriteSubCoil(uint8_t slave_id, uint16_t coil_index, uint8_t value);
+int Gateway_Action_WriteSubCoil(uint8_t slave_id, uint16_t coil_index, uint8_t value);
 
 #ifdef __cplusplus
 }

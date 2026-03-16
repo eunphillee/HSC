@@ -2,6 +2,12 @@
 
 통신 및 출력 제어 시각 검증용 진단 모드 설명.
 
+## Design principle
+
+- **Safest and simplest first** for debugging, not for final polished production behavior.
+- **First priority**: visual verification of communication and output control (LED2/3/4 on boards).
+- Keep logic minimal; avoid over-engineering until the communication path is confirmed.
+
 ## Topology
 
 - **PC ↔ Mainboard**: 상단 RS485, Mainboard Slave ID = 9
@@ -49,22 +55,27 @@
   - `0`: 기존 동작 (LED2=any, LED3=전류/폴트, LED4=RS485)
 - 정의 위치: 각 보드 `Application/Src/led_status.c` 상단 `#ifndef LED_DIAG_COMM_OUTPUT`
 
-## 메인보드 게이트웨이 로그
+## 메인보드 게이트웨이 로그 (하단 버스 디버깅)
 
-출력 제어 명령 전달 시 상세 로그를 보려면:
+HPSB/LPSB에 명령이 가지 않을 때 하단 경로만 확인하려면:
 
 - `Guro_Mainboard/Application/Inc/app_config.h`  
-  `GATEWAY_WRITE_DEBUG_LOG` 를 **1**로 설정 후 빌드.
-- 로그는 UART1(PC 연결 포트)으로 출력됨.
+  `GATEWAY_WRITE_DEBUG_LOG` 를 **1**로 설정 후 빌드 (기본값 1).
+- 로그는 **UART1**(PC 연결 포트)으로 출력됨.
 
-로그 내용:
+전체 경로 로그 순서 (PC에서 HPSB RELAY1 EN 누를 때):
 
-1. `[GW] upstream command from PC: FC05 addr=... val=...` — PC에서 수신한 명령
-2. `[GW] target board=HPSB|LPSB1|LPSB2|LPSB3 slave_id=... channel=... val=...` — 매핑된 대상 보드/채널
-3. `[GW] UART2 TX FC05 slave=... (board) coil=... val=...` — USART2로 전송한 FC05
-4. `[GW] subboard response OK` / `subboard response FAIL` — 하위 보드 응답 결과
+1. `[GW] upstream write received from PC: FC05 addr=898 val=1 (decoded virtual addr)` — 상단 수신
+2. `[GW] resolved target board=HPSB slave_id=1 FC=05 coil=0 val=1` — 매핑 결과 (보드, slave, FC, coil)
+3. `[GW] UART2 TX start FC05 slave=1 (HPSB) coil=0 val=1` — USART2 송신 시작
+4. `[GW] USART2 TX done` — 송신 완료 (PB12 DE→TX 후 전송)
+5. `[GW] USART2 RX received OK` / `USART2 RX timeout or invalid` — 서브보드 응답 수신 여부 (60ms 대기)
+6. `[GW] final gateway result OK` / `final gateway result FAIL` — 최종 결과 (RX 성공 시에만 OK)
 
-구현: `Guro_Mainboard/Application/Src/modbus_master_log.c` (GATEWAY_WRITE_DEBUG_LOG=1 시).
+- **PB12 (DE/RE)**: TX 전 `MODBUS_DE_TX_SETTLE_MS`(1ms) 대기, TX 후 `DE_RX_GUARD_MS`(2ms) 대기 후 RX. `modbus_cfg.h` / `modbus_master.c`.
+- **성공 정의**: 메인보드는 서브보드 FC05 **응답**을 받아야만 성공으로 처리하고, 실패 시 PC에는 예외(0x85) 응답.
+
+구현: `Application/Src/modbus_master_log.c`, `Modbus/Src/modbus_master.c` (WriteCoil에서 RX 대기).
 
 ## PC 툴 진단 시퀀스
 

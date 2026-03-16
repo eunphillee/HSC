@@ -1,0 +1,112 @@
+--- a/Application/Inc/led_status.h
++++ b/Application/Inc/led_status.h
+@@ -19,4 +19,12 @@ void LED_Status_OnRS485Activity(void);
+ /** UART1 raw receive event (≥1 byte): pulse LED2 for 50ms; use to confirm "receive present" / program download. */
+ void LED_Status_OnUart1RxEvent(void);
+ 
++/** UART1 CRC OK frame: pulse LED3 50ms (수신→CRCOK→응답송신 3단계 디버그). */
++void LED_Status_OnUart1CrcOk(void);
++
++/** UART1 응답 송신 직전: pulse LED2 50ms (3단계 디버그). */
++void LED_Status_OnUart1TxRespBefore(void);
++
+ #ifdef __cplusplus
+ }
+ #endif
+--- a/Application/Src/led_status.c
++++ b/Application/Src/led_status.c
+@@ -17,6 +17,9 @@
+ #define UART1_SLAVE_TX_PULSE_MS  30u  /* LED3 pulse when UART1 slave sends response */
+ #define UART1_RX_EVT_PULSE_MS    50u  /* LED2 pulse on UART1 receive event (any byte), receive/download confirm */
++#define UART1_CRCOK_PULSE_MS     50u  /* LED3: CRC OK frame received */
++#define UART1_TX_RESP_PULSE_MS   50u  /* LED2: response send (right before Transmit) */
+ 
+ /* LED01~04: all LOW active (LOW=ON, HIGH=OFF) */
+ #define LED_PWR_ON()    HAL_GPIO_WritePin(LED01_GPIO_Port, LED01_Pin, GPIO_PIN_RESET)
+@@ -34,6 +37,8 @@ static uint16_t rs485_timer_ms;
+ static uint16_t uart1_rx_evt_timer_ms;  /* LED2: UART1 raw receive event (no Modbus/CRC), download confirm */
++static uint16_t uart1_crc_ok_timer_ms;  /* LED3: CRC OK frame received */
++static uint16_t uart1_tx_resp_timer_ms; /* LED2: response send (before Transmit) */
+ 
+ /* DI: debounce state */
+ static uint16_t di_last_raw;
+@@ -48,6 +53,8 @@ void LED_Status_Init(void)
+ 	rs485_timer_ms = 0;
+ 	uart1_rx_evt_timer_ms = 0;
++	uart1_crc_ok_timer_ms = 0;
++	uart1_tx_resp_timer_ms = 0;
+ 	di_last_raw = IO_Main_ReadDI_Bitmap();
+ 	/* ... */
+ 	LED_DI_OFF();
+ 	LED_DO_OFF();
+-	LED_RS485_ON();   /* LED4: 전원 되면 켜짐 */
++	LED_RS485_OFF();   /* LED4: UART1 수신 시에만 50ms 펄스 */
+ 	LED_PWR_ON();
+ }
+@@ -110,6 +117,16 @@ void LED_Status_Tick_1ms(void)
+ 		if (uart1_rx_evt_timer_ms > 0) {
+ 			/* decrement ... */
+ 		}
++		if (uart1_crc_ok_timer_ms > 0) {
++			if (uart1_crc_ok_timer_ms <= elapsed) uart1_crc_ok_timer_ms = 0;
++			else uart1_crc_ok_timer_ms -= (uint16_t)elapsed;
++		}
++		if (uart1_tx_resp_timer_ms > 0) {
++			if (uart1_tx_resp_timer_ms <= elapsed) uart1_tx_resp_timer_ms = 0;
++			else uart1_tx_resp_timer_ms -= (uint16_t)elapsed;
++		}
+ 	}
+ 
+-	if (di_evt_timer_ms > 0 || rs485_timer_ms > 0 || uart1_rx_evt_timer_ms > 0) LED_DI_ON(); else LED_DI_OFF();
+-	if (do_evt_timer_ms > 0) LED_DO_ON(); else LED_DO_OFF();
+-	LED_RS485_ON();   /* LED4: 전원 들어오면 계속 켜져 있음 */
++	/* LED2=응답송신 직전, LED3=CRCOK, LED4=UART1 수신 (3단계 디버그) */
++	if (di_evt_timer_ms > 0 || rs485_timer_ms > 0 || uart1_tx_resp_timer_ms > 0) LED_DI_ON(); else LED_DI_OFF();
++	if (do_evt_timer_ms > 0 || uart1_crc_ok_timer_ms > 0) LED_DO_ON(); else LED_DO_OFF();
++	if (uart1_rx_evt_timer_ms > 0) LED_RS485_ON(); else LED_RS485_OFF();
+ 	LED_PWR_ON();
+ }
+@@ -143,3 +160,15 @@ void LED_Status_OnUart1RxEvent(void)
+ 	uart1_rx_evt_timer_ms = UART1_RX_EVT_PULSE_MS;
+ }
++
++void LED_Status_OnUart1CrcOk(void)
++{
++	uart1_crc_ok_timer_ms = UART1_CRCOK_PULSE_MS;
++}
++
++void LED_Status_OnUart1TxRespBefore(void)
++{
++	uart1_tx_resp_timer_ms = UART1_TX_RESP_PULSE_MS;
++}
+--- a/Application/Src/upstream_slave_uart1.c
++++ b/Application/Src/upstream_slave_uart1.c
+@@ -210,6 +210,7 @@ void UpstreamSlaveUart1_Poll(const aggregated_status_t *agg)
+ 					UpstreamSlaveUart1_LogFrame(frame_buf, log_len, 1, frame_buf[1], addr);
+ 					}
+ #endif
++					LED_Status_OnUart1CrcOk();   /* LED3 50ms: CRC OK (3단계 디버그) */
+ 					LED_Status_OnRS485Activity();
+ 					process_modbus_frame(frame_buf, expected, agg);
+ 					return;
+@@ -125,6 +126,7 @@ static void process_modbus_frame(...)
+ 		ModbusRTU_AppendCRC(tx_frame, (size_t)(1 + resp_len));
+ 		uint16_t tx_len = (uint16_t)(1 + resp_len + 2);
+ 		last_tx_resp_tick = HAL_GetTick();
++		LED_Status_OnUart1TxRespBefore();  /* LED2 50ms: 응답 송신 직전 (3단계 디버그) */
+ 		set_de_tx();
+ 		(void)HAL_UART_Transmit(&huart1, tx_frame, tx_len, 100);
+ 		set_de_rx();
+@@ -132,7 +134,7 @@ static void process_modbus_frame(...)
+ 		if (TX_GUARD_MS > 0)
+ 			HAL_Delay(TX_GUARD_MS);
+-		tx_resp_count++;
++		tx_resp_count++;   /* HAL_UART_Transmit 호출 직후에만 증가 (실제 송신 발생 시) */
+ 		LED_Status_OnUart1SlaveTx();
+ 		...
+ 	}
+@@ -214,6 +216,7 @@ void UpstreamSlaveUart1_Poll(const aggregated_status_t *agg)
+ 		rx_ring_len = 0;
+ 
++		/* FC03 addr=2100 cnt=2: 8바이트 (SlaveId=9 + FC=03 + Addr 0x0834 + Cnt 2 + CRC2). GetExpectedRequestLength(FC03)=8, CRC Modbus 0xA001 LSB first. */
+ 		if (frame_len >= 4 && frame_buf[0] == SLAVE_ID) {

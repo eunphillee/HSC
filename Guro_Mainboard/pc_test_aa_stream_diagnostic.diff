@@ -1,0 +1,156 @@
+diff --git a/Application/Inc/led_status.h b/Application/Inc/led_status.h
+--- a/Application/Inc/led_status.h
++++ b/Application/Inc/led_status.h
+@@ -32,6 +32,15 @@ void LED_Status_OnUart1TxRespBefore(void);
+ /** PC 테스트 0xAA 송신 시작 시 LED2 40ms 펄스 (ENABLE_PC_TEST_AA_STREAM=1). */
+ void LED_Status_OnPcTestAASend(void);
+ 
++/** PC 테스트 0xAA: HAL_UART_Transmit HAL_OK 시 LED3 20ms 펄스. */
++void LED_Status_OnPcTestAATxOk(void);
++
++/** PC 테스트 0xAA: HAL_UART_Transmit HAL_BUSY/TIMEOUT/ERROR 시 LED4 200ms 점등. */
++void LED_Status_OnPcTestAATxError(void);
++
++/** PC 테스트 빌드 모드 확인: LED2를 count번 빠르게 점멸 (부팅 시 3회 호출). */
++void LED_Status_BootBlinkPcTestAA(uint8_t count);
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/Application/Src/led_status.c b/Application/Src/led_status.c
+--- a/Application/Src/led_status.c
++++ b/Application/Src/led_status.c
+@@ -20,6 +20,8 @@
+ #define UART1_TX_RESP_PULSE_MS   50u  /* LED2: response send (right before Transmit) */
+ #define PC_TEST_AA_LED_PULSE_MS  40u  /* LED2: 0xAA 송신 시작 시 40ms 펄스 (ENABLE_PC_TEST_AA_STREAM) */
++#define PC_TEST_AA_TX_OK_PULSE_MS    20u   /* LED3: 0xAA Transmit HAL_OK */
++#define PC_TEST_AA_TX_ERR_ON_MS      200u  /* LED4: 0xAA Transmit HAL_BUSY/TIMEOUT/ERROR */
+ 
+ /* LED01~04: all LOW active (LOW=ON, HIGH=OFF) */
+ #define LED_PWR_ON()    HAL_GPIO_WritePin(LED01_GPIO_Port, LED01_Pin, GPIO_PIN_RESET)
+@@ -36,6 +38,8 @@ static uint16_t uart1_rx_evt_timer_ms;  /* LED4: UART1 raw receive event */
+ static uint16_t uart1_crc_ok_timer_ms;  /* LED3: CRC OK frame received */
+ static uint16_t uart1_tx_resp_timer_ms; /* LED2: response send (before Transmit) */
+ static uint16_t pc_test_aa_led_timer_ms; /* LED2: 0xAA 송신 시 40ms 펄스 */
++static uint16_t pc_test_aa_tx_ok_timer_ms;  /* LED3: 0xAA Tx HAL_OK 20ms */
++static uint16_t pc_test_aa_tx_err_timer_ms; /* LED4: 0xAA Tx error 200ms */
+ 
+ /* DI: debounce state */
+ static uint16_t di_last_raw;
+@@ -54,6 +58,8 @@ void LED_Status_Init(void)
+ 	uart1_tx_resp_timer_ms = 0;
+ 	pc_test_aa_led_timer_ms = 0;
++	pc_test_aa_tx_ok_timer_ms = 0;
++	pc_test_aa_tx_err_timer_ms = 0;
+ 	di_last_raw = IO_Main_ReadDI_Bitmap();
+ 	di_stable = di_last_raw;
+ 	di_debounce_count = 0;
+@@ -130,6 +136,14 @@ void LED_Status_Tick_1ms(void)
+ 		if (pc_test_aa_led_timer_ms > 0) {
+ 			if (pc_test_aa_led_timer_ms <= elapsed) pc_test_aa_led_timer_ms = 0;
+ 			else pc_test_aa_led_timer_ms -= (uint16_t)elapsed;
+ 		}
++		if (pc_test_aa_tx_ok_timer_ms > 0) {
++			if (pc_test_aa_tx_ok_timer_ms <= elapsed) pc_test_aa_tx_ok_timer_ms = 0;
++			else pc_test_aa_tx_ok_timer_ms -= (uint16_t)elapsed;
++		}
++		if (pc_test_aa_tx_err_timer_ms > 0) {
++			if (pc_test_aa_tx_err_timer_ms <= elapsed) pc_test_aa_tx_err_timer_ms = 0;
++			else pc_test_aa_tx_err_timer_ms -= (uint16_t)elapsed;
++		}
+ 	}
+ 
+-	/* ----- LED2=DI/RS485/UART1 TX resp/PC_TEST_AA, LED3=DO/UART1 CRCOK, LED4=UART1 RX evt ----- */
++	/* ----- LED2=DI/RS485/UART1 TX resp/PC_TEST_AA, LED3=DO/UART1 CRCOK/PC_TEST_AA TxOk, LED4=UART1 RX evt/PC_TEST_AA TxErr ----- */
+ 	if (di_evt_timer_ms > 0 || rs485_timer_ms > 0 || uart1_tx_resp_timer_ms > 0 || pc_test_aa_led_timer_ms > 0) LED_DI_ON(); else LED_DI_OFF();
+-	if (do_evt_timer_ms > 0 || uart1_crc_ok_timer_ms > 0) LED_DO_ON(); else LED_DO_OFF();
+-	if (uart1_rx_evt_timer_ms > 0) LED_RS485_ON(); else LED_RS485_OFF();  /* LED4: 수신 있을 때만 50ms 펄스 */
++	if (do_evt_timer_ms > 0 || uart1_crc_ok_timer_ms > 0 || pc_test_aa_tx_ok_timer_ms > 0) LED_DO_ON(); else LED_DO_OFF();
++	if (uart1_rx_evt_timer_ms > 0 || pc_test_aa_tx_err_timer_ms > 0) LED_RS485_ON(); else LED_RS485_OFF();
+ 	LED_PWR_ON();
+ }
+ 
+@@ -182,5 +182,29 @@ void LED_Status_OnPcTestAASend(void)
+ {
+ 	pc_test_aa_led_timer_ms = PC_TEST_AA_LED_PULSE_MS;
+ }
++
++/** PC 테스트 0xAA: HAL_UART_Transmit HAL_OK → LED3 20ms 펄스. */
++void LED_Status_OnPcTestAATxOk(void)
++{
++	pc_test_aa_tx_ok_timer_ms = PC_TEST_AA_TX_OK_PULSE_MS;
++}
++
++/** PC 테스트 0xAA: HAL_UART_Transmit HAL_BUSY/TIMEOUT/ERROR → LED4 200ms 점등. */
++void LED_Status_OnPcTestAATxError(void)
++{
++	pc_test_aa_tx_err_timer_ms = PC_TEST_AA_TX_ERR_ON_MS;
++}
++
++/** PC 테스트 빌드 모드 확인: LED2를 count번 빠르게 점멸 (HAL_Delay 사용). */
++void LED_Status_BootBlinkPcTestAA(uint8_t count)
++{
++	for (uint8_t i = 0; i < count; i++) {
++		LED_DI_ON();
++		HAL_Delay(80);
++		LED_DI_OFF();
++		HAL_Delay(80);
++	}
++}
+diff --git a/Application/Src/pc_test_aa_stream.c b/Application/Src/pc_test_aa_stream.c
+--- a/Application/Src/pc_test_aa_stream.c
++++ b/Application/Src/pc_test_aa_stream.c
+@@ -15,38 +15,45 @@
+ extern UART_HandleTypeDef huart1;
+ 
+-#if RS485_DE_ACTIVE_HIGH
+-static void set_de_tx(void) { HAL_GPIO_WritePin(RS485_DE_GPIO_Port, RS485_DE_Pin, GPIO_PIN_SET); }
+-static void set_de_rx(void) { HAL_GPIO_WritePin(RS485_DE_GPIO_Port, RS485_DE_Pin, GPIO_PIN_RESET); }
+-#else
+-static void set_de_tx(void) { HAL_GPIO_WritePin(RS485_DE_GPIO_Port, RS485_DE_Pin, GPIO_PIN_RESET); }
+-static void set_de_rx(void) { HAL_GPIO_WritePin(RS485_DE_GPIO_Port, RS485_DE_Pin, GPIO_PIN_SET); }
+-#endif
++/* 진단용: 송신 시 PB1=1, 수신 대기 시 PB1=0 고정 (RS485 DE active-high 기준). */
++static void set_de_tx(void)
++{
++	HAL_GPIO_WritePin(RS485_DE_GPIO_Port, RS485_DE_Pin, GPIO_PIN_SET);  /* PB1=1 보장 */
++}
++static void set_de_rx(void)
++{
++	HAL_GPIO_WritePin(RS485_DE_GPIO_Port, RS485_DE_Pin, GPIO_PIN_RESET); /* PB1=0 보장 */
++}
+ 
+ static uint32_t last_send_tick;
+ 
+ void PcTestAA_Init(void)
+ {
+ 	last_send_tick = HAL_GetTick();
+-	set_de_rx();
++	set_de_rx();  /* PB1=0 */
++	LED_Status_BootBlinkPcTestAA(3);  /* ENABLE_PC_TEST_AA_STREAM=1 빌드 확인: LED2 3회 빠른 점멸 */
+ }
+ 
+ void PcTestAA_Tick(const aggregated_status_t *agg)
+ {
+ 	(void)agg;
+ 	uint32_t now = HAL_GetTick();
+ 	if ((now - last_send_tick) < INTERVAL_MS)
+ 		return;
+ 	last_send_tick = now;
+ 
+-	LED_Status_OnPcTestAASend();  /* LED2 40ms 펄스 (타이머는 main loop LED_Status_Tick_1ms에서 감소) */
+-	set_de_tx();
++	LED_Status_OnPcTestAASend();  /* LED2 40ms 펄스 */
++	set_de_tx();   /* 송신 직전 반드시 호출 → PB1=1 */
+ 	static const uint8_t byte_0xaa = 0xAA;
+-	(void)HAL_UART_Transmit(&huart1, (uint8_t *)&byte_0xaa, 1, 50);
+-	set_de_rx();
++	HAL_StatusTypeDef ret = HAL_UART_Transmit(&huart1, (uint8_t *)&byte_0xaa, 1, 50);
++	set_de_rx();   /* 송신 완료 후 PB1=0 */
++	if (ret == HAL_OK)
++		LED_Status_OnPcTestAATxOk();    /* LED3 20ms 펄스 */
++	else
++		LED_Status_OnPcTestAATxError();  /* LED4 200ms 점등 (HAL_BUSY/TIMEOUT/ERROR) */
+ 	if (TX_GUARD_MS > 0)
+ 		HAL_Delay(TX_GUARD_MS);
+ }

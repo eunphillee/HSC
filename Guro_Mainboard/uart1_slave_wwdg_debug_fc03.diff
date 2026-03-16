@@ -1,0 +1,135 @@
+--- a/Application/Inc/app_config.h
++++ b/Application/Inc/app_config.h
+@@ -34,6 +34,11 @@
+ #define FORCE_RS485_TX  0
+ #endif
+ 
++/* UART1 Modbus Slave debug log: 1 = RX frame HEX(up to 16B) + CRC OK/FAIL + FC + addr, and periodic invalid_len/crc counts */
++#ifndef UPSTREAM_DEBUG_LOG
++#define UPSTREAM_DEBUG_LOG  0
++#endif
++
+ #endif /* APP_CONFIG_H */
+ 
+--- a/Core/Src/main.c
++++ b/Core/Src/main.c
+@@ -104,7 +104,9 @@ int main(void)
+ 
+   /* Initialize all configured peripherals */
+   MX_GPIO_Init();
++#if !USE_PC_TEST_UART1_SLAVE
+   MX_WWDG_Init();
++#endif
+   MX_I2C1_Init();
+   MX_I2C3_Init();
+   MX_USART1_UART_Init();
+@@ -134,7 +136,9 @@ int main(void)
+     /* USER CODE END WHILE */
+ 
+     /* USER CODE BEGIN 3 */
++#if !USE_PC_TEST_UART1_SLAVE
+     HAL_WWDG_Refresh(&hwwdg);   /* 테스트 모드에서는 WWDG 미사용 */
++#endif
+     LED_Status_Tick_1ms();
+     AppScheduler_Update();
+ 
+--- a/Application/Inc/upstream_slave_uart1.h
++++ b/Application/Inc/upstream_slave_uart1.h
+@@ -22,7 +22,12 @@ void UpstreamSlaveUart1_GetCounts(uint32_t *rx_ok, uint32_t *rx_crc_fail, uint32
+ /** Weak: called every ~1s from Poll with current counts; override to log (e.g. UART).
+  *  When UPSTREAM_DEBUG_LOG=1, use rx_len_fail as invalid_len_count, rx_crc_fail as invalid_crc_count. */
+ void UpstreamSlaveUart1_LogCounts(uint32_t rx_ok, uint32_t rx_crc_fail, uint32_t rx_len_fail, uint32_t tx_resp);
+ 
++/** Weak: when UPSTREAM_DEBUG_LOG=1, called per RX frame with HEX(up to 16B), CRC OK/FAIL, FC, addr. Override to output. */
++void UpstreamSlaveUart1_LogFrame(const uint8_t *frame, uint16_t len, int crc_ok, uint8_t fc, uint16_t addr);
++
+ #ifdef __cplusplus
+ }
+ #endif
+--- a/Application/Src/upstream_slave_uart1.c
++++ b/Application/Src/upstream_slave_uart1.c
+@@ -54,6 +54,16 @@ __attribute__((weak)) void UpstreamSlaveUart1_LogCounts(uint32_t rx_ok, uint32_t
+ 	(void)tx_resp;
+ }
+ 
++__attribute__((weak)) void UpstreamSlaveUart1_LogFrame(const uint8_t *frame, uint16_t len, int crc_ok, uint8_t fc, uint16_t addr)
++{
++	(void)frame;
++	(void)len;
++	(void)crc_ok;
++	(void)fc;
++	(void)addr;
++}
++
+ static void process_modbus_frame(const uint8_t *frame, size_t frame_len, const aggregated_status_t *agg)
+ {
+ 	static uint8_t resp_pdu[64];
+@@ -208,14 +218,38 @@ void UpstreamSlaveUart1_Poll(const aggregated_status_t *agg)
+ 	if (frame_len < 4 || frame_buf[0] != SLAVE_ID) return;
+ 
+ 	size_t expected = ModbusRTU_GetExpectedRequestLength(frame_buf, (size_t)frame_len);
+ 	if (expected == 0 || (size_t)frame_len < expected) {
+ 		rx_len_fail_count++;
++#if UPSTREAM_DEBUG_LOG
++		{
++			uint16_t log_len = (frame_len > 16u) ? 16u : (uint16_t)frame_len;
++			uint16_t addr = (frame_len >= 4u) ? (uint16_t)((frame_buf[2] << 8) | frame_buf[3]) : 0u;
++			UpstreamSlaveUart1_LogFrame(frame_buf, log_len, 0, frame_len >= 2u ? frame_buf[1] : 0u, addr);
++		}
++#endif
+ 		return;
+ 	}
+ 	if (ModbusRTU_CRC16Check(frame_buf, expected) != 0) {
+ 		rx_crc_fail_count++;
++#if UPSTREAM_DEBUG_LOG
++		{
++			uint16_t log_len = (expected > 16u) ? 16u : (uint16_t)expected;
++			uint16_t addr = (uint16_t)((frame_buf[2] << 8) | frame_buf[3]);
++			UpstreamSlaveUart1_LogFrame(frame_buf, log_len, 0, frame_buf[1], addr);
++		}
++#endif
+ 		return;
+ 	}
+ 
+ 	rx_frame_ok_count++;
++#if UPSTREAM_DEBUG_LOG
++	{
++		uint16_t log_len = (expected > 16u) ? 16u : (uint16_t)expected;
++		uint16_t addr = (uint16_t)((frame_buf[2] << 8) | frame_buf[3]);
++		UpstreamSlaveUart1_LogFrame(frame_buf, log_len, 1, frame_buf[1], addr);
++	}
++#endif
+ 	LED_Status_OnRS485Activity();   /* LED2 pulse: request received (valid frame) */
+ 	process_modbus_frame(frame_buf, expected, agg);
+ }
+--- a/Gateway/Src/upstream_slave_h2tech.c
++++ b/Gateway/Src/upstream_slave_h2tech.c
+@@ -64,15 +64,25 @@ static int handle_fc02(uint16_t start_addr, uint16_t count, uint8_t *response, u
+ static int handle_fc03(uint16_t start_addr, uint16_t count, const void *p_agg,
+                        uint8_t *response, uint16_t resp_max)
+ {
+-    /* MAIN I/O block: 4x2100, 4x2101 */
++    /* MAIN I/O block: 4x2100 (and optionally 4x2101). Accept count=1 (DI only) or count=2 (DI+DO). */
+     if (start_addr == UPSTREAM_MAIN_IO_DI_REG) {
+-        if (count != UPSTREAM_MAIN_IO_REG_COUNT) {
++        if (count != 1u && count != UPSTREAM_MAIN_IO_REG_COUNT) {
+             response[0] = 0x83;
+             response[1] = EX_ILLEGAL_DATA_VAL;
+             return 2;
+         }
+-        if (resp_max < 2u + 4u) return -1;
+         uint16_t di = IO_Main_ReadDI_Bitmap();
++        if (count == 1u) {
++            /* FC03 addr=2100 cnt=1: SlaveID + FC + ByteCount(2) + Data(2B) + CRC */
++            if (resp_max < 2u + 2u) return -1;
++            response[0] = 0x03;
++            response[1] = 2u;
++            response[2] = (uint8_t)(di >> 8);
++            response[3] = (uint8_t)(di & 0xFF);
++            return 4;
++        }
++        /* count == 2 */
++        if (resp_max < 2u + 4u) return -1;
+         uint16_t do_val = IO_Main_ReadDO_Bitmap();
+         response[0] = 0x03;
+         response[1] = 4u;

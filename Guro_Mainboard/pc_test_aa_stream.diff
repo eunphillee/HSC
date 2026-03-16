@@ -1,0 +1,216 @@
+diff --git a/Application/Inc/app_config.h b/Application/Inc/app_config.h
+--- a/Application/Inc/app_config.h
++++ b/Application/Inc/app_config.h
+@@ -44,6 +44,11 @@
+ #define BOARD_TX_0XAA_ENABLE  0
+ #endif
+ 
++/* PC 테스트: UART1 RS485로 0xAA 500ms 주기 송신 + LED2 40ms 펄스. 1=동작 시 Modbus Slave/Master 폴링 비활성화. */
++#ifndef ENABLE_PC_TEST_AA_STREAM
++#define ENABLE_PC_TEST_AA_STREAM  0
++#endif
++
+ #endif /* APP_CONFIG_H */
+ 
+diff --git a/Application/Inc/pc_test_aa_stream.h b/Application/Inc/pc_test_aa_stream.h
+new file mode 100644
+--- /dev/null
++++ b/Application/Inc/pc_test_aa_stream.h
+@@ -0,0 +1,23 @@
++/**
++ * @file pc_test_aa_stream.h
++ * @brief PC 테스트: UART1 RS485로 0xAA 500ms 주기 송신 + LED2 40ms 펄스.
++ *        ENABLE_PC_TEST_AA_STREAM=1 일 때만 사용. Modbus와 무관하게 송신 경로/DE/PC 수신 검증용.
++ */
++#ifndef PC_TEST_AA_STREAM_H
++#define PC_TEST_AA_STREAM_H
++
++#include "aggregated_status.h"
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++void PcTestAA_Init(void);
++void PcTestAA_Tick(const aggregated_status_t *agg);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* PC_TEST_AA_STREAM_H */
+diff --git a/Application/Src/pc_test_aa_stream.c b/Application/Src/pc_test_aa_stream.c
+new file mode 100644
+--- /dev/null
++++ b/Application/Src/pc_test_aa_stream.c
+@@ -0,0 +1,63 @@
++/**
++ * @file pc_test_aa_stream.c
++ * @brief PC 테스트: UART1(PA9/PA10, DE/RE=PB1)로 0xAA 1바이트 500ms 주기 송신, 송신 시 LED2 40ms 펄스.
++ *        ENABLE_PC_TEST_AA_STREAM=1 일 때만 동작. set_de_tx() -> Transmit -> set_de_rx() -> guard 2ms.
++ */
++#include "pc_test_aa_stream.h"
++#include "app_config.h"
++#include "main.h"
++#include "led_status.h"
++
++#if ENABLE_PC_TEST_AA_STREAM
++
++#define INTERVAL_MS    500u
++#define TX_GUARD_MS    2u
++
++extern UART_HandleTypeDef huart1;
++
++#if RS485_DE_ACTIVE_HIGH
++static void set_de_tx(void) { HAL_GPIO_WritePin(RS485_DE_GPIO_Port, RS485_DE_Pin, GPIO_PIN_SET); }
++static void set_de_rx(void) { HAL_GPIO_WritePin(RS485_DE_GPIO_Port, RS485_DE_Pin, GPIO_PIN_RESET); }
++#else
++static void set_de_tx(void) { HAL_GPIO_WritePin(RS485_DE_GPIO_Port, RS485_DE_Pin, GPIO_PIN_RESET); }
++static void set_de_rx(void) { HAL_GPIO_WritePin(RS485_DE_GPIO_Port, RS485_DE_Pin, GPIO_PIN_SET); }
++#endif
++
++static uint32_t last_send_tick;
++
++void PcTestAA_Init(void)
++{
++	last_send_tick = HAL_GetTick();
++	set_de_rx();
++}
++
++void PcTestAA_Tick(const aggregated_status_t *agg)
++{
++	(void)agg;
++	uint32_t now = HAL_GetTick();
++	if ((now - last_send_tick) < INTERVAL_MS)
++		return;
++	last_send_tick = now;
++
++	LED_Status_OnPcTestAASend();  /* LED2 40ms 펄스 (타이머는 main loop LED_Status_Tick_1ms에서 감소) */
++	set_de_tx();
++	static const uint8_t byte_0xaa = 0xAA;
++	(void)HAL_UART_Transmit(&huart1, (uint8_t *)&byte_0xaa, 1, 50);
++	set_de_rx();
++	if (TX_GUARD_MS > 0)
++		HAL_Delay(TX_GUARD_MS);
++}
++
++#else
++
++void PcTestAA_Init(void)
++{
++	(void)0;
++}
++
++void PcTestAA_Tick(const aggregated_status_t *agg)
++{
++	(void)agg;
++}
++
++#endif /* ENABLE_PC_TEST_AA_STREAM */
+diff --git a/Application/Inc/led_status.h b/Application/Inc/led_status.h
+--- a/Application/Inc/led_status.h
++++ b/Application/Inc/led_status.h
+@@ -28,6 +28,9 @@
+ /** UART1 응답 송신 직전: pulse LED2 50ms (3단계 디버그). */
+ void LED_Status_OnUart1TxRespBefore(void);
+ 
++/** PC 테스트 0xAA 송신 시작 시 LED2 40ms 펄스 (ENABLE_PC_TEST_AA_STREAM=1). */
++void LED_Status_OnPcTestAASend(void);
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/Application/Src/led_status.c b/Application/Src/led_status.c
+--- a/Application/Src/led_status.c
++++ b/Application/Src/led_status.c
+@@ -18,6 +18,7 @@
+ #define UART1_RX_EVT_PULSE_MS    50u  /* LED4: UART1 receive event (any byte) */
+ #define UART1_CRCOK_PULSE_MS     50u  /* LED3: CRC OK frame received */
+ #define UART1_TX_RESP_PULSE_MS   50u  /* LED2: response send (right before Transmit) */
++#define PC_TEST_AA_LED_PULSE_MS  40u  /* LED2: 0xAA 송신 시작 시 40ms 펄스 (ENABLE_PC_TEST_AA_STREAM) */
+ 
+ /* LED01~04: all LOW active (LOW=ON, HIGH=OFF) */
+ #define LED_PWR_ON()    HAL_GPIO_WritePin(LED01_GPIO_Port, LED01_Pin, GPIO_PIN_RESET)
+@@ -35,6 +36,7 @@
+ static uint16_t uart1_rx_evt_timer_ms;  /* LED4: UART1 raw receive event */
+ static uint16_t uart1_crc_ok_timer_ms;  /* LED3: CRC OK frame received */
+ static uint16_t uart1_tx_resp_timer_ms; /* LED2: response send (before Transmit) */
++static uint16_t pc_test_aa_led_timer_ms; /* LED2: 0xAA 송신 시 40ms 펄스 */
+ 
+ /* DI: debounce state */
+ static uint16_t di_last_raw;
+@@ -51,6 +53,7 @@ void LED_Status_Init(void)
+ 	uart1_rx_evt_timer_ms = 0;
+ 	uart1_crc_ok_timer_ms = 0;
+ 	uart1_tx_resp_timer_ms = 0;
++	pc_test_aa_led_timer_ms = 0;
+ 	di_last_raw = IO_Main_ReadDI_Bitmap();
+ 	di_stable = di_last_raw;
+ 	di_debounce_count = 0;
+@@ -124,6 +127,9 @@ void LED_Status_Tick_1ms(void)
+ 		if (uart1_tx_resp_timer_ms > 0) {
+ 			if (uart1_tx_resp_timer_ms <= elapsed) uart1_tx_resp_timer_ms = 0;
+ 			else uart1_tx_resp_timer_ms -= (uint16_t)elapsed;
+ 		}
++		if (pc_test_aa_led_timer_ms > 0) {
++			if (pc_test_aa_led_timer_ms <= elapsed) pc_test_aa_led_timer_ms = 0;
++			else pc_test_aa_led_timer_ms -= (uint16_t)elapsed;
++		}
+ 	}
+ 
+-	/* ----- LED2=DI/RS485/UART1 TX resp, LED3=DO/UART1 CRCOK, LED4=UART1 RX evt ----- */
+-	if (di_evt_timer_ms > 0 || rs485_timer_ms > 0 || uart1_tx_resp_timer_ms > 0) LED_DI_ON(); else LED_DI_OFF();
++	/* ----- LED2=DI/RS485/UART1 TX resp/PC_TEST_AA, LED3=DO/UART1 CRCOK, LED4=UART1 RX evt ----- */
++	if (di_evt_timer_ms > 0 || rs485_timer_ms > 0 || uart1_tx_resp_timer_ms > 0 || pc_test_aa_led_timer_ms > 0) LED_DI_ON(); else LED_DI_OFF();
+ 	if (do_evt_timer_ms > 0 || uart1_crc_ok_timer_ms > 0) LED_DO_ON(); else LED_DO_OFF();
+ 	if (uart1_rx_evt_timer_ms > 0) LED_RS485_ON(); else LED_RS485_OFF();  /* LED4: 수신 있을 때만 50ms 펄스 */
+@@ -178,3 +184,9 @@ void LED_Status_OnUart1TxRespBefore(void)
+ {
+ 	uart1_tx_resp_timer_ms = UART1_TX_RESP_PULSE_MS;
+ }
++
++/** PC 테스트 0xAA 송신 시작 시 LED2 40ms 펄스 (ENABLE_PC_TEST_AA_STREAM). */
++void LED_Status_OnPcTestAASend(void)
++{
++	pc_test_aa_led_timer_ms = PC_TEST_AA_LED_PULSE_MS;
++}
+diff --git a/Core/Src/main.c b/Core/Src/main.c
+--- a/Core/Src/main.c
++++ b/Core/Src/main.c
+@@ -29,6 +29,7 @@
+ #include "gateway_actions.h"
+ #include "led_status.h"
++#include "pc_test_aa_stream.h"
+ /* USER CODE END Includes */
+@@ -114,11 +115,15 @@ int main(void)
+   UpstreamPC_Init();
+-#if USE_PC_TEST_UART1_SLAVE
++#if USE_PC_TEST_UART1_SLAVE && !ENABLE_PC_TEST_AA_STREAM
+   UpstreamSlaveUart1_Init();
+ #endif
+   LED_Status_Init();
++#if ENABLE_PC_TEST_AA_STREAM
++  PcTestAA_Init();
++#endif
+-#if USE_PC_TEST_UART1_SLAVE
++#if USE_PC_TEST_UART1_SLAVE && !ENABLE_PC_TEST_AA_STREAM
+   /* 부팅 시 LED2 한 번 펄스 ... */
+   LED_Status_OnUart1RxEvent();
+   LED_Status_OnUart1SlaveTx();
+@@ -132,6 +138,14 @@ int main(void)
+     LED_Status_Tick_1ms();
+     AppScheduler_Update();
+ 
++#if ENABLE_PC_TEST_AA_STREAM
++    PcTestAA_Tick(&aggregated_status);
++#else
+     if (AppScheduler_IsDue(TASK_UPSTREAM_POLL))
+       UpstreamPC_Poll(&aggregated_status);
+ #if USE_PC_TEST_UART1_SLAVE
+@@ -141,6 +155,7 @@ int main(void)
+       ModbusMaster_Poll();
+ #endif
++#endif
+     if (AppScheduler_IsDue(TASK_AGGREGATE_UPDATE))
+       Aggregator_Update(&aggregated_status);
+     Gateway_Action_Update();

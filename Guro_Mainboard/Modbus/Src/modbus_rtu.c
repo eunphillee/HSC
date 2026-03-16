@@ -335,6 +335,16 @@ int ModbusRTU_ParseFC05Request(const uint8_t *frame, size_t len, uint16_t *coil_
     *value = (frame[4] == 0xFF && frame[5] == 0x00) ? 1 : 0;
     return 0;
 }
+
+/* Validate FC05 response (8 bytes: slave, 0x05, addr_hi, addr_lo, val_hi, val_lo, crc_lo, crc_hi). Returns 0 if valid. */
+int ModbusRTU_ValidateFC05Response(const uint8_t *frame, size_t len, uint8_t expected_slave)
+{
+    if (len < 8) return -1;
+    if (frame[0] != expected_slave) return -1;
+    if (frame[1] != 0x05) return -1;  /* 0x85 = exception */
+    if (ModbusRTU_CRC16Check(frame, 8) != 0) return -1;
+    return 0;
+}
 int ModbusRTU_ParseFC06Request(const uint8_t *frame, size_t len, uint16_t *reg_addr, uint16_t *value)
 {
     if (len < 8) return -1;

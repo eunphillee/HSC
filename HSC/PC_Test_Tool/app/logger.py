@@ -38,6 +38,8 @@ class LogHandler(QObject):
     def __init__(self):
         super().__init__()
         self._lines: list[dict] = []
+        self._raw_rx_buffer: list[int] = []  # \r\n 올 때까지 모아서 한 줄로 출력
+        self._raw_line_only: bool = False  # True면 <MSG> 무시, \r\n(또는 \n) 전까지 누적 후 한 줄씩만 출력 (긴 문자열 chunk 수신용)
 
     def log(self, func: str, addr: int | str, count_or_value: int | str, result: str, exception: str = ""):
         """Legacy log without tag (emits with no tag prefix). Prefer log_tagged for [MAIN]/[HPSB]/[LPSB*]."""
@@ -89,12 +91,87 @@ class LogHandler(QObject):
         else:
             self.log_line.emit(f"{_ts()} | {prefix}RX ERR")
 
+    def set_raw_line_only(self, on: bool):
+        """True면 파서 없이 \\r\\n(또는 \\n) 전까지 누적 후 한 줄씩만 출력. 긴 문자열/스테이지 수신 시 사용."""
+        self._raw_line_only = on
+
     def log_raw_rx(self, bytes_list: list[int]):
-        """Log raw bytes received from board (e.g. 0xAA)."""
+        """수신 버퍼에 누적. raw_line_only면 \\r\\n/\\n 기준으로만 한 줄 출력. 아니면 <MSG>~\\r\\n 또는 폴백."""
         if not bytes_list:
             return
-        for b in bytes_list:
-            self.log_line.emit(f"{_ts()} | RX from board: 0x{b:02X}")
+        self._raw_rx_buffer.extend(bytes_list)
+        _MARKER = b"<MSG>"
+        _END_CRLF = b"\r\n"
+        _END_LF = b"\n"
+
+        def emit_line(msg_bytes: list) -> None:
+            try:
+                text = bytes(msg_bytes).decode("ascii", errors="replace").strip()
+                if text:
+                    self.log_line.emit(f"{_ts()} | [RX] {text}")
+            except Exception:
+                pass
+
+        def find_line_end(bbuf: bytes):
+            end_crlf = bbuf.find(_END_CRLF)
+            end_lf = bbuf.find(_END_LF)
+            pos_crlf = end_crlf if end_crlf >= 0 else 99999
+            pos_lf = end_lf if end_lf >= 0 else 99999
+            end = min(pos_crlf, pos_lf)
+            end_len = 2 if end == end_crlf else 1
+            return end, end_len
+
+        if self._raw_line_only:
+            while True:
+                bbuf = bytes(self._raw_rx_buffer)
+                end, end_len = find_line_end(bbuf)
+                if end >= 99999:
+                    if len(self._raw_rx_buffer) > 2048:
+                        self._raw_rx_buffer = self._raw_rx_buffer[-1024:]
+                    break
+                msg_bytes = self._raw_rx_buffer[:end]
+                self._raw_rx_buffer = self._raw_rx_buffer[end + end_len :]
+                emit_line(msg_bytes)
+            return
+
+        while True:
+            bbuf = bytes(self._raw_rx_buffer)
+            start = bbuf.find(_MARKER)
+            if start < 0:
+                # <MSG> 없음: \\r\\n 또는 \\n 으로 끝나는 줄이 있으면 폴백으로 출력 (수신 여부 확인)
+                end_crlf = bbuf.find(_END_CRLF)
+                end_lf = bbuf.find(_END_LF)
+                pos_crlf = end_crlf if end_crlf >= 0 else 99999
+                pos_lf = end_lf if end_lf >= 0 else 99999
+                end = min(pos_crlf, pos_lf)
+                end_len = 2 if end == end_crlf else 1
+                if end < 99999:
+                    msg_bytes = self._raw_rx_buffer[:end]
+                    self._raw_rx_buffer = self._raw_rx_buffer[end + end_len :]
+                    emit_line(msg_bytes)
+                    continue
+                # 줄 끝 없음: 마커 잘림 대비 끝 5바이트만 유지
+                if len(self._raw_rx_buffer) > 5:
+                    self._raw_rx_buffer = self._raw_rx_buffer[-5:]
+                break
+            if start > 0:
+                self._raw_rx_buffer = self._raw_rx_buffer[start:]
+                bbuf = bytes(self._raw_rx_buffer)
+            end_crlf = bbuf.find(_END_CRLF)
+            end_lf = bbuf.find(_END_LF)
+            pos_crlf = end_crlf if end_crlf >= 0 else 99999
+            pos_lf = end_lf if end_lf >= 0 else 99999
+            end = min(pos_crlf, pos_lf)
+            end_len = 2 if end == end_crlf else 1
+            if end >= 99999:
+                if len(self._raw_rx_buffer) > 1024:
+                    self._raw_rx_buffer = self._raw_rx_buffer[:500]
+                break
+            msg_bytes = self._raw_rx_buffer[:end]
+            self._raw_rx_buffer = self._raw_rx_buffer[end + end_len :]
+            emit_line(msg_bytes)
+        if len(self._raw_rx_buffer) > 1024:
+            self._raw_rx_buffer.clear()
 
     def get_csv_content(self) -> str:
         if not self._lines:
@@ -109,6 +186,7 @@ class LogHandler(QObject):
 
     def clear(self):
         self._lines.clear()
+        self._raw_rx_buffer.clear()
 
 
 class LogPanel(QWidget):

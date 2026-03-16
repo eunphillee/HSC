@@ -12,6 +12,7 @@ class MainboardWorker(QObject):
     env_result = pyqtSignal(bool, object, object)     # ok, (temp_c, rh_pct), err
     write_result = pyqtSignal(bool, object)       # ok, err
     raw_bytes_received = pyqtSignal(list)          # raw RX bytes (e.g. 0xAA from board)
+    sniff_result = pyqtSignal(list)                # 연결 직후 2초 수신 테스트 결과 (바이트 리스트)
     # HPSB/LPSB: ok, sense[14], coil_bits[14], error_flags u16, err
     sub_data_result = pyqtSignal(bool, object, object, object, object)
 
@@ -85,6 +86,13 @@ class MainboardWorker(QObject):
         if buf:
             self.raw_bytes_received.emit(buf)
 
+    def on_request_sniff(self):
+        """직접 HPSB 연결 직후 2초 대기 수신 테스트. 포트에 데이터가 오는지 확인."""
+        if not self._client.connected:
+            return
+        buf = self._client.sniff_raw(timeout_sec=2.0)
+        self.sniff_result.emit(buf)
+
     def on_request_read_sub(self):
         """Read HPSB/LPSB: sense(14), coil status(14), error_flags. Emit sub_data_result."""
         if not self._client.connected:
@@ -110,29 +118,41 @@ class MainboardWorker(QObject):
         self.write_result.emit(ok, err)
 
     def on_request_write_sub_coil(self, addr: int, value: bool):
-        """FC05 write sub-board coil (addr 898..909). Mainboard forwards to HPSB/LPSB. Emit write_result."""
+        """FC05 write sub-board coil (addr 899..910). Mainboard forwards to HPSB/LPSB. Emit write_result."""
         if not self._client.connected:
             self.write_result.emit(False, "Not connected")
             return
         ok, err = self._client.write_sub_coil(addr, value)
         self.write_result.emit(ok, err)
 
+    def on_request_write_direct_hpsb_coil(self, coil_index: int, value: bool):
+        """HPSB 다이렉트: FC05 slave_id=1, coil_addr=0,1,2 (RELAY1,2,3). 메인보드 경유 없음."""
+        if not self._client.connected:
+            self.write_result.emit(False, "Not connected")
+            return
+        if coil_index < 0 or coil_index > 2:
+            self.write_result.emit(False, "coil_index 0..2 only")
+            return
+        ok, err = self._client.write_coil_direct(1, coil_index, value)
+        self.write_result.emit(ok, err)
+
     def on_request_diagnostic_sequence(self):
         """
         Run LED diagnostic sequence: HPSB RELAY1/2/3 ON then OFF, then LPSB1 SSR1/2/3 ON then OFF.
         Each step sends FC05 via Mainboard; observe LED2/3/4 on HPSB and LPSB to verify communication.
+        Debug-first: simplest for visual verification, not production-polish.
         """
         if not self._client.connected:
             self.write_result.emit(False, "Not connected")
             return
-        # (addr, value): 898..900 = HPSB coil 0,1,2; 901..903 = LPSB1 coil 0,1,2
+        # (addr, value): 898..900 = HPSB coil 0,1,2; 901..909 = LPSB (match Mainboard h2_dec = start_addr+1)
         steps = [
             (898, True), (898, False),   # HPSB RELAY1 -> LED2
             (899, True), (899, False),   # HPSB RELAY2 -> LED3
             (900, True), (900, False),   # HPSB RELAY3 -> LED4
-            (901, True), (901, False),   # LPSB1 SSR1 -> LED2
-            (902, True), (902, False),   # LPSB1 SSR2 -> LED3
-            (903, True), (903, False),   # LPSB1 SSR3 -> LED4
+            (901, True), (901, False),   # LPSB1 SSR1
+            (902, True), (902, False),   # LPSB1 SSR2
+            (903, True), (903, False),   # LPSB1 SSR3
         ]
         delay_on_s = 1.2   # time to see LED on
         delay_off_s = 0.6  # pause before next

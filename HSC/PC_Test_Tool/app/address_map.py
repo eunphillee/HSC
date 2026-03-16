@@ -43,9 +43,11 @@ SUB_ALARM_COUNT = 12
 SUB_VB_COIL_BASE = 891   # FC05 addr 891 = H2 892 = VB_ONOFF_8 (LPSB1_CH3 pulse), ... 895=VB_ONOFF_12
 SUB_VB_COIL_COUNT = 5    # 891..895
 # FC05 write sub-board coil (value 0 or 1). Mainboard forwards to HPSB(slave 1)/LPSB(2,4,8).
-SUB_HPSB_COIL_BASE = 898   # FC05 addr 898,899,900 = HPSB coil 0,1,2 (H2 899,900,901)
+# Mainboard: h2_dec = start_addr+1. 897=Door1, 898=Door2, 899..901=HPSB coil 0..2, 902..910=LPSB.
+# So start_addr 896=Door1, 897=Door2, 898..900=HPSB RELAY1..3, 901..909=LPSB (9 coils).
+SUB_HPSB_COIL_BASE = 898   # FC05 addr 898,899,900 = HPSB coil 0,1,2 (RELAY1,2,3) — matches Mainboard h2_dec 899..901
 SUB_HPSB_COIL_COUNT = 3
-SUB_LPSB_COIL_BASE = 901  # FC05 addr 901..909 = LPSB1(2) coil 0,1,2, LPSB2(4) 0,1,2, LPSB3(8) 0,1,2
-SUB_LPSB_COIL_COUNT = 9
+SUB_LPSB_COIL_BASE = 901   # FC05 addr 901..909 = LPSB1/2/3 coil 0,1,2 each (h2_dec 902..910)
+SUB_LPSB_COIL_COUNT = 9    # 901..903=LPSB1, 904..906=LPSB2, 907..909=LPSB3
 # error_flags (FC03 2112): bit0=AGG_ERR_COMM_HPSB, bit1=AGG_ERR_COMM_LPSB
 ERROR_FLAGS_REG = 2112

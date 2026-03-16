@@ -124,7 +124,12 @@ int main(void)
       SystemConfig_SetDefaults(&cfg);
       SystemConfig_Save(&cfg);
     }
+#if USE_PC_TEST_UART1_SLAVE
+    /* PC 테스트 툴은 9600 고정. EEPROM baud와 무관하게 UART1=9600으로 통신 보장. */
+    huart1.Init.BaudRate = 9600;
+#else
     huart1.Init.BaudRate = (uint32_t)cfg.baudrate;
+#endif
     (void)HAL_UART_Init(&huart1);
 #if SYSTEM_CONFIG_BOOT_LOG
     SystemConfig_LogToUart((void *)&huart1);
@@ -157,6 +162,17 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+#if 0  /* PB12(DE) 스코프 테스트: 1초마다 PB12+LED01 토글. 확인 후 0으로 끄기 */
+    {
+      static uint32_t s_pb12_toggle_tick;
+      uint32_t now = HAL_GetTick();
+      if ((now - s_pb12_toggle_tick) >= 1000u) {
+        s_pb12_toggle_tick = now;
+        HAL_GPIO_TogglePin(RS_485_DE_RE_GPIO_Port, RS_485_DE_RE_Pin);
+        HAL_GPIO_TogglePin(LED01_GPIO_Port, LED01_Pin);
+      }
+    }
+#endif
     /* 1ms 주기 기반 스케줄러/업무 처리 */
     LED_Status_Tick_1ms();
     AppScheduler_Update();

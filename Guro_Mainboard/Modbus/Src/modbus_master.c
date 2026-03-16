@@ -1,6 +1,7 @@
 /**
  * @file modbus_master.c
  * @brief MAIN board: Modbus Master - polling table driver, one transaction per Poll().
+ *        WriteCoil: TX then wait for FC05 response on lower bus (gateway path debug).
  */
 #include "modbus_master.h"
 #include "modbus_rtu.h"
@@ -8,6 +9,7 @@
 #include "main.h"
 #include "led_status.h"
 #include "app_config.h"
+#include "gateway_write_log.h"
 #include <string.h>
 
 extern UART_HandleTypeDef huart2;  /* Modbus Master = Subboard = USART2 */
@@ -27,11 +29,63 @@ static uint8_t      rx_buf[MODBUS_RTU_RX_BUF_SIZE];
 static uint16_t     rx_len;
 static uint8_t      last_slave_responded;
 static uint8_t      comm_ok[SLAVE_ID_COUNT]; /* 0 = HPSB, 1 = LPSB */
+/* While a gateway write (FC05) is in progress, stop poll from consuming UART2 RX bytes. */
+static volatile uint8_t s_write_in_progress;
 
 #define SLAVE_TO_INDEX(s)  ((uint8_t)SLAVE_ID_TO_TABLE_INDEX(s))
 
-static void set_de_tx(void)   { HAL_GPIO_WritePin(MODBUS_DE_GPIO_PORT, MODBUS_DE_GPIO_PIN, GPIO_PIN_SET); }
-static void set_de_rx(void)   { HAL_GPIO_WritePin(MODBUS_DE_GPIO_PORT, MODBUS_DE_GPIO_PIN, GPIO_PIN_RESET); }
+static void set_de_tx(void)
+{
+	HAL_GPIO_WritePin(MODBUS_DE_GPIO_PORT, MODBUS_DE_GPIO_PIN, GPIO_PIN_SET);
+}
+
+static void set_de_rx(void)
+{
+	HAL_GPIO_WritePin(MODBUS_DE_GPIO_PORT, MODBUS_DE_GPIO_PIN, GPIO_PIN_RESET);
+}
+
+#define DE_RX_GUARD_MS  2  /* Delay after TX before DE->RX so last byte leaves driver (PB12) */
+
+/** Flush USART2 RX FIFO (call only before TX to avoid discarding slave response). */
+static void uart2_flush_rx(void)
+{
+	uint8_t discard;
+	while (HAL_UART_Receive(&MODBUS_UART, &discard, 1, 0) == HAL_OK) { (void)discard; }
+}
+
+/**
+ * Single USART2 RS485 transmit path: DE HIGH -> optional settle -> TX -> TC wait -> DE LOW.
+ * Caller must flush RX before calling (so slave response is not mixed with stale data).
+ */
+static void uart2_tx(uint8_t *buf, uint16_t len)
+{
+	set_de_tx();
+#if (MODBUS_DE_TX_SETTLE_MS > 0)
+	HAL_Delay(MODBUS_DE_TX_SETTLE_MS);
+#endif
+	HAL_UART_Transmit(&MODBUS_UART, buf, len, 100);
+	{
+		uint32_t start = HAL_GetTick();
+		while (__HAL_UART_GET_FLAG(&MODBUS_UART, UART_FLAG_TC) == RESET) {
+			if ((HAL_GetTick() - start) > MODBUS_FC05_TX_TC_TIMEOUT_MS)
+				break;
+		}
+	}
+#if (DE_RX_GUARD_MS > 0)
+	HAL_Delay(DE_RX_GUARD_MS);
+#endif
+	set_de_rx();
+}
+
+/**
+ * USART2 single transaction: flush RX -> DE HIGH -> TX -> TC wait -> DE LOW -> (caller does RX wait).
+ * After use, caller must: flush RX again (cleanup), clear s_write_in_progress.
+ */
+static void uart2_transaction_tx(uint8_t *tx_buf, uint16_t tx_len)
+{
+	uart2_flush_rx();
+	uart2_tx(tx_buf, tx_len);
+}
 
 static void send_request(void)
 {
@@ -57,16 +111,27 @@ static void send_request(void)
             return;
     }
     ModbusRTU_AppendCRC(tx_buf, pdu_len);
-    set_de_tx();
-    HAL_UART_Transmit(&MODBUS_UART, tx_buf, (uint16_t)(pdu_len + 2), 100);
-    set_de_rx();
+    uart2_flush_rx();
+    uart2_tx(tx_buf, (uint16_t)(pdu_len + 2));
     LED_Status_OnSubRS485Activity();
 #if MODBUS_MASTER_DEBUG_LOG
     ModbusMaster_LogSubPollStart((uint8_t)e.slave_id);
+    ModbusMaster_LogSubPollTxOk((uint8_t)e.slave_id);
 #endif
     rx_len = 0;
     response_deadline = HAL_GetTick() + MODBUS_RESPONSE_TIMEOUT_MS;
     state = MST_WAIT_RESPONSE;
+}
+
+static uint8_t expected_fc_for_entry(PollEntryType_t t)
+{
+    switch (t) {
+        case POLL_ENTRY_READ_DISCRETE:  return 0x02;
+        case POLL_ENTRY_READ_COIL:      return 0x01;
+        case POLL_ENTRY_READ_HOLDING:   return 0x03;
+        case POLL_ENTRY_READ_INPUT_REG: return 0x04;
+        default: return 0;
+    }
 }
 
 static void parse_response(void)
@@ -82,6 +147,36 @@ static void parse_response(void)
     }
 
     uint8_t slave = (uint8_t)e.slave_id;
+#if MODBUS_MASTER_DEBUG_LOG
+    ModbusMaster_LogSubPollRxLen(slave, rx_len);
+#endif
+    if (rx_buf[0] != slave) {
+#if MODBUS_MASTER_DEBUG_LOG
+        ModbusMaster_LogSubPollFail(slave, "slave mismatch");
+#endif
+        comm_ok[SLAVE_TO_INDEX(e.slave_id)] = 0;
+        state = MST_IDLE;
+        return;
+    }
+    uint8_t exp_fc = expected_fc_for_entry(e.entry_type);
+    uint8_t recv_fc = rx_buf[1];
+    if ((recv_fc & 0x7F) != exp_fc) {
+#if MODBUS_MASTER_DEBUG_LOG
+        ModbusMaster_LogSubPollFail(slave, "FC mismatch");
+#endif
+        comm_ok[SLAVE_TO_INDEX(e.slave_id)] = 0;
+        state = MST_IDLE;
+        return;
+    }
+    if (ModbusRTU_CRC16Check(rx_buf, rx_len) != 0) {
+#if MODBUS_MASTER_DEBUG_LOG
+        ModbusMaster_LogSubPollFail(slave, "CRC fail");
+#endif
+        comm_ok[SLAVE_TO_INDEX(e.slave_id)] = 0;
+        state = MST_IDLE;
+        return;
+    }
+
     int ok = 0;
     switch (e.entry_type) {
         case POLL_ENTRY_READ_DISCRETE: {
@@ -120,8 +215,7 @@ static void parse_response(void)
 #endif
     } else {
 #if MODBUS_MASTER_DEBUG_LOG
-        const char *reason = (rx_len >= 4 && ModbusRTU_CRC16Check(rx_buf, rx_len) != 0) ? "CRC fail" : "parse fail";
-        ModbusMaster_LogSubPollFail(slave, reason);
+        ModbusMaster_LogSubPollFail(slave, "parse fail");
 #endif
     }
     state = MST_IDLE;
@@ -140,6 +234,7 @@ void ModbusMaster_Init(void)
 
 void ModbusMaster_Poll(void)
 {
+    if (s_write_in_progress) return;
     /* Consume RX bytes if any */
     uint8_t byte;
     while (HAL_UART_Receive(&MODBUS_UART, &byte, 1, 0) == HAL_OK) {
@@ -159,6 +254,7 @@ void ModbusMaster_Poll(void)
                 if (ModbusTable_GetPollEntry(poll_index, &te) == 0) {
                     comm_ok[SLAVE_TO_INDEX(te.slave_id)] = 0;
 #if MODBUS_MASTER_DEBUG_LOG
+                    ModbusMaster_LogSubPollRxTimeout((uint8_t)te.slave_id);
                     ModbusMaster_LogSubPollFail((uint8_t)te.slave_id, "timeout");
 #endif
                 }
@@ -210,22 +306,56 @@ void ModbusMaster_Poll(void)
     }
 }
 
-#define DE_RX_GUARD_MS  2  /* Delay after TX before DE->RX so last byte leaves the driver (PB12) */
-
 int ModbusMaster_WriteCoil(SlaveId_t slave, uint16_t coil_addr, uint8_t value)
 {
+    s_write_in_progress = 1;
+    state = MST_IDLE; /* cancel any in-flight poll transaction */
     uint8_t pdu[8];
+    uint8_t rx_buf_fc05[MODBUS_FC05_RESPONSE_LEN];
     size_t len = ModbusRTU_BuildFC05(pdu, (uint8_t)slave, coil_addr, value);
     ModbusRTU_AppendCRC(pdu, len);
-    set_de_tx();
-#if (MODBUS_DE_TX_SETTLE_MS > 0)
-    HAL_Delay(MODBUS_DE_TX_SETTLE_MS);
+
+#if FC05_GW_STEP_LOG
+    Gateway_LogFc05StepBeforeUart2Tx();
 #endif
-    HAL_StatusTypeDef s = HAL_UART_Transmit(&MODBUS_UART, pdu, (uint16_t)(len + 2), 100);
-    if (DE_RX_GUARD_MS > 0) HAL_Delay(DE_RX_GUARD_MS);
-    set_de_rx();
-    if (s == HAL_OK) LED_Status_OnSubRS485Activity();
-    return (s == HAL_OK) ? 0 : -1;
+    Gateway_LogUart2DeHigh();
+    uart2_transaction_tx(pdu, (uint16_t)(len + 2));
+#if FC05_GW_STEP_LOG
+    Gateway_LogFc05StepAfterUart2TxComplete();
+#endif
+    Gateway_LogUart2TxDone();
+    Gateway_LogUart2DeLow();
+    LED_Status_OnSubRS485Activity();
+
+#if FC05_GW_STEP_LOG
+    Gateway_LogFc05StepBeforeUart2RxWait();
+#endif
+    HAL_StatusTypeDef rx = HAL_UART_Receive(&MODBUS_UART, rx_buf_fc05, MODBUS_FC05_RESPONSE_LEN, MODBUS_FC05_RX_TIMEOUT_MS);
+    if (rx != HAL_OK) {
+#if FC05_GW_STEP_LOG
+        Gateway_LogFc05StepUart2RxTimeout();
+#endif
+    } else if (rx_buf_fc05[1] & 0x80) {
+#if FC05_GW_STEP_LOG
+        Gateway_LogFc05StepUart2RxException(rx_buf_fc05[1]);
+        Gateway_LogFc05StepSubboardException(rx_buf_fc05, MODBUS_FC05_RESPONSE_LEN);
+#endif
+    } else {
+#if FC05_GW_STEP_LOG
+        Gateway_LogFc05StepUart2RxOk();
+#endif
+    }
+    int rx_ok = (rx == HAL_OK && ModbusRTU_ValidateFC05Response(rx_buf_fc05, MODBUS_FC05_RESPONSE_LEN, (uint8_t)slave) == 0);
+    Gateway_LogUart2RxResult(rx_ok);
+    Gateway_LogUart2TxResult(rx_ok);
+
+    /* Cleanup: flush USART2 RX so poll does not see partial/leftover bytes; always clear busy. */
+    uart2_flush_rx();
+    s_write_in_progress = 0;
+#if FC05_GW_STEP_LOG
+    Gateway_LogFc05StepCleanupDone();
+#endif
+    return rx_ok ? 0 : -1;
 }
 
 int ModbusMaster_WriteHoldingReg(SlaveId_t slave, uint16_t reg_addr, uint16_t value)
@@ -233,15 +363,10 @@ int ModbusMaster_WriteHoldingReg(SlaveId_t slave, uint16_t reg_addr, uint16_t va
     uint8_t pdu[10];
     size_t len = ModbusRTU_BuildFC06(pdu, (uint8_t)slave, reg_addr, value);
     ModbusRTU_AppendCRC(pdu, len);
-    set_de_tx();
-#if (MODBUS_DE_TX_SETTLE_MS > 0)
-    HAL_Delay(MODBUS_DE_TX_SETTLE_MS);
-#endif
-    HAL_StatusTypeDef s = HAL_UART_Transmit(&MODBUS_UART, pdu, (uint16_t)(len + 2), 100);
-    if (DE_RX_GUARD_MS > 0) HAL_Delay(DE_RX_GUARD_MS);
-    set_de_rx();
-    if (s == HAL_OK) LED_Status_OnSubRS485Activity();
-    return (s == HAL_OK) ? 0 : -1;
+    uart2_flush_rx();
+    uart2_tx(pdu, (uint16_t)(len + 2));
+    LED_Status_OnSubRS485Activity();
+    return 0;
 }
 
 uint8_t ModbusMaster_GetLastSlaveResponded(void) { return last_slave_responded; }

@@ -9,8 +9,11 @@
 #include "led_status.h"
 #include "modbus_rtu.h"
 #include "upstream_slave_h2tech.h"
+#include "gateway_write_log.h"
 #include "system_config.h"
 #include <string.h>
+
+#define UART1_TX_TC_TIMEOUT_MS  50
 
 #define SLAVE_ID_DEFAULT   9
 static inline uint8_t get_slave_id(void) {
@@ -134,6 +137,13 @@ static void process_modbus_frame(const uint8_t *frame, size_t frame_len, const a
 		break;
 	}
 
+	/* FC06 등 실패 시 무응답 방지: 예외 응답(0x86 0x04) 전송 */
+	if (resp_len <= 0 && (fc == 0x02 || fc == 0x03 || fc == 0x05 || fc == 0x06 || fc == 0x0F)) {
+		resp_pdu[0] = (uint8_t)(fc | 0x80);
+		resp_pdu[1] = 0x04;  /* Slave device failure */
+		resp_len = 2;
+	}
+
 	if (resp_len > 0 && (size_t)(1 + resp_len + 2) <= sizeof(tx_frame)) {
 		tx_frame[0] = get_slave_id();
 		memcpy(&tx_frame[1], resp_pdu, (size_t)resp_len);
@@ -142,15 +152,29 @@ static void process_modbus_frame(const uint8_t *frame, size_t frame_len, const a
 #if UPSTREAM_DEBUG_LOG
 		UpstreamSlaveUart1_LogTxResponse(tx_frame, tx_len);
 #endif
-		last_tx_resp_tick = HAL_GetTick();  /* 응답 직후 0xAA 송신 금지 구간 시작 */
-		LED_Status_OnUart1TxRespBefore();  /* LED2 50ms: 응답 송신 직전 (3단계 디버그) */
+#if FC06_DEBUG_LOG
+		if (fc == 0x06) {
+			Gateway_LogFc06SendingResponseToPc(tx_frame, tx_len);
+			Gateway_LogFc06ResponseHex(tx_frame, tx_len);
+		}
+#endif
+		last_tx_resp_tick = HAL_GetTick();
+		LED_Status_OnUart1TxRespBefore();
 		set_de_tx();
 		(void)HAL_UART_Transmit(&huart1, tx_frame, tx_len, 100);
+		/* 마지막 바이트가 나갈 때까지 대기 후 DE → RX (응답 잘림/No Response 방지) */
+		{
+			uint32_t start = HAL_GetTick();
+			while (__HAL_UART_GET_FLAG(&huart1, UART_FLAG_TC) == RESET) {
+				if ((HAL_GetTick() - start) > UART1_TX_TC_TIMEOUT_MS)
+					break;
+			}
+		}
 		set_de_rx();
 		if (TX_GUARD_MS > 0)
 			HAL_Delay(TX_GUARD_MS);
-		tx_resp_count++;   /* HAL_UART_Transmit 호출 직후에만 증가 (실제 송신 발생 시) */
-		LED_Status_OnUart1SlaveTx();   /* LED3 pulse: response sent */
+		tx_resp_count++;
+		LED_Status_OnUart1SlaveTx();
 		LED_Status_OnRS485Activity();
 		(void)HAL_UARTEx_ReceiveToIdle_IT(&huart1, rx_buf, RX_BUF_SIZE);
 	}

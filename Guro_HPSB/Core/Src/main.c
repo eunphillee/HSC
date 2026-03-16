@@ -23,6 +23,8 @@
 /* USER CODE BEGIN Includes */
 #include "led_status.h"
 #include "modbus_slave.h"
+#include "modbus_cfg.h"
+#include "modbus_table.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -46,7 +48,15 @@ ADC_HandleTypeDef hadc;
 UART_HandleTypeDef huart1;
 
 /* USER CODE BEGIN PV */
-
+#if HPSB_TX_TEST_ENABLE
+static uint32_t s_tx_test_last_tick;
+#endif
+#if HPSB_RS485_TX_STRING_TEST
+static uint32_t s_string_test_last_tick;
+#endif
+#if HPSB_MAX3485_TX_AA_TEST
+static uint32_t s_aa_test_tick;
+#endif
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -92,29 +102,122 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  /* 부팅 직후 LED2 한 번 깜빡임(300ms) — 여기 보이면 코드는 돌아가는 것. 다운로드 후 리셋 필요할 수 있음. */
+  HAL_GPIO_WritePin(LED02_GPIO_Port, LED02_Pin, GPIO_PIN_RESET);
+  HAL_Delay(300);
+  HAL_GPIO_WritePin(LED02_GPIO_Port, LED02_Pin, GPIO_PIN_SET);
+
+#if HPSB_PA9_TEST_MODE != 1
   MX_ADC_Init();
   MX_USART1_UART_Init();
+#endif
   /* USER CODE BEGIN 2 */
+#if HPSB_PA9_TEST_MODE == 1
+  /* PA9 GPIO 토글 테스트: PA9를 GPIO 출력으로 설정, 500ms마다 토글. 핀 자체/클럭 검증. */
+  {
+    GPIO_InitTypeDef g = {0};
+    g.Pin = GPIO_PIN_9;
+    g.Mode = GPIO_MODE_OUTPUT_PP;
+    g.Pull = GPIO_NOPULL;
+    g.Speed = GPIO_SPEED_FREQ_LOW;
+    HAL_GPIO_Init(GPIOA, &g);
+  }
+  for (;;) {
+    HAL_GPIO_TogglePin(GPIOA, GPIO_PIN_9);
+    HAL_Delay(500);
+  }
+#elif HPSB_PA9_TEST_MODE == 2
+  /* PA9 UART TX 테스트: Modbus/DE 배제, 500ms마다 0x55 1바이트 송신. PA9에서 9600 8N1 파형 확인. */
+  for (;;) {
+    uint8_t b = 0x55;
+    HAL_UART_Transmit(&huart1, &b, 1, 100);
+    HAL_Delay(500);
+  }
+#endif
+#if HPSB_RS485_PA8_TEST_MODE
+  /* RS485_DE 강제 토글 진단: Modbus 비활성화, 1초마다 LOW↔HIGH.
+   * 오실로로 MCU PA11(RS485_DE) / MAX3485 pin2(/RE) / pin3(DE) 동시 측정. */
+  for (;;) {
+    HAL_GPIO_WritePin(RS485_DE_GPIO_Port, RS485_DE_Pin, GPIO_PIN_RESET);
+    HAL_Delay(1000);
+    HAL_GPIO_WritePin(RS485_DE_GPIO_Port, RS485_DE_Pin, GPIO_PIN_SET);
+    HAL_Delay(1000);
+  }
+#endif
+
+#if HPSB_PA9_TEST_MODE == 0 && !HPSB_MAX3485_TX_AA_TEST
   ModbusSlave_Init();
   LED_Status_Init();
+#if HPSB_TX_TEST_ENABLE
+  s_tx_test_last_tick = HAL_GetTick();
+#endif
+#if HPSB_RS485_TX_STRING_TEST
+  s_string_test_last_tick = HAL_GetTick();
+#endif
+#endif
+#if HPSB_MAX3485_TX_AA_TEST
+  s_aa_test_tick = HAL_GetTick();
+#endif
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
+#if 0
+  /* 발열 확인용 최소 루프: #if 1 시 Modbus 비동작. 테스트 시에는 #if 0 으로 전체 루프 사용. */
+  while (1) {
+    __WFI();
+  }
+#else
   while (1)
   {
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+#if HPSB_MAX3485_TX_AA_TEST
+    /* MAX3485 동작 확인: 1초마다 0xAA 1바이트만 DE HIGH → UART TX → TC → DE LOW. LED2=전송 시 ON→OFF(코드 도는지 확인용). */
+    if ((HAL_GetTick() - s_aa_test_tick) >= 1000u) {
+        HAL_GPIO_WritePin(LED02_GPIO_Port, LED02_Pin, GPIO_PIN_RESET);       /* LED2 ON (로우 액티브) — 여기 들어오면 코드는 동작 중 */
+        HAL_GPIO_WritePin(RS485_DE_GPIO_Port, RS485_DE_Pin, GPIO_PIN_SET);   /* DE HIGH → 송신 모드 */
+        for (volatile uint32_t d = 0; d < 500; d++) { (void)d; }
+        {
+            uint8_t b = 0xAA;
+            HAL_UART_Transmit(&huart1, &b, 1, 100);
+            while (__HAL_UART_GET_FLAG(&huart1, UART_FLAG_TC) == RESET) { }
+        }
+        HAL_GPIO_WritePin(RS485_DE_GPIO_Port, RS485_DE_Pin, GPIO_PIN_RESET);  /* DE LOW → 수신 모드 */
+        HAL_GPIO_WritePin(LED02_GPIO_Port, LED02_Pin, GPIO_PIN_SET);         /* LED2 OFF */
+        s_aa_test_tick = HAL_GetTick();
+    }
+    __WFI();
+#elif HPSB_RS485_TX_STRING_TEST
+    /* RS485 송신 경로 단독 검증: Modbus 배제, 1초마다 "HPSB_OK\r\n" 송신. LED2=송신 직전 ON, 직후 OFF. */
+    if ((HAL_GetTick() - s_string_test_last_tick) >= 1000u) {
+        HAL_GPIO_WritePin(LED02_GPIO_Port, LED02_Pin, GPIO_PIN_RESET);  /* LED2 ON (송신 직전) */
+        ModbusSlave_SendTestString("HPSB_OK\r\n", 8);
+        HAL_GPIO_WritePin(LED02_GPIO_Port, LED02_Pin, GPIO_PIN_SET);    /* LED2 OFF (송신 완료 후) */
+        s_string_test_last_tick = HAL_GetTick();
+    }
+    __WFI();
+#else
     LED_Status_Tick_1ms();
+#if HPSB_TX_TEST_ENABLE
+    if ((HAL_GetTick() - s_tx_test_last_tick) >= 2000u) {
+        ModbusSlave_SendTestFrame();
+        s_tx_test_last_tick = HAL_GetTick();
+    }
+#endif
     ModbusSlave_Poll();
+    ModbusSlave_ProcessDebugLEDs();
+    __WFI();
+#endif
   }
   /* USER CODE END 3 */
+#endif
 }
 
 /**
-  * @brief System Clock Configuration
-  * @retval None
+  * @brief System Clock Configuration — 내부 클럭(HSI 8MHz)만 사용, PLL/HSE 미사용
+  *        SYSCLK = HSI 8MHz, HCLK = PCLK1 = 8MHz. Modbus 9600 동작.
   */
 void SystemClock_Config(void)
 {
@@ -122,35 +225,32 @@ void SystemClock_Config(void)
   RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
   RCC_PeriphCLKInitTypeDef PeriphClkInit = {0};
 
-  /** Initializes the RCC Oscillators according to the specified parameters
-  * in the RCC_OscInitTypeDef structure.
+  /** HSI 8MHz ON, HSI14 ON(ADC용). PLL 사용 안 함.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI|RCC_OSCILLATORTYPE_HSI14;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI | RCC_OSCILLATORTYPE_HSI14;
   RCC_OscInitStruct.HSIState = RCC_HSI_ON;
   RCC_OscInitStruct.HSI14State = RCC_HSI14_ON;
   RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
   RCC_OscInitStruct.HSI14CalibrationValue = 16;
-  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
-  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
-  RCC_OscInitStruct.PLL.PLLMUL = RCC_PLL_MUL12;
-  RCC_OscInitStruct.PLL.PREDIV = RCC_PREDIV_DIV1;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
     Error_Handler();
   }
 
-  /** Initializes the CPU, AHB and APB buses clocks
+  /** SYSCLK = HSI(8MHz), AHB/APB1 = /1 → HCLK = PCLK1 = 8MHz
   */
-  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
-                              |RCC_CLOCKTYPE_PCLK1;
-  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK
+                              | RCC_CLOCKTYPE_PCLK1;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSI;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
   RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
 
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_1) != HAL_OK)
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_0) != HAL_OK)
   {
     Error_Handler();
   }
+
   PeriphClkInit.PeriphClockSelection = RCC_PERIPHCLK_USART1;
   PeriphClkInit.Usart1ClockSelection = RCC_USART1CLKSOURCE_PCLK1;
   if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInit) != HAL_OK)
@@ -245,7 +345,7 @@ static void MX_USART1_UART_Init(void)
 
   /* USER CODE END USART1_Init 1 */
   huart1.Instance = USART1;
-  huart1.Init.BaudRate = 115200;
+  huart1.Init.BaudRate = 9600;
   huart1.Init.WordLength = UART_WORDLENGTH_8B;
   huart1.Init.StopBits = UART_STOPBITS_1;
   huart1.Init.Parity = UART_PARITY_NONE;
@@ -281,13 +381,12 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
-  /*Configure GPIO pin Output Level (LOW active: LED01=ON(LOW), LED02/03/04=OFF(HIGH)) */
-  HAL_GPIO_WritePin(GPIOA, RLY_EN01_Pin|RLY_EN02_Pin|RLY_EN03_Pin|RS485_DE_Pin, GPIO_PIN_RESET);
-  HAL_GPIO_WritePin(GPIOA, LED04_Pin, GPIO_PIN_SET);
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOA, RLY_EN01_Pin|RLY_EN02_Pin|RLY_EN03_Pin|RS485_DE_Pin
+                          |LED04_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, LED01_Pin, GPIO_PIN_RESET);
-  HAL_GPIO_WritePin(GPIOB, LED02_Pin|LED03_Pin, GPIO_PIN_SET);
+  HAL_GPIO_WritePin(GPIOB, LED01_Pin|LED02_Pin|LED03_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pins : RLY_EN01_Pin RLY_EN02_Pin RLY_EN03_Pin LED04_Pin */
   GPIO_InitStruct.Pin = RLY_EN01_Pin|RLY_EN02_Pin|RLY_EN03_Pin|LED04_Pin;
@@ -317,7 +416,8 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
-
+  /* HPSB RS485 idle = 수신: RS485_DE_Pin(PA11) LOW. */
+  HAL_GPIO_WritePin(RS485_DE_GPIO_Port, RS485_DE_Pin, GPIO_PIN_RESET);
   /* USER CODE END MX_GPIO_Init_2 */
 }
 

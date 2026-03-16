@@ -1,8 +1,8 @@
 /**
  * @file h2tech_address_map.c
  * @brief H2TECH table-driven mapping: g_agg_bits image and g_map entries.
- *        Concrete mapping: 0821~0836, 0853~0860, 0869~0880, 0885~0891, 0892~0898.
- *        0899/0900 not in table -> exception 0x02.
+ *        WRITE(FC05) coil: 1x0892~0898 (VB/Door), 1x0899~0910 (HPSB/LPSB sub-coil).
+ *        Modbus start_addr 891~909 → h2_dec = start_addr+1. 898→899=HPSB coil0, 899→900=HPSB coil1, ...
  */
 #include <stddef.h>
 #include "h2tech_address_map.h"
@@ -163,8 +163,7 @@ bool H2Map_ApplyWrite(const H2_MapEntry_t* e, bool value, uint16_t pulse_ms) {
         uint8_t slave_id;
         uint16_t coil_index;
         h2_dec_to_sub_coil(e->h2_dec, &slave_id, &coil_index);
-        Gateway_Action_WriteSubCoil(slave_id, coil_index, value ? 1 : 0);
-        return true;
+        return (Gateway_Action_WriteSubCoil(slave_id, coil_index, value ? 1 : 0) == 0);
     }
     default:
         return false;

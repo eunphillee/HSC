@@ -1,12 +1,42 @@
 """
 Modbus RTU client for Mainboard only. All I/O synchronous; run from worker thread.
 Compatible with pymodbus 2.5.3 (ModbusSerialClient, unit= for slave).
+Direct HPSB 시 raw_only 연결 시 pyserial만 사용해 수신이 pymodbus에 가로채이지 않도록 함.
 """
 import threading
+import time
 from typing import Callable
 
+import serial
 from pymodbus.client.sync import ModbusSerialClient
 from pymodbus.exceptions import ModbusException
+
+
+def _modbus_crc16(data: bytes) -> int:
+    """Modbus RTU CRC-16 (LSB first in frame)."""
+    crc = 0xFFFF
+    for b in data:
+        crc ^= b
+        for _ in range(8):
+            if crc & 1:
+                crc = (crc >> 1) ^ 0xA001
+            else:
+                crc >>= 1
+    return crc
+
+
+def build_fc05_rtu_frame(slave_id: int, coil_addr: int, value: bool) -> bytes:
+    """Build FC05 Write Single Coil RTU frame (8 bytes). value=True -> 0xFF00, False -> 0x0000 per Modbus."""
+    # PDU: FC=05, Addr_H Addr_L, Val_H Val_L (0xFF00 ON, 0x0000 OFF)
+    addr_hi = (coil_addr >> 8) & 0xFF
+    addr_lo = coil_addr & 0xFF
+    if value:
+        val_hi, val_lo = 0xFF, 0x00
+    else:
+        val_hi, val_lo = 0x00, 0x00
+    payload = bytes([slave_id, 0x05, addr_hi, addr_lo, val_hi, val_lo])
+    crc = _modbus_crc16(payload)
+    return payload + bytes([crc & 0xFF, (crc >> 8) & 0xFF])
 
 from .address_map import (
     MAINBOARD_SLAVE_ID_DEFAULT,
@@ -73,11 +103,17 @@ class ModbusClient:
 
     def __init__(self):
         self._client: ModbusSerialClient | None = None
+        self._raw_serial: serial.Serial | None = None  # Direct HPSB 시 수신 전용 (pymodbus 미사용)
         self._port: str = ""
         self._baudrate: int = 9600
         self._slave_id: int = MAINBOARD_SLAVE_ID_DEFAULT
         self._request_logger: Callable[[int, str, int | str, int | str], None] | None = None
         self._response_logger: Callable[[bool, int | None], None] | None = None
+        self._tx_frame_hex_logger: Callable[[str], None] | None = None
+
+    def set_tx_frame_hex_logger(self, callback: Callable[[str], None] | None):
+        """Set callback(msg) to log raw TX frame hex (e.g. Direct HPSB FC05)."""
+        self._tx_frame_hex_logger = callback
 
     def set_request_logger(self, callback: Callable[[int, str, int | str, int | str], None] | None):
         """Set callback(unit, func, addr, count_or_value) for each request (TX)."""
@@ -87,12 +123,40 @@ class ModbusClient:
         """Set callback(ok, exception_code) for each response (RX). exception_code is None on success or non-Modbus error."""
         self._response_logger = callback
 
-    def connect(self, port: str, baudrate: int = 9600, slave_id: int = MAINBOARD_SLAVE_ID_DEFAULT) -> tuple[bool, str]:
-        """Connect to serial port. Returns (success, message)."""
+    def connect(
+        self,
+        port: str,
+        baudrate: int = 9600,
+        slave_id: int = MAINBOARD_SLAVE_ID_DEFAULT,
+        raw_only: bool = False,
+    ) -> tuple[bool, str]:
+        """Connect to serial port. raw_only=True면 Modbus 미사용, pyserial만 열어 HPSB raw 수신 전용(가로채임 방지)."""
         with self._lock:
-            if self._client and self._client.is_socket_open():
+            if (self._client and self._client.is_socket_open()) or (
+                self._raw_serial and self._raw_serial.is_open
+            ):
                 return False, "Already connected"
             try:
+                if raw_only:
+                    if self._client:
+                        try:
+                            self._client.close()
+                        except Exception:
+                            pass
+                        self._client = None
+                    self._raw_serial = serial.Serial(
+                        port=port,
+                        baudrate=baudrate,
+                        bytesize=serial.EIGHTBITS,
+                        parity=serial.PARITY_NONE,
+                        stopbits=serial.STOPBITS_ONE,
+                        timeout=0.1,
+                    )
+                    self._port = port
+                    self._baudrate = baudrate
+                    self._slave_id = slave_id
+                    return True, "Connected (raw only)"
+                self._raw_serial = None
                 self._client = ModbusSerialClient(
                     method="rtu",
                     port=port,
@@ -100,6 +164,8 @@ class ModbusClient:
                     bytesize=8,
                     parity="N",
                     stopbits=1,
+                    timeout=0.6,
+                    retries=0,
                 )
                 if not self._client.connect():
                     return False, "Failed to open port"
@@ -108,6 +174,12 @@ class ModbusClient:
                 self._slave_id = slave_id
                 return True, "Connected"
             except Exception as e:
+                if raw_only and self._raw_serial:
+                    try:
+                        self._raw_serial.close()
+                    except Exception:
+                        pass
+                    self._raw_serial = None
                 return False, format_modbus_error(exc=e)
 
     def disconnect(self) -> None:
@@ -118,6 +190,12 @@ class ModbusClient:
                 except Exception:
                     pass
                 self._client = None
+            if self._raw_serial:
+                try:
+                    self._raw_serial.close()
+                except Exception:
+                    pass
+                self._raw_serial = None
             self._port = ""
 
     def _ensure_socket_open(self) -> tuple[bool, str | None]:
@@ -138,6 +216,8 @@ class ModbusClient:
                 bytesize=8,
                 parity="N",
                 stopbits=1,
+                timeout=0.6,
+                retries=0,
             )
             if not self._client.connect():
                 self._client = old
@@ -156,30 +236,75 @@ class ModbusClient:
     def connected(self) -> bool:
         """True while user has connected and not disconnected. Does not drop on request failure."""
         with self._lock:
+            if self._raw_serial and self._raw_serial.is_open:
+                return True
             return self._client is not None
 
+    def _get_serial_for_raw_read(self):
+        """Raw 수신용 시리얼: raw_only 연결이면 _raw_serial, 아니면 pymodbus 내부 객체. 호출 시 _lock 확보 필수."""
+        if self._raw_serial and self._raw_serial.is_open:
+            return self._raw_serial
+        if not self._client or not self._client.is_socket_open():
+            return None
+        for name in ("socket", "connection", "client", "_connection", "serial", "serial_", "_serial"):
+            c = getattr(self._client, name, None)
+            if c is not None and callable(getattr(c, "read", None)):
+                if hasattr(c, "in_waiting"):
+                    return c
+                if hasattr(c, "inWaiting"):  # PySerial 구버전
+                    return c
+        # 재귀: 한 단계 감싼 객체 안에서 찾기
+        for name in ("socket", "connection", "client", "_connection", "serial"):
+            c = getattr(self._client, name, None)
+            if c is None:
+                continue
+            for sub in ("serial", "connection", "_serial", "client"):
+                s = getattr(c, sub, None)
+                if s is not None and callable(getattr(s, "read", None)) and (hasattr(s, "in_waiting") or hasattr(s, "inWaiting")):
+                    return s
+        return None
+
     def read_raw_available(self) -> list[int]:
-        """Read any bytes currently in the serial RX buffer (e.g. board TX 0xAA). Returns list of byte values."""
+        """Read any bytes currently in the serial RX buffer (e.g. board TX 0xAA, HPSB_TEST string)."""
         with self._lock:
-            if not self._client or not self._client.is_socket_open():
-                return []
-            # pymodbus may store serial as socket, connection, client, or _connection
-            sock = None
-            for name in ("socket", "connection", "client", "_connection"):
-                c = getattr(self._client, name, None)
-                if c is not None and callable(getattr(c, "read", None)) and hasattr(c, "in_waiting"):
-                    sock = c
-                    break
+            sock = self._get_serial_for_raw_read()
             if sock is None:
                 return []
             out: list[int] = []
             try:
-                n = getattr(sock, "in_waiting", 0) or 0
+                n = getattr(sock, "in_waiting", None) or getattr(sock, "inWaiting", 0) or 0
                 if n > 0:
-                    data = sock.read(min(n, 256))
+                    data = sock.read(min(n, 512))
                     out = list(data)
             except Exception:
                 pass
+            return out
+
+    def can_read_raw(self) -> bool:
+        """Direct HPSB 등 보드→PC raw 수신이 가능한지 (내부 시리얼 객체 발견 여부)."""
+        with self._lock:
+            return self._get_serial_for_raw_read() is not None
+
+    def sniff_raw(self, timeout_sec: float = 2.0) -> list[int]:
+        """직접 HPSB(raw_only) 연결 시, 지정 시간만큼 대기하며 수신된 바이트 수집. 포트에 데이터가 오는지 확인용."""
+        with self._lock:
+            if not self._raw_serial or not self._raw_serial.is_open:
+                return []
+            prev_timeout = self._raw_serial.timeout
+            out: list[int] = []
+            try:
+                self._raw_serial.timeout = 0.25  # 250ms마다 읽기
+                deadline = time.monotonic() + timeout_sec
+                while time.monotonic() < deadline:
+                    data = self._raw_serial.read(512)
+                    if data:
+                        out.extend(data)
+                        if len(out) >= 2048:
+                            break
+            except Exception:
+                pass
+            finally:
+                self._raw_serial.timeout = prev_timeout
             return out
 
     def read_di_bitmap(self) -> tuple[bool, list[int] | None, str | None]:
@@ -432,6 +557,48 @@ class ModbusClient:
                 if self._request_logger:
                     self._request_logger(self._slave_id, "FC05", addr, 1)
                 wr = self._client.write_coil(address=addr, value=True, unit=self._slave_id)
+                if self._response_logger:
+                    self._response_logger(not wr.isError(), _response_exception_code(wr))
+                if wr.isError():
+                    return False, format_modbus_error(resp=wr)
+                return True, None
+            except Exception as e:
+                if self._response_logger:
+                    self._response_logger(False, None)
+                return False, format_modbus_error(exc=e)
+
+    def write_coil_direct(self, slave_id: int, coil_addr: int, value: bool) -> tuple[bool, str | None]:
+        """FC05 직접 전송 (메인보드 경유 없음). raw_only 연결이면 시리얼로 프레임만 전송."""
+        with self._lock:
+            if self._raw_serial and self._raw_serial.is_open:
+                try:
+                    val_int = 1 if value else 0
+                    if self._request_logger:
+                        self._request_logger(slave_id, "FC05", coil_addr, val_int)
+                    frame = build_fc05_rtu_frame(slave_id, coil_addr, value)
+                    hex_str = " ".join(f"{b:02X}" for b in frame)
+                    if self._tx_frame_hex_logger:
+                        self._tx_frame_hex_logger(f"[DIRECT] TX frame (hex): {hex_str}")
+                    self._raw_serial.write(frame)
+                    if self._response_logger:
+                        self._response_logger(True, None)
+                    return True, None
+                except Exception as e:
+                    if self._response_logger:
+                        self._response_logger(False, None)
+                    return False, format_modbus_error(exc=e)
+            ok, err = self._ensure_socket_open()
+            if not ok:
+                return False, err or "Not connected"
+            try:
+                val_int = 1 if value else 0
+                if self._request_logger:
+                    self._request_logger(slave_id, "FC05", coil_addr, val_int)
+                frame = build_fc05_rtu_frame(slave_id, coil_addr, value)
+                hex_str = " ".join(f"{b:02X}" for b in frame)
+                if self._tx_frame_hex_logger:
+                    self._tx_frame_hex_logger(f"[DIRECT] TX frame (hex): {hex_str}")
+                wr = self._client.write_coil(address=coil_addr, value=value, unit=slave_id)
                 if self._response_logger:
                     self._response_logger(not wr.isError(), _response_exception_code(wr))
                 if wr.isError():

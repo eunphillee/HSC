@@ -1,6 +1,7 @@
 /**
  * @file modbus_slave.c
  * @brief HPSB: Modbus Slave - receive, dispatch FC01-04/05/06/15/16, respond. LSB-first bit order.
+ *        MAX3485 idle = receive = DE LOW, /RE LOW → RS485_DE_Pin(GPIOA, 현재 PA11) LOW when HPSB_RS485_DE_INVERTED=0.
  */
 #include "modbus_slave.h"
 #include "modbus_rtu.h"
@@ -10,40 +11,338 @@
 #include "led_status.h"
 #include "main.h"
 #include <string.h>
+#include <stdio.h>
+#include <stdarg.h>
 
 extern UART_HandleTypeDef huart1;
+
+/* RS485/HPSB 공통 로그 함수: 구현이 없으면 no-op. RS485 direction/PA11 디버그에서 사용. */
+__attribute__((weak)) void HPSB_RS485_Log(const char *msg) { (void)msg; }
+
+/** 수신 raw 프레임/디버그 출력용. weak: SWO·별도 UART 등으로 오버라이드 가능. 기본 no-op(버스 영향 없음). */
+__attribute__((weak)) void HPSB_Debug_Log(const char *msg) { (void)msg; }
 
 static uint8_t rx_buf[MODBUS_RTU_RX_BUF_SIZE];
 static uint16_t rx_len;
 static uint32_t last_rx_tick;
-#define FRAME_SILENCE_MS  5
 
-static void set_de_tx(void) { HAL_GPIO_WritePin(MODBUS_DE_GPIO_PORT, MODBUS_DE_GPIO_PIN, GPIO_PIN_SET); }
-static void set_de_rx(void) { HAL_GPIO_WritePin(MODBUS_DE_GPIO_PORT, MODBUS_DE_GPIO_PIN, GPIO_PIN_RESET); }
+/* Direct Modbus 무응답 디버그: 디버거에서 watch. rx / parse / reply 단계 구분. */
+volatile uint16_t HPSB_dbg_rx_len;
+volatile uint8_t  HPSB_dbg_crc_ok;
+volatile uint8_t  HPSB_dbg_slave_match;
+volatile uint8_t  HPSB_dbg_reply_started;
+volatile uint8_t  HPSB_dbg_reply_done;
+/* Modbus RTU t3.5 at 9600 bps ≈ 3.65 ms; use 4 ms for frame end detection (mainboard RX timeout와 충돌하지 않도록) */
+#define FRAME_SILENCE_MS  4
+
+/* UART error flag clear helper: ensure RX state is clean between frames. */
+static void uart_clear_errors(void)
+{
+    /* Clear overrun, framing, and noise errors if set. */
+    __HAL_UART_CLEAR_FLAG(&MODBUS_UART, UART_FLAG_ORE);
+    __HAL_UART_CLEAR_FLAG(&MODBUS_UART, UART_FLAG_FE);
+    __HAL_UART_CLEAR_FLAG(&MODBUS_UART, UART_FLAG_NE);
+}
+
+/* RS485_DE 핀(DE/RE): MAX3485 receive = DE=LOW,/RE=LOW. INVERTED=0 → RS485_DE LOW=수신, HIGH=송신. INVERTED=1 → 보드 인버터 시 HIGH=수신. */
+#if HPSB_RS485_DE_INVERTED
+static void set_de_tx(void) {
+#if HPSB_PA8_TRACE
+    HPSB_RS485_Log("[RS485] TX mode enable\r\n");
+#endif
+    HAL_GPIO_WritePin(MODBUS_DE_GPIO_PORT, MODBUS_DE_GPIO_PIN, GPIO_PIN_RESET);
+}
+static void set_de_rx(void) {
+#if HPSB_PA8_TRACE
+    HPSB_RS485_Log("[RS485] RX mode enable\r\n");
+#endif
+    HAL_GPIO_WritePin(MODBUS_DE_GPIO_PORT, MODBUS_DE_GPIO_PIN, GPIO_PIN_SET);
+}
+#else
+static void set_de_tx(void) {
+#if HPSB_PA8_TRACE
+    HPSB_RS485_Log("[RS485] TX mode enable\r\n");
+#endif
+    HAL_GPIO_WritePin(MODBUS_DE_GPIO_PORT, MODBUS_DE_GPIO_PIN, GPIO_PIN_SET);
+}
+static void set_de_rx(void) {
+#if HPSB_PA8_TRACE
+    HPSB_RS485_Log("[RS485] RX mode enable\r\n");
+#endif
+    HAL_GPIO_WritePin(MODBUS_DE_GPIO_PORT, MODBUS_DE_GPIO_PIN, GPIO_PIN_RESET);
+}
+#endif
+
+/* Non-blocking debug LED: set LED on and off_tick; main loop calls ModbusSlave_ProcessDebugLEDs() to turn off. No HAL_Delay in RX path. */
+static uint32_t dbg_led1_off_tick;
+static uint32_t dbg_led2_off_tick;
+static uint32_t dbg_led3_off_tick;
+static uint32_t dbg_led123_off_tick;
+
+static void dbg_led1_pulse_ms(uint32_t ms)
+{
+    HAL_GPIO_WritePin(LED01_GPIO_Port, LED01_Pin, GPIO_PIN_RESET);
+    dbg_led1_off_tick = HAL_GetTick() + ms;
+}
+
+static void dbg_led3_pulse_ms(uint32_t ms)
+{
+    HAL_GPIO_WritePin(LED03_GPIO_Port, LED03_Pin, GPIO_PIN_RESET);
+    dbg_led3_off_tick = HAL_GetTick() + ms;
+}
+
+static void dbg_led123_on_ms(uint32_t ms)
+{
+    HAL_GPIO_WritePin(LED01_GPIO_Port, LED01_Pin, GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(LED02_GPIO_Port, LED02_Pin, GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(LED03_GPIO_Port, LED03_Pin, GPIO_PIN_RESET);
+    dbg_led123_off_tick = HAL_GetTick() + ms;
+}
+
+/* Non-blocking triple blink: 3x (150ms ON, 150ms OFF). No HAL_Delay. phase>=6 = idle so off_tick works. */
+#define DBG_BLINK3_HALF_MS  150u
+static uint8_t dbg_led1_blink3_phase = 6;
+static uint32_t dbg_led1_blink3_next;
+static uint8_t dbg_led2_blink3_phase = 6;
+static uint32_t dbg_led2_blink3_next;
+
+static void dbg_led1_blink3_start(void)
+{
+    dbg_led1_off_tick = 0u;
+    dbg_led1_blink3_phase = 0;
+    dbg_led1_blink3_next = HAL_GetTick() + DBG_BLINK3_HALF_MS;
+}
+
+static void dbg_led2_blink3_start(void)
+{
+    dbg_led2_off_tick = 0u;
+    dbg_led2_blink3_phase = 0;
+    dbg_led2_blink3_next = HAL_GetTick() + DBG_BLINK3_HALF_MS;
+}
+
+void ModbusSlave_ProcessDebugLEDs(void)
+{
+    uint32_t t = HAL_GetTick();
+    /* Triple blink: LED1 (CRC fail) / LED2 (FC05 parse fail) */
+    if (dbg_led1_blink3_phase < 6u && t >= dbg_led1_blink3_next) {
+        if ((dbg_led1_blink3_phase & 1u) == 0u)
+            HAL_GPIO_WritePin(LED01_GPIO_Port, LED01_Pin, GPIO_PIN_RESET);
+        else
+            HAL_GPIO_WritePin(LED01_GPIO_Port, LED01_Pin, GPIO_PIN_SET);
+        dbg_led1_blink3_phase++;
+        dbg_led1_blink3_next = t + DBG_BLINK3_HALF_MS;
+    }
+    if (dbg_led2_blink3_phase < 6u && t >= dbg_led2_blink3_next) {
+        if ((dbg_led2_blink3_phase & 1u) == 0u)
+            HAL_GPIO_WritePin(LED02_GPIO_Port, LED02_Pin, GPIO_PIN_RESET);
+        else
+            HAL_GPIO_WritePin(LED02_GPIO_Port, LED02_Pin, GPIO_PIN_SET);
+        dbg_led2_blink3_phase++;
+        dbg_led2_blink3_next = t + DBG_BLINK3_HALF_MS;
+    }
+    if (dbg_led1_off_tick != 0u && t >= dbg_led1_off_tick && dbg_led1_blink3_phase >= 6u) {
+        HAL_GPIO_WritePin(LED01_GPIO_Port, LED01_Pin, GPIO_PIN_SET);
+        dbg_led1_off_tick = 0u;
+    }
+    if (dbg_led2_off_tick != 0u && t >= dbg_led2_off_tick && dbg_led2_blink3_phase >= 6u) {
+        HAL_GPIO_WritePin(LED02_GPIO_Port, LED02_Pin, GPIO_PIN_SET);
+        dbg_led2_off_tick = 0u;
+    }
+    if (dbg_led3_off_tick != 0u && t >= dbg_led3_off_tick) {
+        HAL_GPIO_WritePin(LED03_GPIO_Port, LED03_Pin, GPIO_PIN_SET);
+        dbg_led3_off_tick = 0u;
+    }
+    if (dbg_led123_off_tick != 0u && t >= dbg_led123_off_tick) {
+        HAL_GPIO_WritePin(LED01_GPIO_Port, LED01_Pin, GPIO_PIN_SET);
+        HAL_GPIO_WritePin(LED02_GPIO_Port, LED02_Pin, GPIO_PIN_SET);
+        HAL_GPIO_WritePin(LED03_GPIO_Port, LED03_Pin, GPIO_PIN_SET);
+        dbg_led123_off_tick = 0u;
+    }
+}
+
+#if HPSB_RS485_DEBUG_LOG
+static void log_rs485(const char *fmt, ...) {
+    char buf[80];
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    if (n > 0) HPSB_RS485_Log(buf);
+}
+#else
+#define log_rs485(...) ((void)0)
+#endif
+
+#if HPSB_PA8_TRACE
+void ModbusSlave_PA8_Log(const char *msg) { if (msg) HPSB_RS485_Log(msg); }
+#else
+void ModbusSlave_PA8_Log(const char *msg) { (void)msg; }
+#endif
+
+/** Raw 수신 프레임을 hex 문자열로 출력. HPSB_Debug_Log()로 전달 (weak 구현 시 no-op). */
+static void print_hex(const char *prefix, const uint8_t *buf, uint16_t len)
+{
+    char line[80];
+    uint16_t i, n;
+    int off;
+    if (buf == NULL) return;
+    off = snprintf(line, sizeof(line), "%s len=%u ", prefix ? prefix : "", (unsigned)len);
+    if (off < 0 || (size_t)off >= sizeof(line)) return;
+    n = (uint16_t)((sizeof(line) - (size_t)off - 1) / 3);
+    if (n > len) n = len;
+    for (i = 0; i < n; i++)
+        off += snprintf(line + off, (size_t)(sizeof(line) - (size_t)off), "%02X ", buf[i]);
+    if (off > 0) {
+        line[off] = '\0';
+        HPSB_Debug_Log(line);
+        HPSB_Debug_Log("\r\n");
+    }
+    if (n < len) {
+        off = 0;
+        for (i = n; i < len && (size_t)off < sizeof(line) - 4; i++)
+            off += snprintf(line + off, (size_t)(sizeof(line) - (size_t)off), "%02X ", buf[i]);
+        if (off > 0) {
+            line[off] = '\0';
+            HPSB_Debug_Log(line);
+            HPSB_Debug_Log("\r\n");
+        }
+    }
+}
 
 void ModbusSlave_Init(void)
 {
+#if HPSB_PA8_TRACE
+    HPSB_RS485_Log("[RS485] ModbusSlave_Init start\r\n");
+#endif
     rx_len = 0;
     last_rx_tick = 0;
-    set_de_rx();
+    set_de_rx();  /* idle = receive: DE/RE LOW (or HIGH if INVERTED) */
+    uart_clear_errors();
+#if HPSB_RS485_DEBUG_LOG
+    log_rs485("[HPSB_RS485] set RX mode (init)\r\n");
+#endif
+#if HPSB_PA8_TRACE
+    HPSB_RS485_Log("[RS485] ModbusSlave_Init end (RX mode)\r\n");
+#endif
 }
 
 static void send_response(uint8_t *pdu, size_t pdu_len)
 {
+    HPSB_dbg_reply_started = 1;
+    HPSB_dbg_reply_done = 0;
+    /* 응답 송신 직전: LED1 ON (직후 OFF로 응답 완료 표시) */
+    HAL_GPIO_WritePin(LED01_GPIO_Port, LED01_Pin, GPIO_PIN_RESET);
+#if HPSB_PA8_TRACE
+    HPSB_RS485_Log("[RS485] send_response start\r\n");
+#endif
+    /* Before TX: LED1+2+3 ON (non-blocking, main loop turns off after 500ms) */
+    dbg_led123_on_ms(500);
+    /* 응답을 먼저 보내고 LED는 후에 표시 (지연 시 마스터 타임아웃으로 0 received 발생 방지) */
     ModbusRTU_AppendCRC(pdu, pdu_len);
+#if HPSB_RS485_DEBUG_LOG
+    log_rs485("[HPSB_RS485] set TX mode\r\n");
+#endif
     set_de_tx();
+    for (volatile uint32_t d = 0; d < 500; d++) { (void)d; }  /* DE 정착 */
+#if HPSB_RS485_DEBUG_LOG
+    log_rs485("[HPSB_RS485] TX start len=%u\r\n", (unsigned)(pdu_len + 2));
+#endif
     HAL_UART_Transmit(&MODBUS_UART, pdu, (uint16_t)(pdu_len + 2), 100);
+    while (__HAL_UART_GET_FLAG(&MODBUS_UART, UART_FLAG_TC) == RESET) { }
+#if HPSB_RS485_DEBUG_LOG
+    log_rs485("[HPSB_RS485] TX complete\r\n");
+#endif
     set_de_rx();
-    LED_Status_OnRS485Activity();
+    /* 송신 완료 후: LED1 OFF, reply_done 플래그 설정 */
+    HAL_GPIO_WritePin(LED01_GPIO_Port, LED01_Pin, GPIO_PIN_SET);
+    HPSB_dbg_reply_started = 0;
+    HPSB_dbg_reply_done = 1;
+#if HPSB_PA8_TRACE
+    HPSB_RS485_Log("[RS485] after send_response back to RX\r\n");
+#endif
+#if HPSB_RS485_DEBUG_LOG
+    log_rs485("[HPSB_RS485] back to RX mode\r\n");
+#endif
+    /* 응답 전송 완료 후 LED는 비블로킹으로 표시 (main loop에서 ProcessDebugLEDs 처리) */
+    dbg_led123_on_ms(500);
 }
 
 static void process_frame(void)
 {
-    if (rx_len < 4) return;
-    if (rx_buf[0] != MODBUS_SLAVE_ADDR) return;
-    if (ModbusRTU_CRC16Check(rx_buf, rx_len) != 0) return;
+    set_de_rx();  /* 실패/early return 모든 경로에서 RX 복귀 보장 */
+    /* 디버그 상태 초기화 (LED2=바이트수신, LED3=CRC통과, LED4=slave일치, LED1=응답송신) */
+    HPSB_dbg_rx_len = rx_len;
+    HPSB_dbg_crc_ok = 0;
+    HPSB_dbg_slave_match = 0;
+    HPSB_dbg_reply_started = 0;
+    HPSB_dbg_reply_done = 0;
+#if HPSB_PA8_TRACE
+    HPSB_RS485_Log("[RS485] process_frame start ensure RX\r\n");
+#endif
+    /* 수신 raw 프레임 hex 출력 (기대: 01 05 00 00 FF 00 CRC_L CRC_H). HPSB_Debug_Log 구현 시 출력. */
+    print_hex("RX frame:", rx_buf, rx_len);
+    {
+        char dbg[48];
+        (void)snprintf(dbg, sizeof(dbg), "[HPSB] rx_len=%u\r\n", (unsigned)rx_len);
+        HPSB_Debug_Log(dbg);
+    }
 
-    LED_Status_OnRS485Activity();  /* valid RX */
+    /* 1) 첫 바이트 수신: LED1 비블로킹 표시 (수신 경로에서 HAL_Delay 금지) */
+    dbg_led1_pulse_ms(300);
+#if HPSB_RS485_DEBUG_LOG
+    log_rs485("[HPSB_RS485] frame complete len=%u\r\n", (unsigned)rx_len);
+#endif
+    if (rx_len < 4) {
+        HPSB_Debug_Log("[HPSB] rx_len<4 invalid\r\n");
+#if HPSB_RS485_DEBUG_LOG
+        log_rs485("[HPSB_RS485] no response invalid frame len\r\n");
+#endif
+        set_de_rx();
+        return;
+    }
+    /* slave_id, FC 로그 (A/B/C/D 구분용) */
+    {
+        char dbg[64];
+        (void)snprintf(dbg, sizeof(dbg), "[HPSB] slave_id=%u fc=0x%02X\r\n", (unsigned)rx_buf[0], (unsigned)rx_buf[1]);
+        HPSB_Debug_Log(dbg);
+    }
+    if (rx_buf[0] != MODBUS_SLAVE_ADDR) {
+        HPSB_Debug_Log("[HPSB] A. slave id mismatch\r\n");
+#if HPSB_RS485_DEBUG_LOG
+        log_rs485("[HPSB_RS485] no response slave id mismatch (got %u)\r\n", (unsigned)rx_buf[0]);
+#endif
+        set_de_rx();
+        return;
+    }
+    HPSB_dbg_slave_match = 1;
+    HAL_GPIO_TogglePin(LED04_GPIO_Port, LED04_Pin);  /* slave id 일치 시 LED4 토글 */
+#if HPSB_RS485_DEBUG_LOG
+    log_rs485("[HPSB_RS485] slave id matched\r\n");
+#endif
+    /* CRC: 수신 2바이트 vs 계산값 출력 (실패 시 원인 확인용). */
+    {
+        uint16_t rx_crc = (uint16_t)(rx_buf[rx_len - 2] | (rx_buf[rx_len - 1] << 8));
+        uint16_t calc_crc = ModbusRTU_CRC16(rx_buf, rx_len - 2);
+        char dbg[72];
+        (void)snprintf(dbg, sizeof(dbg), "[HPSB] rx_crc=0x%04X calc_crc=0x%04X %s\r\n",
+            (unsigned)rx_crc, (unsigned)calc_crc,
+            (rx_crc == calc_crc) ? "OK" : "FAIL");
+        HPSB_Debug_Log(dbg);
+    }
+    if (ModbusRTU_CRC16Check(rx_buf, rx_len) != 0) {
+        HPSB_dbg_crc_ok = 0;
+        HPSB_Debug_Log("[HPSB] B. CRC fail (see rx_crc vs calc_crc above)\r\n");
+#if HPSB_RS485_DEBUG_LOG
+        log_rs485("[HPSB_RS485] no response CRC fail\r\n");
+#endif
+        /* CRC fail: LED1 triple blink (non-blocking) */
+        dbg_led1_blink3_start();
+        set_de_rx();
+        return;
+    }
+    HPSB_dbg_crc_ok = 1;
+    HAL_GPIO_TogglePin(LED03_GPIO_Port, LED03_Pin);  /* CRC 통과 시 LED3 토글 */
+    HPSB_Debug_Log("[HPSB] CRC pass\r\n");
 
     uint8_t fc = rx_buf[1];
     uint8_t tx_pdu[MODBUS_MAX_PDU_LEN];
@@ -98,9 +397,44 @@ static void process_frame(void)
         }
         case 0x05: {
             uint16_t coil_addr; uint8_t value;
-            if (ModbusRTU_ParseFC05Request(rx_buf, rx_len, &coil_addr, &value) != 0) break;
-            if (coil_addr >= COIL_COUNT) break;
+            if (ModbusRTU_ParseFC05Request(rx_buf, rx_len, &coil_addr, &value) != 0) {
+                HPSB_Debug_Log("[HPSB] C. FC05 parse fail\r\n");
+#if HPSB_RS485_DEBUG_LOG
+                log_rs485("[HPSB_RS485] fc05 parse fail\r\n");
+#endif
+                /* FC05 parse fail: LED2 triple blink (non-blocking) */
+                dbg_led2_blink3_start();
+                set_de_rx();
+                break;
+            }
+            {
+                char dbg[56];
+                (void)snprintf(dbg, sizeof(dbg), "[HPSB] FC05 coil_addr=%u value=%u\r\n", (unsigned)coil_addr, (unsigned)value);
+                HPSB_Debug_Log(dbg);
+            }
+#if HPSB_RS485_DEBUG_LOG
+            log_rs485("[HPSB_RS485] fc05 addr=%u value=%u\r\n", (unsigned)coil_addr, (unsigned)value);
+#endif
+            if (coil_addr >= COIL_COUNT) {
+                HPSB_Debug_Log("[HPSB] coil_addr out of range\r\n");
+#if HPSB_RS485_DEBUG_LOG
+                log_rs485("[HPSB_RS485] exception response (invalid coil addr)\r\n");
+#endif
+                /* 잘못된 coil 주소: LED3 비블로킹 450ms */
+                dbg_led3_pulse_ms(450);
+                set_de_rx();
+                break;
+            }
+            if (coil_addr != 0u)
+                HPSB_Debug_Log("[HPSB] D. coil_addr != 0\r\n");
+            else
+                HPSB_Debug_Log("[HPSB] FC05 coil_addr==0 OK\r\n");
+            /* coil_addr==0 success: LED3 hold ON 500ms. coil_addr!=0: short pulse. */
+            dbg_led3_pulse_ms(coil_addr == 0u ? 500u : 300u);
             ModbusTable_SetCoil(coil_addr, value);
+#if HPSB_RS485_DEBUG_LOG
+            log_rs485("[HPSB_RS485] before response\r\n");
+#endif
             tx_len = ModbusRTU_BuildFC05Response(tx_pdu, MODBUS_SLAVE_ADDR, coil_addr, value);
             send_response(tx_pdu, tx_len);
             break;
@@ -135,20 +469,71 @@ static void process_frame(void)
             break;
         }
         default:
+#if HPSB_RS485_DEBUG_LOG
+            log_rs485("[HPSB_RS485] no response unsupported fc=0x%02X\r\n", (unsigned)fc);
+#endif
+            set_de_rx();
             break;
     }
+#if HPSB_PA8_TRACE
+    HPSB_RS485_Log("[RS485] process_frame end\r\n");
+#endif
+    set_de_rx();  /* 모든 경로 후 RX 복귀 */
 }
 
 void ModbusSlave_Poll(void)
 {
     uint8_t b;
+    /* If UART error flags are set, RX can stall (HAL_UART_Receive returns error).
+     * Clear errors proactively to keep polling RX alive. */
+    if (__HAL_UART_GET_FLAG(&MODBUS_UART, UART_FLAG_ORE) ||
+        __HAL_UART_GET_FLAG(&MODBUS_UART, UART_FLAG_FE)  ||
+        __HAL_UART_GET_FLAG(&MODBUS_UART, UART_FLAG_NE)) {
+        uart_clear_errors();
+        rx_len = 0;
+        last_rx_tick = 0;
+        set_de_rx();
+    }
     while (HAL_UART_Receive(&MODBUS_UART, &b, 1, 0) == HAL_OK) {
         last_rx_tick = HAL_GetTick();
-        if (rx_len < MODBUS_RTU_RX_BUF_SIZE)
+        if (rx_len < MODBUS_RTU_RX_BUF_SIZE) {
             rx_buf[rx_len++] = b;
+            HAL_GPIO_TogglePin(LED02_GPIO_Port, LED02_Pin);  /* 바이트 수신 시 LED2 토글 */
+#if HPSB_RS485_DEBUG_LOG
+            if (rx_len == 1)
+                log_rs485("[HPSB_RS485] frame byte received\r\n");
+#endif
+        }
     }
     if (rx_len > 0 && (HAL_GetTick() - last_rx_tick) >= FRAME_SILENCE_MS) {
+#if HPSB_PA8_TRACE
+        HPSB_RS485_Log("[RS485] poll frame timeout\r\n");
+#endif
         process_frame();
         rx_len = 0;
+        last_rx_tick = 0;
+        uart_clear_errors();
     }
+}
+
+/* TX 경로 단독 검증: Modbus 파싱 없이 고정 8바이트(FC05 coil0 OFF) 송신. DE HIGH → TX → TC → DE LOW. */
+void ModbusSlave_SendTestFrame(void)
+{
+    static const uint8_t test_frame[8] = { 0x01, 0x05, 0x00, 0x00, 0x00, 0x00, 0xCD, 0xCA };
+    set_de_tx();
+    for (volatile uint32_t d = 0; d < 500; d++) { (void)d; }
+    HAL_UART_Transmit(&MODBUS_UART, (uint8_t *)test_frame, 8, 100);
+    while (__HAL_UART_GET_FLAG(&MODBUS_UART, UART_FLAG_TC) == RESET) { }
+    set_de_rx();
+}
+
+/* RS485 송신 경로 단독 검증: 고정 문자열 송신. DE HIGH → UART TX → TC → DE LOW. (Modbus/CRC/slave 무관) */
+void ModbusSlave_SendTestString(const char *str, uint16_t len)
+{
+    if (str == NULL || len == 0) return;
+    set_de_tx();
+    for (volatile uint32_t d = 0; d < 500; d++) { (void)d; }
+    HAL_UART_Transmit(&MODBUS_UART, (const uint8_t *)str, len, 100);
+    while (__HAL_UART_GET_FLAG(&MODBUS_UART, UART_FLAG_TC) == RESET) { }
+    set_de_rx();
 }

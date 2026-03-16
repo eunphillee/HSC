@@ -1,11 +1,12 @@
 /**
  * @file led_status.c
  * @brief HPSB LED policy:
- *   LED1(PWR)=always ON when board power valid.
+ *   LED1(PWR)=점검 시 미사용(OFF). 보드 점검 시 LED2/3/4만 사용.
  *   When LED_DIAG_COMM_OUTPUT==1 (communication diagnostic mode):
  *     LED2 = RELAY1 (coil 0) status, LED3 = RELAY2 (coil 1), LED4 = RELAY3 (coil 2).
  *   When LED_DIAG_COMM_OUTPUT==0: LED2=any relay, LED3=current/fault, LED4=RS485.
  *   Board: LED01~04 LOW active (LOW=ON, HIGH=OFF). Relay outputs: active-high (GPIO_SET=ON).
+ *   Design: simplest for debugging / visual verification first; not production-polish.
  */
 #include "led_status.h"
 #include "main.h"
@@ -13,6 +14,10 @@
 
 #ifndef LED_DIAG_COMM_OUTPUT
 #define LED_DIAG_COMM_OUTPUT  1   /* 1 = LED2/3/4 show RELAY1/2/3 for comm diagnostic */
+#endif
+/* Parser debug: LED4 고정 OFF (수신/파서 단계는 LED1/2/3만 사용). RS485/RELAY3 표시 비활성화. */
+#ifndef HPSB_PARSER_DEBUG_LED4_OFF
+#define HPSB_PARSER_DEBUG_LED4_OFF  1
 #endif
 
 #define RS485_PULSE_MS           30u
@@ -68,7 +73,8 @@ void LED_Status_Init(void)
 	LED_CUR_ON();
 	LED_RS485_OFF();
 #endif
-	LED_PWR_ON();
+	/* LED1(PWR)=점검 시 미사용(OFF 유지). */
+	LED_PWR_OFF();
 }
 
 void LED_Status_SetCurrentFault(LED_CurrentFault_t fault)
@@ -90,11 +96,11 @@ void LED_Status_Tick_1ms(void)
 	last_tick = now;
 	if (elapsed > 100u) elapsed = 100u;
 
-	/* ----- LED1 (PWR): always ON ----- */
-	LED_PWR_ON();
+	/* ----- LED1 (PWR): 점검 시 미사용, OFF 유지 ----- */
+	LED_PWR_OFF();
 
 #if LED_DIAG_COMM_OUTPUT
-	/* Communication diagnostic: LED2 = RELAY1, LED3 = RELAY2, LED4 = RELAY3 (coil 0,1,2). Outputs active-high in io_map.c. */
+	/* Communication diagnostic: LED2 = RELAY1, LED3 = RELAY2. LED4 = RELAY3 when not parser-debug. */
 	if (IO_HPSB_ReadCoil(HPSB_COIL_RLY01))
 		LED_RELAY_ON();
 	else
@@ -103,10 +109,14 @@ void LED_Status_Tick_1ms(void)
 		LED_CUR_ON();
 	else
 		LED_CUR_OFF();
+#if !HPSB_PARSER_DEBUG_LED4_OFF
 	if (IO_HPSB_ReadCoil(HPSB_COIL_RLY03))
 		LED_RS485_ON();
 	else
 		LED_RS485_OFF();
+#else
+	LED_RS485_OFF();
+#endif
 #else
 	/* ----- LED2 (RELAY): any relay active ----- */
 	if (HPSB_IsAnyRelayActive())
@@ -158,7 +168,10 @@ void LED_Status_Tick_1ms(void)
 		break;
 	}
 
-	/* ----- LED4 (RS485): 30ms pulse or 1Hz when idle ----- */
+	/* ----- LED4 (RS485): 30ms pulse or 1Hz when idle (parser-debug 시 OFF) ----- */
+#if HPSB_PARSER_DEBUG_LED4_OFF
+	LED_RS485_OFF();
+#else
 	if (rs485_pulse_ms > 0) {
 		if (rs485_pulse_ms <= elapsed)
 			rs485_pulse_ms = 0;
@@ -179,5 +192,6 @@ void LED_Status_Tick_1ms(void)
 			LED_RS485_OFF();
 		}
 	}
+#endif
 #endif /* !LED_DIAG_COMM_OUTPUT */
 }

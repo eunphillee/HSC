@@ -1,0 +1,48 @@
+diff --git a/HSC/PC_Test_Tool/app/modbus_client.py b/HSC/PC_Test_Tool/app/modbus_client.py
+--- a/HSC/PC_Test_Tool/app/modbus_client.py
++++ b/HSC/PC_Test_Tool/app/modbus_client.py
+@@ -73,7 +73,7 @@ class ModbusClient:
+                 rr = self._client.read_discrete_inputs(
+                     address=start,
+                     count=count,
+-                    slave=self._slave_id,
++                    unit=self._slave_id,
+                 )
+                 if rr.isError():
+                     return False, None, f"Exception 0x{rr.exception_code:02X}"
+@@ -107,7 +107,7 @@ class ModbusClient:
+                 rr = self._client.read_holding_registers(
+                     address=CURRENT_START,
+                     count=CURRENT_COUNT,
+-                    slave=self._slave_id,
++                    unit=self._slave_id,
+                 )
+                 if rr.isError():
+                     return False, None, f"Exception 0x{rr.exception_code:02X}"
+@@ -129,7 +129,7 @@ class ModbusClient:
+                 rr = self._client.read_holding_registers(
+                     address=MAIN_DI_REG,
+                     count=2,
+-                    slave=self._slave_id,
++                    unit=self._slave_id,
+                 )
+                 if rr.isError():
+                     return False, None, None, f"Exception 0x{rr.exception_code:02X}"
+@@ -157,7 +157,7 @@ class ModbusClient:
+                 rr = self._client.write_register(
+                     address=MAIN_DO_REG,
+                     value=val,
+-                    slave=self._slave_id,
++                    unit=self._slave_id,
+                 )
+                 if rr.isError():
+                     return False, f"Exception 0x{rr.exception_code:02X}"
+@@ -176,7 +176,7 @@ class ModbusClient:
+                 rr = self._client.write_coil(
+                     address=address,
+                     value=value,
+-                    slave=self._slave_id,
++                    unit=self._slave_id,
+                 )
+                 if rr.isError():
+                     return False, f"Exception 0x{rr.exception_code:02X}"

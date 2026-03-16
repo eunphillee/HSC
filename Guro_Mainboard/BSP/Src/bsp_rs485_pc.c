@@ -1,5 +1,5 @@
 /**
- * @file bsp_rs485_pc.c
+  * @file bsp_rs485_pc.c
  * @brief PC RS485: USART1 (PA9/PA10), DE/RE = PB1. Default LOW = RX mode.
  */
 #include "bsp_rs485_pc.h"

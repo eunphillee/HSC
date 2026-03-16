@@ -1,0 +1,18 @@
+--- a/Guro_HPSB/.cproject
++++ b/Guro_HPSB/.cproject
+@@ -48,6 +48,7 @@
+ 									<listOptionValue builtIn="false" value="../Modbus/Inc"/>
+ 									<listOptionValue builtIn="false" value="../IO/Inc"/>
+ 									<listOptionValue builtIn="false" value="../Application/Inc"/>
++									<listOptionValue builtIn="false" value="${workspace_loc:/${ProjName}}/Application/Inc"/>
+ 								</option>
+ 								<inputType id="com.st.stm32cube.ide.mcu.gnu.managedbuild.tool.c.compiler.input.c.994839671" superClass="com.st.stm32cube.ide.mcu.gnu.managedbuild.tool.c.compiler.input.c"/>
+ 							</tool>
+@@ -128,6 +129,7 @@
+ 									<listOptionValue builtIn="false" value="../Modbus/Inc"/>
+ 									<listOptionValue builtIn="false" value="../IO/Inc"/>
+ 									<listOptionValue builtIn="false" value="../Application/Inc"/>
++									<listOptionValue builtIn="false" value="${workspace_loc:/${ProjName}}/Application/Inc"/>
+ 								</option>
+ 								<inputType id="com.st.stm32cube.ide.mcu.gnu.managedbuild.tool.c.compiler.input.c.221793094" superClass="com.st.stm32cube.ide.mcu.gnu.managedbuild.tool.c.compiler.input.c"/>
+ 							</tool>

@@ -1,0 +1,219 @@
+diff --git a/Guro_Mainboard/Gateway/Src/upstream_slave_h2tech.c b/Guro_Mainboard/Gateway/Src/upstream_slave_h2tech.c
+index d3a9e6f..18b4474 100644
+--- a/Guro_Mainboard/Gateway/Src/upstream_slave_h2tech.c
++++ b/Guro_Mainboard/Gateway/Src/upstream_slave_h2tech.c
+@@ -11,6 +11,7 @@
+ #include "io_map.h"
+ #include "reset_reason.h"
+ #include "bsp_gpio.h"
++#include "system_config.h"
+ 
+ #define EX_ILLEGAL_FUNCTION  0x01
+ #define EX_ILLEGAL_DATA_ADDR 0x02
+@@ -40,6 +41,33 @@
+ #define UPSTREAM_PC_RESET_EN_REG 2121u
+ #define UPSTREAM_PC_LED_IN_REG   2122u
+ 
++/* System config (EEPROM): 4x3000=slave_id, 4x3001=baudrate code, 4x3002=factory reset command */
++#define UPSTREAM_SYSCFG_REG_COUNT  3u
++
++static uint32_t baudrate_from_code(uint16_t code)
++{
++	switch (code) {
++	case 0: return SYSTEM_CONFIG_BAUDRATE_9600;
++	case 1: return SYSTEM_CONFIG_BAUDRATE_19200;
++	case 2: return SYSTEM_CONFIG_BAUDRATE_38400;
++	case 3: return SYSTEM_CONFIG_BAUDRATE_57600;
++	case 4: return SYSTEM_CONFIG_BAUDRATE_115200;
++	default: return 0;
++	}
++}
++
++static uint16_t baudrate_to_code(uint32_t baud)
++{
++	switch (baud) {
++	case SYSTEM_CONFIG_BAUDRATE_9600:   return 0;
++	case SYSTEM_CONFIG_BAUDRATE_19200: return 1;
++	case SYSTEM_CONFIG_BAUDRATE_38400: return 2;
++	case SYSTEM_CONFIG_BAUDRATE_57600: return 3;
++	case SYSTEM_CONFIG_BAUDRATE_115200: return 4;
++	default: return 0xFFu;
++	}
++}
++
+ /* FC02 Read Discrete Inputs: H2TECH 1x, h2_dec = start_addr + 1 + i */
+ static int handle_fc02(uint16_t start_addr, uint16_t count, uint8_t *response, uint16_t resp_max)
+ {
+@@ -174,6 +202,33 @@ static int handle_fc03(uint16_t start_addr, uint16_t count, const void *p_agg,
+         return 4;
+     }
+ 
++    /* System config (4x3000~3002): FC03 read — slave_id, baudrate code, factory_reset(read 0) */
++    if (start_addr == SYSCFG_MODBUS_SLAVE_ID_REG) {
++        if (count == 0u || count > UPSTREAM_SYSCFG_REG_COUNT) {
++            response[0] = 0x83;
++            response[1] = EX_ILLEGAL_DATA_VAL;
++            return 2;
++        }
++        if (resp_max < (uint16_t)(2u + count * 2u)) return -1;
++        const system_config_t *cfg = SystemConfig_Get();
++        response[0] = 0x03;
++        response[1] = (uint8_t)(count * 2u);
++        uint16_t r0 = cfg ? (uint16_t)cfg->slave_id : SYSTEM_CONFIG_DEFAULT_SLAVE_ID;
++        uint16_t r1 = cfg ? baudrate_to_code(cfg->baudrate) : 0u;
++        if (r1 > 4u) r1 = 0u;
++        response[2] = (uint8_t)(r0 >> 8);
++        response[3] = (uint8_t)(r0 & 0xFF);
++        if (count >= 2u) {
++            response[4] = (uint8_t)(r1 >> 8);
++            response[5] = (uint8_t)(r1 & 0xFF);
++        }
++        if (count >= 3u) {
++            response[6] = 0;
++            response[7] = 0;  /* 4x3002 read: always 0 */
++        }
++        return (int)(2 + count * 2u);
++    }
++
+     if (start_addr != UPSTREAM_CURRENT_START) {
+         response[0] = 0x83;
+         response[1] = EX_ILLEGAL_DATA_ADDR;
+@@ -256,6 +311,73 @@ static int handle_fc06(uint16_t start_addr, const uint8_t *write_data,
+         return 6;
+     }
+ 
++    /* 4x3000: slave_id (1~247) -> EEPROM save */
++    if (start_addr == SYSCFG_MODBUS_SLAVE_ID_REG) {
++        const system_config_t *cur = SystemConfig_Get();
++        if (!cur || value < SYSTEM_CONFIG_SLAVE_ID_MIN || value > SYSTEM_CONFIG_SLAVE_ID_MAX) {
++            response[0] = 0x86;
++            response[1] = EX_ILLEGAL_DATA_VAL;
++            return 2;
++        }
++        system_config_t cfg = *cur;
++        cfg.slave_id = (uint8_t)(value & 0xFF);
++        if (SystemConfig_Save(&cfg) != 0) {
++            response[0] = 0x86;
++            response[1] = EX_ILLEGAL_DATA_VAL;
++            return 2;
++        }
++        response[0] = 0x06;
++        response[1] = (uint8_t)(start_addr >> 8);
++        response[2] = (uint8_t)(start_addr & 0xFF);
++        response[3] = (uint8_t)(value >> 8);
++        response[4] = (uint8_t)(value & 0xFF);
++        return 6;
++    }
++
++    /* 4x3001: baudrate code (0~4) -> EEPROM save. UART baud는 재부팅 후 적용. */
++    if (start_addr == SYSCFG_MODBUS_BAUDRATE_CODE_REG) {
++        const system_config_t *cur = SystemConfig_Get();
++        if (!cur || value > 4u) {
++            response[0] = 0x86;
++            response[1] = EX_ILLEGAL_DATA_VAL;
++            return 2;
++        }
++        uint32_t baud = baudrate_from_code((uint16_t)value);
++        system_config_t cfg = *cur;
++        cfg.baudrate = baud;
++        if (SystemConfig_Save(&cfg) != 0) {
++            response[0] = 0x86;
++            response[1] = EX_ILLEGAL_DATA_VAL;
++            return 2;
++        }
++        response[0] = 0x06;
++        response[1] = (uint8_t)(start_addr >> 8);
++        response[2] = (uint8_t)(start_addr & 0xFF);
++        response[3] = (uint8_t)(value >> 8);
++        response[4] = (uint8_t)(value & 0xFF);
++        return 6;
++    }
++
++    /* 4x3002: factory reset command. value=1 -> SystemConfig_FactoryReset() */
++    if (start_addr == SYSCFG_MODBUS_FACTORY_RESET_REG) {
++        if (value != 1u) {
++            response[0] = 0x86;
++            response[1] = EX_ILLEGAL_DATA_VAL;
++            return 2;
++        }
++        if (SystemConfig_FactoryReset() != 0) {
++            response[0] = 0x86;
++            response[1] = EX_ILLEGAL_DATA_VAL;
++            return 2;
++        }
++        response[0] = 0x06;
++        response[1] = (uint8_t)(start_addr >> 8);
++        response[2] = (uint8_t)(start_addr & 0xFF);
++        response[3] = (uint8_t)(value >> 8);
++        response[4] = (uint8_t)(value & 0xFF);
++        return 6;
++    }
++
+     if (start_addr != UPSTREAM_MAIN_IO_DO_REG) {
+         response[0] = 0x86;
+         response[1] = EX_ILLEGAL_DATA_ADDR;
+diff --git a/Guro_Mainboard/docs/EEPROM_SYSTEM_CONFIG.md b/Guro_Mainboard/docs/EEPROM_SYSTEM_CONFIG.md
+index bbd2d99..56b1f62 100644
+--- a/Guro_Mainboard/docs/EEPROM_SYSTEM_CONFIG.md
++++ b/Guro_Mainboard/docs/EEPROM_SYSTEM_CONFIG.md
+@@ -54,16 +54,19 @@
+ 
+ ---
+ 
+-## Modbus 설정용 예약 레지스터 (향후 PC 툴에서 설정 변경 예정)
+-
+-| Modbus 주소 (4x) | 용도 | 비고 |
+-|------------------|------|------|
+-| **4x3000** | slave_id | 1~247. Write 동작 추후 구현 |
+-| **4x3001** | baudrate code | 0=9600, 1=19200, 2=38400, 3=57600, 4=115200. Write 추후 구현 |
+-| **4x3002** | factory reset command | Write 1 = factory reset 실행. 추후 구현 |
+-
+-- 헤더: `system_config.h` — `SYSCFG_MODBUS_SLAVE_ID_REG`, `SYSCFG_MODBUS_BAUDRATE_CODE_REG`, `SYSCFG_MODBUS_FACTORY_RESET_REG`.
+-- 실제 FC06/FC16 write 처리 및 EEPROM 반영은 추후 추가.
++## Modbus 설정 레지스터 (4x3000~3002) — 구현 완료
++
++| Modbus 주소 (4x) | Read (FC03) | Write (FC06) | 비고 |
++|------------------|-------------|--------------|------|
++| **4x3000** | 현재 slave_id (1~247) | value 1~247 → EEPROM 저장 후 정상 응답 | 범위 밖 → 0x03 Illegal Data Value |
++| **4x3001** | 현재 baudrate code (0~4) | code 0~4 → EEPROM 저장 | **보드레이트는 재부팅 후 적용** (즉시 UART 재설정 없음) |
++| **4x3002** | 0 (읽기만) | value=1 → SystemConfig_FactoryReset() 실행 | 1 외 값 → 0x03 |
++
++- **FC03**: start=3000, count=1~3 → [slave_id], [slave_id, baudrate_code], [slave_id, baudrate_code, 0].
++- **FC06**: 단일 레지스터 쓰기. 성공 시 normal write response. 실패 시 0x03.
++- **baudrate code**: 0=9600, 1=19200, 2=38400, 3=57600, 4=115200.
++- **UART baud 적용**: 저장 즉시가 아닌 **다음 부팅 시** main.c에서 Load 후 huart1.Init.BaudRate 적용. 통신 중 재설정을 피하기 위한 안전 방식.
++- 부팅 로그 / UART 로그 옵션(`SYSTEM_CONFIG_BOOT_LOG` 등)으로 변경 결과 확인 가능.
+ 
+ ---
+ 
+diff --git a/Guro_Mainboard/docs/MODBUS_REGISTER_MAP_EXTRACTED.md b/Guro_Mainboard/docs/MODBUS_REGISTER_MAP_EXTRACTED.md
+index 011702c..b14ed9b 100644
+--- a/Guro_Mainboard/docs/MODBUS_REGISTER_MAP_EXTRACTED.md
++++ b/Guro_Mainboard/docs/MODBUS_REGISTER_MAP_EXTRACTED.md
+@@ -64,6 +64,9 @@ This report is generated by inspecting the **actual source code** of the Guro_Ma
+ | 2120 | PC_ON_EN | Write | FC06 | BSP_WritePC_ON_EN / Gateway_Action_StartPulsePC_ON_EN | value=1 → 100ms HIGH pulse (PC1), 0 → LOW |
+ | 2121 | PC_RESET_EN | Write | FC06 | BSP_WritePC_RESET_EN / Gateway_Action_StartPulsePC_RESET_EN | value=1 → 100ms HIGH pulse (PC0), 0 → LOW |
+ | 2122 | PC_LED_IN | Read | FC03 | BSP_ReadPC_LED_IN() | PC2 state: 0=OFF, 1=ON |
++| 3000 | SYSCFG_SLAVE_ID | Read/Write | FC03/FC06 | SystemConfig_Get()->slave_id | 1~247. Write → EEPROM save |
++| 3001 | SYSCFG_BAUDRATE_CODE | Read/Write | FC03/FC06 | baudrate_to_code(config) | 0=9600, 1=19200, 2=38400, 3=57600, 4=115200. Write → EEPROM (재부팅 후 적용) |
++| 3002 | SYSCFG_FACTORY_RESET | Read/Write | FC03/FC06 | read 0 | Write 1 → SystemConfig_FactoryReset() |
+ 
+ **FC03 policy (upstream_slave_h2tech.c):**
+ 
+@@ -74,12 +77,13 @@ This report is generated by inspecting the **actual source code** of the Guro_Ma
+ - **start=2110, count=3** → registers 2110, 2111, 2112 (temp, RH, error_flags).
+ - **start=2113, count=2** → registers 2113, 2114 (RCC CSR 32-bit).
+ - **start=2122, count=1** → register 2122 (PC_LED_IN, read-only).
++- **start=3000, count=1~3** → registers 3000 (slave_id), 3001 (baudrate code), 3002 (read 0). System config (EEPROM).
+ - Any other start or count for these blocks → **0x03 Illegal Data Value**.
+-- Any other start address (e.g. 2102, 2115, 2123, 3000) → **0x02 Illegal Data Address**.
++- Any other start address (e.g. 2102, 2115, 2123) → **0x02 Illegal Data Address**.
+ 
+-**FC06:** Accepted addresses: **2101** (DO bitmap), **2120** (PC_ON_EN), **2121** (PC_RESET_EN). Value bits 0..3 for 2101; for 2120/2121 value≠0 → 100ms pulse, 0 → LOW. Write to 2100 or 2122 (read-only) → **0x03 Illegal Data Value**. Any other address → **0x02 Illegal Data Address**.
++**FC06:** Accepted addresses: **2101** (DO bitmap), **2120** (PC_ON_EN), **2121** (PC_RESET_EN), **3000** (slave_id 1~247), **3001** (baudrate code 0~4), **3002** (value=1 → factory reset). Value bits 0..3 for 2101; for 2120/2121 value≠0 → pulse, 0 → LOW. For 3000: value 1~247 → EEPROM save; 3001: code 0~4 → EEPROM save (baud 적용은 재부팅 후); 3002: value=1 only → FactoryReset(). Write to 2100 or 2122 (read-only) → **0x03 Illegal Data Value**. Any other address → **0x02 Illegal Data Address**.
+ 
+-**Reserved (향후 PC 툴에서 설정 변경 예정):** 4x3000 (slave_id), 4x3001 (baudrate code), 4x3002 (factory reset command). 주소만 예약, 실제 FC03/FC06 처리 미구현. See `system_config.h` and `docs/EEPROM_SYSTEM_CONFIG.md`.
++**System config (4x3000~3002):** FC03 read 구현 (3000=slave_id, 3001=baud code, 3002=0). FC06 write 구현. See `system_config.h` and `docs/EEPROM_SYSTEM_CONFIG.md`. Baudrate change takes effect **after next reset**.
+ 
+ ---
+ 

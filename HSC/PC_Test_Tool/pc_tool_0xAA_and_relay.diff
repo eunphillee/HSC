@@ -1,0 +1,43 @@
+diff --git a/app/modbus_client.py b/app/modbus_client.py
+--- a/app/modbus_client.py
++++ b/app/modbus_client.py
+@@ -143,13 +143,18 @@ class ModbusClient:
+     def read_raw_available(self) -> list[int]:
+         """Read any bytes currently in the serial RX buffer (e.g. board TX 0xAA). Returns list of byte values."""
+         with self._lock:
+             if not self._client or not self._client.is_socket_open():
+                 return []
+-            sock = getattr(self._client, "socket", None)
++            # pymodbus may store serial as socket, connection, client, or _connection
++            sock = None
++            for name in ("socket", "connection", "client", "_connection"):
++                c = getattr(self._client, name, None)
++                if c is not None and callable(getattr(c, "read", None)) and hasattr(c, "in_waiting"):
++                    sock = c
++                    break
+             if sock is None:
+                 return []
+             out: list[int] = []
+             try:
+                 n = getattr(sock, "in_waiting", 0) or 0
+diff --git a/app/ui_main.py b/app/ui_main.py
+--- a/app/ui_main.py
++++ b/app/ui_main.py
+@@ -102,7 +102,7 @@ class MainWindow(QMainWindow):
+         self._log_lines: list[str] = []
+         self._raw_poll_timer = QTimer(self)
+-        self._raw_poll_timer.setInterval(300)
++        self._raw_poll_timer.setInterval(100)
+         self._raw_poll_timer.timeout.connect(self._poll_raw_rx)
+         self._build_ui()
+         self._refresh_ports()
+@@ -348,8 +348,10 @@ class MainWindow(QMainWindow):
+             self._log.log("FC03", PC_LED_IN_REG, 1, "Fail", msg)
+ 
+     def _on_write_result(self, ok: bool, err: str | None):
+-        if not ok:
++        if ok:
++            self._log.log("Write", "FC06", "OK", "OK")  # Relay/PC_CTRL 쓰기 성공
++        else:
+             msg = err or "No response/timeout"
+             self._log.log("Write", "", "", "Fail", msg)

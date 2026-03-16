@@ -1,0 +1,497 @@
+diff --git a/HSC/PC_Test_Tool/app/address_map.py b/HSC/PC_Test_Tool/app/address_map.py
+index 9f2451f..9a707ee 100644
+--- a/HSC/PC_Test_Tool/app/address_map.py
++++ b/HSC/PC_Test_Tool/app/address_map.py
+@@ -28,3 +28,20 @@ PC_LED_IN_REG = 2122
+ # Reg1: rh_x10 (unsigned)
+ MAIN_ENV_REG = 2110
+ MAIN_ENV_COUNT = 3  # + error_flags
++
++# ---- HPSB/LPSB (via Mainboard FC03/FC02/FC05) ----
++# FC03 start=2000 count=14: HPSB sense [0,1,2], LPSB1 [0,1,2], LPSB2 [0,1,2], LPSB3 [0,1,2], reserved [12,13]
++SUB_SENSE_REG = 2000
++SUB_SENSE_COUNT = 14
++# FC02 discrete (1x): H2 dec 823..836 = start 822, count 14 (ONOFF_3..14 = HPSB CH1~3, LPSB1~3 CH1~3)
++SUB_COIL_STATUS_START = 822
++SUB_COIL_STATUS_COUNT = 14
++# FC02 discrete: H2 dec 869..880 = start 868, count 12 (ALM_1..12)
++SUB_ALARM_START = 868
++SUB_ALARM_COUNT = 12
++# FC05 write single coil: H2 892..896 = Modbus addr 891..895 (VB_ONOFF_8..12 → LPSB pulse). 897,898=DOOR.
++# HPSB CH1~3 are read-only from PC (no write in current firmware).
++SUB_VB_COIL_BASE = 891   # FC05 addr 891 = H2 892 = VB_ONOFF_8 (LPSB1_CH3 pulse), ... 895=VB_ONOFF_12
++SUB_VB_COIL_COUNT = 5    # 891..895
++# error_flags (FC03 2112): bit0=AGG_ERR_COMM_HPSB, bit1=AGG_ERR_COMM_LPSB
++ERROR_FLAGS_REG = 2112
+diff --git a/HSC/PC_Test_Tool/app/modbus_client.py b/HSC/PC_Test_Tool/app/modbus_client.py
+index e2631ad..05661e4 100644
+--- a/HSC/PC_Test_Tool/app/modbus_client.py
++++ b/HSC/PC_Test_Tool/app/modbus_client.py
+@@ -19,6 +19,15 @@ from .address_map import (
+     PC_LED_IN_REG,
+     MAIN_ENV_REG,
+     MAIN_ENV_COUNT,
++    SUB_SENSE_REG,
++    SUB_SENSE_COUNT,
++    SUB_COIL_STATUS_START,
++    SUB_COIL_STATUS_COUNT,
++    SUB_ALARM_START,
++    SUB_ALARM_COUNT,
++    SUB_VB_COIL_BASE,
++    SUB_VB_COIL_COUNT,
++    ERROR_FLAGS_REG,
+ )
+ 
+ 
+@@ -308,6 +317,127 @@ class ModbusClient:
+         """FC06 write PC_RESET_EN_REG (2121): value=1 → 100ms pulse, 0 → LOW. Returns (ok, err)."""
+         return self._write_pc_reg(PC_RESET_EN_REG, 1 if onoff else 0)
+ 
++    def read_sub_sense(self) -> tuple[bool, list[int] | None, str | None]:
++        """FC03 read SUB_SENSE_REG count=14 → HPSB raw[3], LPSB1[3], LPSB2[3], LPSB3[3], reserved[2]. Returns (ok, list of 14 u16 or None, err)."""
++        with self._lock:
++            ok, err = self._ensure_socket_open()
++            if not ok:
++                return False, None, err or "Not connected"
++            if self._request_logger:
++                self._request_logger(self._slave_id, "FC03", SUB_SENSE_REG, SUB_SENSE_COUNT)
++            try:
++                rr = self._client.read_holding_registers(
++                    address=SUB_SENSE_REG,
++                    count=SUB_SENSE_COUNT,
++                    unit=self._slave_id,
++                )
++                if self._response_logger:
++                    self._response_logger(not rr.isError(), _response_exception_code(rr))
++                if rr.isError():
++                    return False, None, format_modbus_error(resp=rr)
++                regs = list(rr.registers) if rr.registers else []
++                regs = (regs + [0] * SUB_SENSE_COUNT)[:SUB_SENSE_COUNT]
++                return True, [r & 0xFFFF for r in regs], None
++            except Exception as e:
++                if self._response_logger:
++                    self._response_logger(False, None)
++                return False, None, format_modbus_error(exc=e)
++
++    def read_sub_coil_status(self) -> tuple[bool, list[bool] | None, str | None]:
++        """FC02 read discrete SUB_COIL_STATUS_START count=14 → ONOFF_3..14. Returns (ok, bits or None, err)."""
++        with self._lock:
++            ok, err = self._ensure_socket_open()
++            if not ok:
++                return False, None, err or "Not connected"
++            if self._request_logger:
++                self._request_logger(self._slave_id, "FC02", SUB_COIL_STATUS_START, SUB_COIL_STATUS_COUNT)
++            try:
++                rr = self._client.read_discrete_inputs(
++                    address=SUB_COIL_STATUS_START,
++                    count=SUB_COIL_STATUS_COUNT,
++                    unit=self._slave_id,
++                )
++                if self._response_logger:
++                    self._response_logger(not rr.isError(), _response_exception_code(rr))
++                if rr.isError():
++                    return False, None, format_modbus_error(resp=rr)
++                bits = list(rr.bits) if rr.bits else []
++                bits = (bits + [False] * SUB_COIL_STATUS_COUNT)[:SUB_COIL_STATUS_COUNT]
++                return True, [bool(b) for b in bits], None
++            except Exception as e:
++                if self._response_logger:
++                    self._response_logger(False, None)
++                return False, None, format_modbus_error(exc=e)
++
++    def read_sub_alarms(self) -> tuple[bool, list[bool] | None, str | None]:
++        """FC02 read discrete SUB_ALARM_START count=12 → ALM_1..12. Returns (ok, bits or None, err)."""
++        with self._lock:
++            ok, err = self._ensure_socket_open()
++            if not ok:
++                return False, None, err or "Not connected"
++            if self._request_logger:
++                self._request_logger(self._slave_id, "FC02", SUB_ALARM_START, SUB_ALARM_COUNT)
++            try:
++                rr = self._client.read_discrete_inputs(
++                    address=SUB_ALARM_START,
++                    count=SUB_ALARM_COUNT,
++                    unit=self._slave_id,
++                )
++                if self._response_logger:
++                    self._response_logger(not rr.isError(), _response_exception_code(rr))
++                if rr.isError():
++                    return False, None, format_modbus_error(resp=rr)
++                bits = list(rr.bits) if rr.bits else []
++                bits = (bits + [False] * SUB_ALARM_COUNT)[:SUB_ALARM_COUNT]
++                return True, [bool(b) for b in bits], None
++            except Exception as e:
++                if self._response_logger:
++                    self._response_logger(False, None)
++                return False, None, format_modbus_error(exc=e)
++
++    def read_error_flags(self) -> tuple[bool, int | None, str | None]:
++        """FC03 read env block; return error_flags (bit0=HPSB comm, bit1=LPSB comm). Returns (ok, flags or None, err)."""
++        with self._lock:
++            ok, err = self._ensure_socket_open()
++            if not ok:
++                return False, None, err or "Not connected"
++            try:
++                rr = self._client.read_holding_registers(
++                    address=MAIN_ENV_REG,
++                    count=MAIN_ENV_COUNT,
++                    unit=self._slave_id,
++                )
++                if rr.isError():
++                    return False, None, format_modbus_error(resp=rr)
++                regs = list(rr.registers) if rr.registers else [0, 0, 0]
++                flags = (regs[2] & 0xFFFF) if len(regs) > 2 else 0
++                return True, flags, None
++            except Exception as e:
++                return False, None, format_modbus_error(exc=e)
++
++    def write_sub_coil_pulse(self, coil_index_0_to_4: int) -> tuple[bool, str | None]:
++        """FC05 write single coil SUB_VB_COIL_BASE + index = 1 (pulse). index 0..4 = VB 8..12 (LPSB). Returns (ok, err)."""
++        if coil_index_0_to_4 < 0 or coil_index_0_to_4 >= SUB_VB_COIL_COUNT:
++            return False, "Invalid coil index 0..4"
++        addr = SUB_VB_COIL_BASE + coil_index_0_to_4
++        with self._lock:
++            ok, err = self._ensure_socket_open()
++            if not ok:
++                return False, err or "Not connected"
++            try:
++                if self._request_logger:
++                    self._request_logger(self._slave_id, "FC05", addr, 1)
++                wr = self._client.write_coil(address=addr, value=True, unit=self._slave_id)
++                if self._response_logger:
++                    self._response_logger(not wr.isError(), _response_exception_code(wr))
++                if wr.isError():
++                    return False, format_modbus_error(resp=wr)
++                return True, None
++            except Exception as e:
++                if self._response_logger:
++                    self._response_logger(False, None)
++                return False, format_modbus_error(exc=e)
++
+     def _write_pc_reg(self, address: int, value: int) -> tuple[bool, str | None]:
+         with self._lock:
+             ok, err = self._ensure_socket_open()
+diff --git a/HSC/PC_Test_Tool/app/ui_main.py b/HSC/PC_Test_Tool/app/ui_main.py
+index 9e84f1f..33163ac 100644
+--- a/HSC/PC_Test_Tool/app/ui_main.py
++++ b/HSC/PC_Test_Tool/app/ui_main.py
+@@ -16,7 +16,18 @@ from pymodbus.client.sync import ModbusSerialClient
+ from .modbus_client import ModbusClient
+ from .worker import MainboardWorker, create_worker_and_thread
+ from .logger import LogHandler
+-from .address_map import MAINBOARD_SLAVE_ID_DEFAULT, MAIN_DI_REG, MAIN_DO_REG, PC_ON_EN_REG, PC_RESET_EN_REG, PC_LED_IN_REG
++from .address_map import (
++    MAINBOARD_SLAVE_ID_DEFAULT,
++    MAIN_DI_REG,
++    MAIN_DO_REG,
++    PC_ON_EN_REG,
++    PC_RESET_EN_REG,
++    PC_LED_IN_REG,
++    SUB_SENSE_REG,
++    SUB_COIL_STATUS_START,
++    SUB_VB_COIL_BASE,
++    SUB_VB_COIL_COUNT,
++)
+ 
+ 
+ DARK_QSS = """
+@@ -97,10 +108,12 @@ class MainWindow(QMainWindow):
+     request_read_di = pyqtSignal()
+     request_read_pc_led = pyqtSignal()
+     request_write_relay = pyqtSignal(int, bool)
+-    request_pc_on_pulse = pyqtSignal()   # 클릭 시 100ms high 펄스
++    request_pc_on_pulse = pyqtSignal()
+     request_pc_reset_pulse = pyqtSignal()
+-    request_read_env = pyqtSignal()      # SHTC3 env read (FC03 2110 cnt=2)
+-    request_read_raw = pyqtSignal()  # 보드→PC raw 수신 (0xAA 등) 로그용
++    request_read_env = pyqtSignal()
++    request_read_raw = pyqtSignal()
++    request_read_sub = pyqtSignal()           # HPSB/LPSB sense + coil + error_flags
++    request_sub_pulse = pyqtSignal(int)       # LPSB VB pulse index 0..4
+ 
+     def __init__(self):
+         super().__init__()
+@@ -124,8 +137,12 @@ class MainWindow(QMainWindow):
+         self._raw_poll_timer.setInterval(100)
+         self._raw_poll_timer.timeout.connect(self._poll_raw_rx)
+         self._env_poll_timer = QTimer(self)
+-        self._env_poll_timer.setInterval(5000)  # 5초 주기 (1초→5초: 통신 안정성 확인용)
++        self._env_poll_timer.setInterval(5000)
+         self._env_poll_timer.timeout.connect(lambda: self.request_read_env.emit())
++        self._sub_poll_timer = QTimer(self)
++        self._sub_poll_timer.setInterval(2000)  # HPSB/LPSB 2초 주기
++        self._sub_poll_timer.timeout.connect(lambda: self.request_read_sub.emit())
++        self._sub_auto_poll = False
+         self._seen_0xaa_since_connect = False
+         self._modbus_fail_0xaa_hint_shown = False
+         self._build_ui()
+@@ -140,7 +157,10 @@ class MainWindow(QMainWindow):
+         self.request_pc_reset_pulse.connect(self._worker.on_request_pc_reset_pulse, Qt.ConnectionType.QueuedConnection)
+         self.request_read_env.connect(self._worker.on_request_read_env, Qt.ConnectionType.QueuedConnection)
+         self.request_read_raw.connect(self._worker.on_request_read_raw, Qt.ConnectionType.QueuedConnection)
++        self.request_read_sub.connect(self._worker.on_request_read_sub, Qt.ConnectionType.QueuedConnection)
++        self.request_sub_pulse.connect(self._worker.on_request_sub_pulse, Qt.ConnectionType.QueuedConnection)
+         self._worker.di_result.connect(self._on_di_result)
++        self._worker.sub_data_result.connect(self._on_sub_data_result)
+         self._worker.pc_led_result.connect(self._on_pc_led_result)
+         self._worker.env_result.connect(self._on_env_result)
+         self._worker.write_result.connect(self._on_write_result)
+@@ -190,7 +210,16 @@ class MainWindow(QMainWindow):
+         top_lay.addStretch()
+         main_layout.addWidget(top)
+ 
+-        # ---- B) Mainboard Outputs (4) ----
++        # ---- Content: Left (Mainboard) + Right (HPSB/LPSB) ----
++        content_row = QHBoxLayout()
++        content_row.setSpacing(16)
++
++        # ----- Left: Mainboard 테스트 (기존 구조 유지) -----
++        left_w = QWidget()
++        left_layout = QVBoxLayout(left_w)
++        left_layout.setSpacing(12)
++        left_layout.setContentsMargins(0, 0, 0, 0)
++
+         card_out, lay_out = card_frame("Mainboard Outputs (Relay1~4)")
+         out_labels = ["RELAY1_EN", "RELAY2_EN", "RELAY3_EN", "RELAY4_EN"]
+         self._relay_checks = []
+@@ -201,9 +230,8 @@ class MainWindow(QMainWindow):
+             self._relay_checks.append(chk)
+             grid_out.addWidget(chk, i // 2, i % 2)
+         lay_out.addLayout(grid_out)
+-        main_layout.addWidget(card_out)
++        left_layout.addWidget(card_out)
+ 
+-        # ---- C) Mainboard Inputs (8) + Read DI ----
+         card_in, lay_in = card_frame("Mainboard Inputs (DI_01~DI_08)")
+         self._di_leds = []
+         grid_di = QGridLayout()
+@@ -219,9 +247,8 @@ class MainWindow(QMainWindow):
+         btn_read_di.clicked.connect(lambda: self.request_read_di.emit())
+         lay_in.addWidget(btn_read_di)
+         self._btn_read_di = btn_read_di
+-        main_layout.addWidget(card_in)
++        left_layout.addWidget(card_in)
+ 
+-        # ---- D) PC Status ----
+         card_pc, lay_pc = card_frame("PC Status")
+         lay_pc.addWidget(QLabel("Outputs (클릭 시 500ms high 출력):"))
+         btn_pc_on = QPushButton("PC_ON_EN (500ms)")
+@@ -234,7 +261,7 @@ class MainWindow(QMainWindow):
+         self._btn_pc_reset = btn_pc_reset
+         lay_pc.addWidget(QLabel("Input:"))
+         row_pc_led = QHBoxLayout()
+-        self._pc_led_led = DiLedIndicator()  # high=빨강, low=파랑
++        self._pc_led_led = DiLedIndicator()
+         row_pc_led.addWidget(self._pc_led_led)
+         row_pc_led.addWidget(QLabel("PC_LED_IN"))
+         row_pc_led.addStretch()
+@@ -243,9 +270,8 @@ class MainWindow(QMainWindow):
+         btn_read_pc_led.clicked.connect(lambda: self.request_read_pc_led.emit())
+         lay_pc.addWidget(btn_read_pc_led)
+         self._btn_read_pc_led = btn_read_pc_led
+-        main_layout.addWidget(card_pc)
++        left_layout.addWidget(card_pc)
+ 
+-        # ---- E) Env Sensor (SHTC3) ----
+         card_env, lay_env = card_frame("Env Sensor (SHTC3)")
+         row_env = QHBoxLayout()
+         self._lbl_temp = QLabel("Temp: -.- °C")
+@@ -265,7 +291,68 @@ class MainWindow(QMainWindow):
+         btn_read_env.clicked.connect(lambda: self.request_read_env.emit())
+         lay_env.addWidget(btn_read_env)
+         self._btn_read_env = btn_read_env
+-        main_layout.addWidget(card_env)
++        left_layout.addWidget(card_env)
++
++        left_layout.addStretch()
++        content_row.addWidget(left_w)
++
++        # ----- Right: HPSB / LPSB / 제어 -----
++        right_w = QWidget()
++        right_w.setMinimumWidth(280)
++        right_layout = QVBoxLayout(right_w)
++        right_layout.setSpacing(12)
++        right_layout.setContentsMargins(0, 0, 0, 0)
++
++        gb_hpsb = QGroupBox("HPSB (Slave 1)")
++        lay_hpsb = QVBoxLayout(gb_hpsb)
++        self._hpsb_port_labels = [QLabel("Port1: -"), QLabel("Port2: -"), QLabel("Port3: -")]
++        for lbl in self._hpsb_port_labels:
++            lay_hpsb.addWidget(lbl)
++        self._hpsb_raw_label = QLabel("Raw: -, -, -")
++        lay_hpsb.addWidget(self._hpsb_raw_label)
++        self._hpsb_comm_label = QLabel("Comm: -")
++        lay_hpsb.addWidget(self._hpsb_comm_label)
++        lay_hpsb.addWidget(QLabel("제어: PC에서 미지원"))
++        right_layout.addWidget(gb_hpsb)
++
++        gb_lpsb = QGroupBox("LPSB (Slave 2,3,4)")
++        lay_lpsb = QVBoxLayout(gb_lpsb)
++        self._lpsb_labels = []
++        for name in ["LPSB1", "LPSB2", "LPSB3"]:
++            row = QHBoxLayout()
++            lbl = QLabel(f"{name}: P1=- P2=- P3=-")
++            lbl.setStyleSheet("color: #e0e0e0;")
++            self._lpsb_labels.append(lbl)
++            row.addWidget(lbl)
++            row.addStretch()
++            lay_lpsb.addLayout(row)
++        self._lpsb_raw_label = QLabel("Raw: -")
++        lay_lpsb.addWidget(self._lpsb_raw_label)
++        self._lpsb_comm_label = QLabel("Comm: -")
++        lay_lpsb.addWidget(self._lpsb_comm_label)
++        right_layout.addWidget(gb_lpsb)
++
++        gb_ctrl = QGroupBox("제어")
++        lay_ctrl = QVBoxLayout(gb_ctrl)
++        btn_read_once = QPushButton("Read once (HPSB/LPSB)")
++        btn_read_once.clicked.connect(lambda: self.request_read_sub.emit())
++        lay_ctrl.addWidget(btn_read_once)
++        self._btn_read_sub = btn_read_once
++        self._chk_auto_poll = QCheckBox("Auto poll (2s)")
++        self._chk_auto_poll.stateChanged.connect(self._on_auto_poll_changed)
++        lay_ctrl.addWidget(self._chk_auto_poll)
++        lay_ctrl.addWidget(QLabel("LPSB SSR 펄스 (FC05):"))
++        self._lpsb_pulse_btns = []
++        for i, t in enumerate(["LPSB1 CH3", "LPSB2 CH1", "LPSB2 CH2", "LPSB2 CH3", "LPSB3 CH1"]):
++            b = QPushButton(t)
++            b.clicked.connect(lambda checked, idx=i: self.request_sub_pulse.emit(idx))
++            self._lpsb_pulse_btns.append(b)
++            lay_ctrl.addWidget(b)
++        right_layout.addWidget(gb_ctrl)
++        right_layout.addStretch()
++        content_row.addWidget(right_w)
++
++        main_layout.addLayout(content_row)
+ 
+         # ---- F) Log ----
+         card_log, lay_log = card_frame("Log")
+@@ -283,8 +370,8 @@ class MainWindow(QMainWindow):
+         main_layout.addWidget(card_log)
+ 
+         self.setCentralWidget(central)
+-        self.resize(560, 640)
+-        self.setMinimumSize(480, 500)
++        self.resize(880, 640)
++        self.setMinimumSize(720, 500)
+ 
+         self._log.log_line.connect(self._on_log_line)
+ 
+@@ -311,6 +398,10 @@ class MainWindow(QMainWindow):
+         self._btn_read_di.setEnabled(connected)
+         self._btn_read_pc_led.setEnabled(connected)
+         self._btn_read_env.setEnabled(connected)
++        self._btn_read_sub.setEnabled(connected)
++        self._chk_auto_poll.setEnabled(connected)
++        for b in self._lpsb_pulse_btns:
++            b.setEnabled(connected)
+         for chk in self._relay_checks:
+             chk.setEnabled(connected)
+         self._btn_pc_on.setEnabled(connected)
+@@ -326,6 +417,9 @@ class MainWindow(QMainWindow):
+         else:
+             self._raw_poll_timer.stop()
+             self._env_poll_timer.stop()
++            self._sub_poll_timer.stop()
++            self._sub_auto_poll = False
++            self._chk_auto_poll.setChecked(False)
+             self._status_badge.setText("Disconnected")
+             self._status_badge.setStyleSheet("color: #555555; font-weight: bold; padding: 4px 8px;")
+ 
+@@ -460,7 +554,7 @@ class MainWindow(QMainWindow):
+ 
+     def _on_write_result(self, ok: bool, err: str | None):
+         if ok:
+-            self._log.log("Write", "FC06", "OK", "OK")  # Relay/PC_CTRL 쓰기 성공
++            self._log.log("Write", "FC06", "OK", "OK")
+         else:
+             msg = err or "No response/timeout"
+             self._log.log("Write", "", "", "Fail", msg)
+@@ -468,6 +562,43 @@ class MainWindow(QMainWindow):
+             if msg and ("No response" in msg or "0 received" in msg):
+                 self._log.log_info("힌트: 메인보드 빌드에서 ENABLE_PC_TEST_AA_STREAM=0, USE_PC_TEST_UART1_SLAVE=1 인지 확인하세요. (0xAA 전용 모드면 Modbus 응답 없음)")
+ 
++    def _on_auto_poll_changed(self, state):
++        self._sub_auto_poll = state == Qt.CheckState.Checked
++        if self._sub_auto_poll and self._client.connected:
++            self._sub_poll_timer.start()
++            self.request_read_sub.emit()
++        else:
++            self._sub_poll_timer.stop()
++
++    def _on_sub_data_result(self, ok: bool, sense: list | None, coils: list | None, flags: int | None, err: str | None):
++        AGG_ERR_COMM_HPSB = 1
++        AGG_ERR_COMM_LPSB = 2
++        if not ok:
++            self._hpsb_comm_label.setText("Comm: (read fail)")
++            self._lpsb_comm_label.setText("Comm: (read fail)")
++            if err:
++                self._log.log("FC03/FC02", SUB_SENSE_REG, SUB_COIL_STATUS_START, "Fail", err)
++            return
++        sense = sense or [0] * 14
++        coils = coils or [False] * 14
++        flags = flags if flags is not None else 0
++        # HPSB: sense 0,1,2; coils 0,1,2
++        for i in range(3):
++            self._hpsb_port_labels[i].setText(f"Port{i+1}: {'ON' if (i < len(coils) and coils[i]) else 'OFF'}")
++        self._hpsb_raw_label.setText(f"Raw: {sense[0]}, {sense[1]}, {sense[2]}")
++        self._hpsb_comm_label.setText("Comm: OK" if not (flags & AGG_ERR_COMM_HPSB) else "Comm: Timeout/CRC")
++        # LPSB1: sense 3,4,5 coils 3,4,5; LPSB2: 6,7,8 / 6,7,8; LPSB3: 9,10,11 / 9,10,11
++        for sb in range(3):
++            base_s = 3 + sb * 3
++            base_c = 3 + sb * 3
++            p1 = "ON" if (base_c < len(coils) and coils[base_c]) else "OFF"
++            p2 = "ON" if (base_c + 1 < len(coils) and coils[base_c + 1]) else "OFF"
++            p3 = "ON" if (base_c + 2 < len(coils) and coils[base_c + 2]) else "OFF"
++            r = f"{sense[base_s]},{sense[base_s+1]},{sense[base_s+2]}" if base_s + 2 < len(sense) else "-"
++            self._lpsb_labels[sb].setText(f"LPSB{sb+1}: P1={p1} P2={p2} P3={p3} raw={r}")
++        self._lpsb_comm_label.setText("Comm: OK" if not (flags & AGG_ERR_COMM_LPSB) else "Comm: Timeout/CRC (1=HPSB 2=LPSB)")
++        self._log.log("FC03/FC02", SUB_SENSE_REG, "sub", "OK")
++
+     def closeEvent(self, event):
+         try:
+             self._client.disconnect()
+diff --git a/HSC/PC_Test_Tool/app/worker.py b/HSC/PC_Test_Tool/app/worker.py
+index 4d3ac76..9e791df 100644
+--- a/HSC/PC_Test_Tool/app/worker.py
++++ b/HSC/PC_Test_Tool/app/worker.py
+@@ -12,6 +12,8 @@ class MainboardWorker(QObject):
+     env_result = pyqtSignal(bool, object, object)     # ok, (temp_c, rh_pct), err
+     write_result = pyqtSignal(bool, object)       # ok, err
+     raw_bytes_received = pyqtSignal(list)          # raw RX bytes (e.g. 0xAA from board)
++    # HPSB/LPSB: ok, sense[14], coil_bits[14], error_flags u16, err
++    sub_data_result = pyqtSignal(bool, object, object, object, object)
+ 
+     def __init__(self, client):
+         super().__init__()
+@@ -83,6 +85,30 @@ class MainboardWorker(QObject):
+         if buf:
+             self.raw_bytes_received.emit(buf)
+ 
++    def on_request_read_sub(self):
++        """Read HPSB/LPSB: sense(14), coil status(14), error_flags. Emit sub_data_result."""
++        if not self._client.connected:
++            self.sub_data_result.emit(False, None, None, None, "Not connected")
++            return
++        ok_s, sense, err_s = self._client.read_sub_sense()
++        ok_c, coils, err_c = self._client.read_sub_coil_status()
++        ok_f, flags, err_f = self._client.read_error_flags()
++        if not ok_s:
++            self.sub_data_result.emit(False, None, None, None, err_s or "sense fail")
++            return
++        if not ok_c:
++            self.sub_data_result.emit(False, sense, None, (flags if ok_f else None), err_c or "coil fail")
++            return
++        self.sub_data_result.emit(True, sense, coils, (flags if ok_f else 0), None)
++
++    def on_request_sub_pulse(self, coil_index: int):
++        """FC05 pulse one LPSB VB (coil_index 0..4 = VB 8..12). Emit write_result."""
++        if not self._client.connected:
++            self.write_result.emit(False, "Not connected")
++            return
++        ok, err = self._client.write_sub_coil_pulse(coil_index)
++        self.write_result.emit(ok, err)
++
+ 
+ def create_worker_and_thread(client):
+     """Create worker in a new thread; caller must start the thread."""

@@ -8,7 +8,7 @@ from PyQt6.QtWidgets import (
     QPlainTextEdit, QGroupBox, QCheckBox, QApplication,
 )
 from PyQt6.QtCore import pyqtSignal, Qt, QTimer
-from PyQt6.QtGui import QFont
+from PyQt6.QtGui import QFont, QShowEvent
 
 import pymodbus
 from pymodbus.client.sync import ModbusSerialClient
@@ -132,7 +132,9 @@ class MainWindow(QMainWindow):
     request_read_sub = pyqtSignal()           # HPSB/LPSB sense + coil + error_flags
     request_sub_pulse = pyqtSignal(int)       # LPSB VB pulse index 0..4
     request_write_sub_coil = pyqtSignal(int, bool)  # addr 898..909, value (FC05 to Mainboard)
+    request_write_direct_hpsb_coil = pyqtSignal(int, bool)  # coil_index 0..2, value (HPSB 다이렉트, Slave 1)
     request_diagnostic_sequence = pyqtSignal()  # run HPSB/LPSB LED diagnostic sequence
+    request_sniff = pyqtSignal()  # 연결 직후 2초 수신 테스트 (Direct HPSB)
 
     def __init__(self):
         super().__init__()
@@ -149,12 +151,13 @@ class MainWindow(QMainWindow):
         self._last_log_tag = "[MAIN]"
         self._client.set_request_logger(self._on_request_log)
         self._client.set_response_logger(self._on_response_log)
+        self._client.set_tx_frame_hex_logger(self._on_tx_frame_hex)
         self._thread, self._worker = create_worker_and_thread(self._client)
         self._thread.start()
         self._connect_worker_signals()
         self._log_lines: list[str] = []
         self._raw_poll_timer = QTimer(self)
-        self._raw_poll_timer.setInterval(100)
+        self._raw_poll_timer.setInterval(50)  # 50ms마다 raw RX 확인 (HPSB_TEST 1초 주기 수신 놓치지 않도록)
         self._raw_poll_timer.timeout.connect(self._poll_raw_rx)
         self._env_poll_timer = QTimer(self)
         self._env_poll_timer.setInterval(5000)
@@ -165,6 +168,10 @@ class MainWindow(QMainWindow):
         self._sub_auto_poll = False
         self._seen_0xaa_since_connect = False
         self._modbus_fail_0xaa_hint_shown = False
+        self._direct_hpsb_rx_total = 0  # 직접 HPSB 연결 후 수신 누적 바이트 (진단용)
+        self._direct_diag_timer = QTimer(self)
+        self._direct_diag_timer.setInterval(3000)  # 3초마다 수신 0이면 안내
+        self._direct_diag_timer.timeout.connect(self._on_direct_diag_tick)
         self._build_ui()
         self._refresh_ports()
         self._set_connected_ui(False)
@@ -180,8 +187,11 @@ class MainWindow(QMainWindow):
         self.request_read_sub.connect(self._worker.on_request_read_sub, Qt.ConnectionType.QueuedConnection)
         self.request_sub_pulse.connect(self._worker.on_request_sub_pulse, Qt.ConnectionType.QueuedConnection)
         self.request_write_sub_coil.connect(self._worker.on_request_write_sub_coil, Qt.ConnectionType.QueuedConnection)
+        self.request_write_direct_hpsb_coil.connect(self._worker.on_request_write_direct_hpsb_coil, Qt.ConnectionType.QueuedConnection)
         self.request_diagnostic_sequence.connect(self._worker.on_request_diagnostic_sequence, Qt.ConnectionType.QueuedConnection)
+        self.request_sniff.connect(self._worker.on_request_sniff, Qt.ConnectionType.QueuedConnection)
         self._worker.di_result.connect(self._on_di_result)
+        self._worker.sniff_result.connect(self._on_sniff_result)
         self._worker.sub_data_result.connect(self._on_sub_data_result)
         self._worker.pc_led_result.connect(self._on_pc_led_result)
         self._worker.env_result.connect(self._on_env_result)
@@ -219,6 +229,10 @@ class MainWindow(QMainWindow):
         self._slave_id.setValue(MAINBOARD_SLAVE_ID_DEFAULT)
         self._slave_id.setMinimumWidth(50)
         top_lay.addWidget(self._slave_id)
+        self._chk_direct_hpsb = QCheckBox("Direct HPSB (Slave 1)")
+        self._chk_direct_hpsb.setToolTip("체크 시 HPSB만 직결 테스트. Slave ID=1, FC05 coil 0/1/2 → RELAY1/2/3. 메인보드 경유 없음.")
+        self._chk_direct_hpsb.stateChanged.connect(self._on_direct_hpsb_changed)
+        top_lay.addWidget(self._chk_direct_hpsb)
         self._btn_connect = QPushButton("Connect")
         self._btn_connect.clicked.connect(self._do_connect)
         top_lay.addWidget(self._btn_connect)
@@ -309,7 +323,8 @@ class MainWindow(QMainWindow):
         row_env.addWidget(self._lbl_env_flags)
         row_env.addStretch()
         lay_env.addLayout(row_env)
-        btn_read_env = QPushButton("Read Sensor (5s auto)")
+        btn_read_env = QPushButton("Read Sensor")
+        btn_read_env.setToolTip("수동 1회 읽기. 5초 자동 읽기는 비활성화됨.")
         btn_read_env.clicked.connect(lambda: self.request_read_env.emit())
         lay_env.addWidget(btn_read_env)
         self._btn_read_env = btn_read_env
@@ -429,10 +444,30 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(card_log)
 
         self.setCentralWidget(central)
-        self.resize(880, 640)
+        # 실행 시 열리는 크기: 880×640 (가로가 세로보다 넓은 비율). 리사이즈는 자유롭게.
+        self._default_width = 880
+        self._default_height = 640
+        self.resize(self._default_width, self._default_height)
         self.setMinimumSize(720, 500)
+        self._first_show = True
 
         self._log.log_line.connect(self._on_log_line)
+
+    def showEvent(self, event: QShowEvent):
+        """첫 표시 시 880×640으로 열리도록 함 (저장된 창 크기 무시)."""
+        super().showEvent(event)
+        if self._first_show:
+            self._first_show = False
+            self.resize(self._default_width, self._default_height)
+
+    def _on_direct_hpsb_changed(self, state):
+        """Direct HPSB 체크 시 Slave ID=1 고정, 해제 시 메인보드 기본값(9) 복원."""
+        if state == Qt.CheckState.Checked.value:
+            self._slave_id.setValue(1)
+            self._slave_id.setEnabled(False)
+        else:
+            self._slave_id.setValue(MAINBOARD_SLAVE_ID_DEFAULT)
+            self._slave_id.setEnabled(not self._client.connected)
 
     def _tag_for_request(self, func: str, addr: int | str, count_or_value: int | str) -> str:
         """보드 태그: [MAIN], [HPSB], [LPSB1], [LPSB2], [LPSB3]. PC는 메인보드와만 통신하며, 메인보드가 UART2로 HPSB/LPSB 폴링한 결과를 보여줌."""
@@ -442,6 +477,8 @@ class MainWindow(QMainWindow):
             a = -1
         if a == SUB_SENSE_REG or a == SUB_COIL_STATUS_START or (func == "FC02" and 868 <= a <= 879):
             return "[HPSB][LPSB1][LPSB2][LPSB3]"
+        if func == "FC05" and 0 <= a <= 2:
+            return "[DIRECT]" if self._chk_direct_hpsb.isChecked() else "[HPSB]"  # Direct HPSB: one-click one-request
         if func == "FC05" and SUB_HPSB_COIL_BASE <= a < SUB_HPSB_COIL_BASE + 3:
             return "[HPSB]"
         if func == "FC05" and SUB_LPSB_COIL_BASE <= a < SUB_LPSB_COIL_BASE + 9:
@@ -466,6 +503,10 @@ class MainWindow(QMainWindow):
     def _on_response_log(self, ok: bool, exception_code: int | None):
         self._log.log_response(self._last_log_tag, ok, exception_code)
 
+    def _on_tx_frame_hex(self, msg: str):
+        """Direct HPSB FC05 시 실제 전송 프레임 hex 로그 (01 05 00 00 FF 00 CRC_L CRC_H 형식)."""
+        self._log.log_info(msg)
+
     def _on_log_line(self, line: str):
         self._log_lines.append(line)
         try:
@@ -485,32 +526,55 @@ class MainWindow(QMainWindow):
         self._btn_connect.setEnabled(not connected)
         self._btn_disconnect.setEnabled(connected)
         self._port_combo.setEnabled(not connected)
-        self._slave_id.setEnabled(not connected)
-        self._btn_read_di.setEnabled(connected)
-        self._btn_read_pc_led.setEnabled(connected)
-        self._btn_read_env.setEnabled(connected)
-        self._btn_read_sub.setEnabled(connected)
-        self._chk_auto_poll.setEnabled(connected)
+        self._slave_id.setEnabled(not connected and not self._chk_direct_hpsb.isChecked())
+        self._chk_direct_hpsb.setEnabled(not connected)
+        direct_mode = connected and self._chk_direct_hpsb.isChecked()
+        self._btn_read_di.setEnabled(connected and not direct_mode)
+        self._btn_read_pc_led.setEnabled(connected and not direct_mode)
+        self._btn_read_env.setEnabled(connected and not direct_mode)
+        self._btn_read_sub.setEnabled(connected and not direct_mode)
+        self._chk_auto_poll.setEnabled(connected and not self._chk_direct_hpsb.isChecked())
         for b in self._hpsb_btns:
             b.setEnabled(connected)
         for b in self._lpsb_select_btns:
-            b.setEnabled(connected)
+            b.setEnabled(connected and not direct_mode)
         for b in self._lpsb_ssr_btns:
-            b.setEnabled(connected)
+            b.setEnabled(connected and not direct_mode)
         for chk in self._relay_checks:
-            chk.setEnabled(connected)
-        self._btn_pc_on.setEnabled(connected)
-        self._btn_pc_reset.setEnabled(connected)
+            chk.setEnabled(connected and not direct_mode)
+        self._btn_pc_on.setEnabled(connected and not direct_mode)
+        self._btn_pc_reset.setEnabled(connected and not direct_mode)
         if connected:
             self._status_badge.setText("Connected")
             self._status_badge.setStyleSheet("color: #00c853; font-weight: bold; padding: 4px 8px;")
             self._seen_0xaa_since_connect = False
             self._modbus_fail_0xaa_hint_shown = False
-            self._raw_poll_timer.start()
-            self._env_poll_timer.start()
-            self._log.log_info("→ Read DI 버튼을 눌러 보드 응답을 확인하세요. (보드는 요청 받을 때만 응답 전송)")
+            self._log.set_raw_line_only(self._chk_direct_hpsb.isChecked())  # Direct HPSB: \r\n만 보고 한 줄씩 출력 (스테이지/긴 문자열용)
+            if self._chk_direct_hpsb.isChecked():
+                # Direct HPSB: no Modbus 자동 폴링. HPSB_TEST 등 보드→PC raw 수신 표시 시도
+                self._direct_hpsb_rx_total = 0
+                self._raw_poll_timer.start()
+                self._direct_diag_timer.start()
+                self._env_poll_timer.stop()
+                self._sub_poll_timer.stop()
+                self._sub_auto_poll = False
+                self._chk_auto_poll.setChecked(False)
+                self._log.log_info("→ [DIRECT] 모드: 자동 폴링 없음. RELAY1/2/3 클릭 시 FC05 1회만 전송.")
+                port = self._port_combo.currentText() if self._port_combo.currentIndex() >= 0 else ""
+                if self._client.can_read_raw():
+                    self._log.log_info("→ [DIRECT] 보드→PC 수신: 사용 가능. HPSB_TEST 문자열이 1초마다 로그에 표시됩니다.")
+                    self._log.log_info("→ 연결 후 약 3초(오프셋 수집) 뒤부터 '시각 | [RX] <MSG>MS=ms,HPSB_TEST,...' 한 줄씩 나옵니다.")
+                    self._log.log_info(f"→ 연결 포트: {port}")
+                else:
+                    self._log.log_info("→ [DIRECT] 보드→PC 수신: 이 툴에서 raw 수신 미지원. 터미널에서 screen ... 9600 로 확인하세요.")
+            else:
+                self._raw_poll_timer.start()
+                # self._env_poll_timer.start()
+                self._log.log_info("→ Read DI 버튼을 눌러 보드 응답을 확인하세요. (보드는 요청 받을 때만 응답 전송)")
         else:
+            self._log.set_raw_line_only(False)
             self._raw_poll_timer.stop()
+            self._direct_diag_timer.stop()
             self._env_poll_timer.stop()
             self._sub_poll_timer.stop()
             self._sub_auto_poll = False
@@ -534,12 +598,20 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Connection", "Select a valid port.")
             return
         try:
+            # Direct HPSB여도 기존처럼 ModbusSerialClient로 포트 열기 (아까 수신 됐을 때와 동일). raw_only는 수신 안 될 때만 시도.
+            raw_only = False
             ok, msg = self._client.connect(
-                port, baudrate=self._baud.value(), slave_id=self._slave_id.value()
+                port,
+                baudrate=self._baud.value(),
+                slave_id=self._slave_id.value(),
+                raw_only=raw_only,
             )
             if ok:
                 self._set_connected_ui(True)
-                self._log.log_tagged("[MAIN]", "Connect", port, self._baud.value(), "OK")
+                self._log.log_tagged("[MAIN]", "Connect", port, self._baud.value(), msg or "OK")
+                if raw_only:
+                    self._log.log_info("→ 직접 HPSB(raw_only): 시리얼만 열었습니다. 2초 수신 테스트 중…")
+                    QTimer.singleShot(300, lambda: self.request_sniff.emit())
                 if self._slave_id.value() != MAINBOARD_SLAVE_ID_DEFAULT:
                     self._log.log_info(f"경고: 메인보드 Slave ID는 {MAINBOARD_SLAVE_ID_DEFAULT}입니다. 현재 {self._slave_id.value()}이면 Read DI/Relay 응답이 없을 수 있습니다.")
             else:
@@ -559,9 +631,22 @@ class MainWindow(QMainWindow):
         self._log.log_tagged("[MAIN]", "Disconnect", "", "", "OK")
 
     def _poll_raw_rx(self):
-        """주기적으로 시리얼 버퍼에서 raw 수신 확인 (보드 0xAA 등)."""
+        """주기적으로 시리얼 버퍼에서 raw 수신 확인 (보드 0xAA, HPSB TEST 등)."""
         if self._client.connected:
             self.request_read_raw.emit()
+
+    def _on_direct_diag_tick(self):
+        """직접 HPSB 연결 시 3초마다: 수신이 한 번도 없으면 원인 분리용 안내."""
+        if not self._client.connected or not self._chk_direct_hpsb.isChecked():
+            return
+        if self._direct_hpsb_rx_total > 0:
+            return
+        port = self._port_combo.currentText() if self._port_combo.currentIndex() >= 0 else ""
+        self._log.log_info(
+            f"[직접 HPSB] 수신 0바이트. 포트={port} | "
+            "보드에 HPSB_TEST 펌웨어가 올라가 있고, 이 포트로 연결했는지 확인하세요. "
+            "다른 터미널(screen/cu)에서 같은 포트 9600으로 수신 테스트 권장."
+        )
 
     def _show_0xaa_mode_hint_if_needed(self, msg: str):
         """Modbus 실패 시 로그에 'No response'/'Unable to decode' 있고 0xAA를 받은 적 있으면 한 번만 팝업 안내."""
@@ -583,10 +668,31 @@ class MainWindow(QMainWindow):
             "그 다음 PC 툴에서 Disconnect 후 다시 Connect 하면 됩니다."
         )
 
+    def _on_sniff_result(self, bytes_list: list):
+        """연결 직후 2초 수신 테스트 결과. 0바이트면 포트/배선 점검 안내."""
+        n = len(bytes_list) if bytes_list else 0
+        if n > 0:
+            self._direct_hpsb_rx_total += n
+            try:
+                text = bytes(bytes_list[:200]).decode("ascii", errors="replace")
+                preview = repr(text[:80]) + ("…" if len(text) > 80 else "")
+            except Exception:
+                preview = " ".join(f"{b:02X}" for b in bytes_list[:40])
+            self._log.log_info(f"→ 2초 수신 테스트: {n}바이트 수신. 미리보기: {preview}")
+            self._log.log_raw_rx(bytes_list)
+        else:
+            port = self._port_combo.currentText() if self._port_combo.currentIndex() >= 0 else ""
+            self._log.log_info(
+                f"→ 2초 수신 테스트: 0바이트. 이 포트({port})로 HPSB 보드가 직접 연결되었는지 확인하세요. "
+                "터미널에서: python scripts/serial_receive_test.py <포트>"
+            )
+
     def _on_raw_bytes(self, bytes_list: list):
         """보드에서 보낸 raw 바이트를 로그에 표시."""
         if bytes_list and 0xAA in bytes_list:
             self._seen_0xaa_since_connect = True
+        if bytes_list and self._chk_direct_hpsb.isChecked():
+            self._direct_hpsb_rx_total += len(bytes_list)
         self._log.log_raw_rx(bytes_list)
 
     def _on_relay_toggle(self, ch: int, onoff: bool):
@@ -656,16 +762,26 @@ class MainWindow(QMainWindow):
             self._log.log_tagged(tag, "Write", "FC05/06", "-", "Response: Fail", msg)
             self._show_0xaa_mode_hint_if_needed(msg)
             if msg and ("No response" in msg or "0 received" in msg):
-                self._log.log_info("힌트: 메인보드 빌드에서 ENABLE_PC_TEST_AA_STREAM=0, USE_PC_TEST_UART1_SLAVE=1 인지 확인하세요. (0xAA 전용 모드면 Modbus 응답 없음)")
+                if self._chk_direct_hpsb.isChecked() or tag in ("[HPSB]", "[DIRECT]"):
+                    self._log.log_info(
+                        "힌트: Direct HPSB — PC가 HPSB와 연결된 직렬 포트인지 확인하세요. "
+                        "HPSB 전원, RS485(DE/배선), 보드 펌웨어(Modbus 슬레이브)를 점검하세요."
+                    )
+                else:
+                    self._log.log_info("힌트: 메인보드 빌드에서 ENABLE_PC_TEST_AA_STREAM=0, USE_PC_TEST_UART1_SLAVE=1 인지 확인하세요. (0xAA 전용 모드면 Modbus 응답 없음)")
 
     def _on_hpsb_relay_click(self, idx: int):
-        """HPSB RELAY 버튼: FC05 addr 898+idx, value=checked → Mainboard가 HPSB(slave 1)에 전달."""
+        """HPSB RELAY 버튼: Direct HPSB면 FC05 slave=1 coil=idx(0,1,2). 아니면 FC05 addr 898+idx → Mainboard 경유."""
         btn = self._hpsb_btns[idx]
         value = btn.isChecked()
         self._hpsb_strips[idx].set_state(value)
-        addr = SUB_HPSB_COIL_BASE + idx
-        self._log.log_info(f"[DEBUG] Button: HPSB RELAY{idx + 1} EN -> FC05 addr={addr} val={1 if value else 0}")
-        self.request_write_sub_coil.emit(addr, value)
+        if self._chk_direct_hpsb.isChecked():
+            self._log.log_info(f"[DEBUG] Button: HPSB RELAY{idx + 1} EN (Direct) -> FC05 slave=1 coil={idx} val={1 if value else 0}")
+            self.request_write_direct_hpsb_coil.emit(idx, value)
+        else:
+            addr = SUB_HPSB_COIL_BASE + idx
+            self._log.log_info(f"[DEBUG] Button: HPSB RELAY{idx + 1} EN -> FC05 addr={addr} val={1 if value else 0}")
+            self.request_write_sub_coil.emit(addr, value)
 
     def _on_lpsb_select(self, idx: int):
         """LPSB 2/3/4 선택. 하나만 선택되도록. 선택 시 해당 보드 데이터로 SSR/current 갱신."""
@@ -696,6 +812,8 @@ class MainWindow(QMainWindow):
         self.request_write_sub_coil.emit(addr, value)
 
     def _on_auto_poll_changed(self, state):
+        if self._chk_direct_hpsb.isChecked():
+            return  # Direct HPSB: auto poll disabled
         self._sub_auto_poll = state == Qt.CheckState.Checked
         if self._sub_auto_poll and self._client.connected:
             self._sub_poll_timer.start()

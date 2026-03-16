@@ -51,6 +51,8 @@ size_t ModbusRTU_BuildFC15Response(uint8_t *pdu, uint8_t slave_addr, uint16_t st
 size_t ModbusRTU_BuildFC16Response(uint8_t *pdu, uint8_t slave_addr, uint16_t start_addr, uint16_t num_regs);
 /* --- Slave: request parsers. Return 0 on success. --- */
 int ModbusRTU_ParseFC05Request(const uint8_t *frame, size_t len, uint16_t *coil_addr, uint8_t *value);
+/* --- Master: validate FC05 response (8 bytes). Returns 0 if valid. --- */
+int ModbusRTU_ValidateFC05Response(const uint8_t *frame, size_t len, uint8_t expected_slave);
 int ModbusRTU_ParseFC06Request(const uint8_t *frame, size_t len, uint16_t *reg_addr, uint16_t *value);
 int ModbusRTU_ParseFC15Request(const uint8_t *frame, size_t len, uint16_t *start_addr, uint16_t *num_coils, uint8_t *coil_bytes, size_t coil_byte_buf_size);
 int ModbusRTU_ParseFC16Request(const uint8_t *frame, size_t len, uint16_t *start_addr, uint16_t *num_regs, uint16_t *regs, size_t reg_buf_count);

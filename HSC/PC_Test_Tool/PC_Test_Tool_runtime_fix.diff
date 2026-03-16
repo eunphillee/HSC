@@ -1,0 +1,34 @@
+diff --git a/HSC/PC_Test_Tool/app/modbus_client.py b/HSC/PC_Test_Tool/app/modbus_client.py
+index 9d559ab..94c3a94 100644
+--- a/HSC/PC_Test_Tool/app/modbus_client.py
++++ b/HSC/PC_Test_Tool/app/modbus_client.py
+@@ -12,7 +12,7 @@ from .h2tech_map import (
+     CMD_ONOFF_START, CMD_ONOFF_COUNT,
+     CURRENT_START, CURRENT_COUNT,
+     DOOR_OPEN_1_COIL, DOOR_OPEN_2_COIL,
+-    VB_ONOFF_8_COIL, VB_ONOFF_12_COIL,
++    VB_ONOFF_8_COIL, VB_ONOFF_9_COIL, VB_ONOFF_10_COIL, VB_ONOFF_11_COIL, VB_ONOFF_12_COIL,
+     INVALID_COIL_899, INVALID_COIL_900,
+     MAIN_IO_ENABLED, MAIN_DI_REG, MAIN_DO_REG, MAIN_DI_COUNT, MAIN_DO_COUNT,
+     MAIN_SLAVE_ID_DEFAULT,
+diff --git a/HSC/PC_Test_Tool/app/ui_main.py b/HSC/PC_Test_Tool/app/ui_main.py
+index a045a19..283dada 100644
+--- a/HSC/PC_Test_Tool/app/ui_main.py
++++ b/HSC/PC_Test_Tool/app/ui_main.py
+@@ -189,6 +189,7 @@ class MainWindow(QMainWindow):
+         self.request_main_io_read.connect(self._worker.on_request_main_io_read, Qt.ConnectionType.QueuedConnection)
+ 
+     def _build_ui(self):
++        self._read_buttons = []
+         central = QWidget()
+         central.setStyleSheet("background-color: #1e1e1e;")
+         main_layout = QVBoxLayout(central)
+@@ -314,7 +315,7 @@ class MainWindow(QMainWindow):
+         btn_read_onoff = QPushButton("Read once")
+         btn_read_onoff.clicked.connect(self._read_onoff_once)
+         lay_a.addWidget(btn_read_onoff)
+-        self._read_buttons = [btn_read_onoff]
++        self._read_buttons.append(btn_read_onoff)
+         left_col.addWidget(card_a)
+ 
+         # Card B: Door sensors

@@ -1,6 +1,6 @@
 /**
  * @file modbus_cfg.h
- * @brief Modbus configuration (LPSB = Slave, address 2)
+ * @brief Modbus configuration (LPSB = Slave). Runtime address from ID_BIT1/2/3: 2=LPSB1, 4=LPSB2, 8=LPSB3.
  */
 #ifndef MODBUS_CFG_LPSB_H
 #define MODBUS_CFG_LPSB_H
@@ -12,6 +12,7 @@ extern "C" {
 #define MODBUS_MASTER         0
 #define MODBUS_SLAVE          1
 
+/* Default only; actual address set at init from ID_BIT pins (PB0/PB1/PB3). */
 #define MODBUS_SLAVE_ADDR     2
 #define MODBUS_UART           huart1
 #define MODBUS_DE_GPIO_PORT   RS485_DE_GPIO_Port

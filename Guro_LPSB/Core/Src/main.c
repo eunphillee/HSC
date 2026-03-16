@@ -245,7 +245,7 @@ static void MX_USART1_UART_Init(void)
 
   /* USER CODE END USART1_Init 1 */
   huart1.Instance = USART1;
-  huart1.Init.BaudRate = 115200;
+  huart1.Init.BaudRate = 9600;
   huart1.Init.WordLength = UART_WORDLENGTH_8B;
   huart1.Init.StopBits = UART_STOPBITS_1;
   huart1.Init.Parity = UART_PARITY_NONE;
@@ -281,12 +281,12 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOA, SSR1_EN_Pin|SSR2_EN_Pin|SSR3_EN_Pin|RS485_DE_Pin
-                          , GPIO_PIN_RESET);
+  /*Configure GPIO pin Output Level
+   * LED01~04 are LOW-active (LOW=ON, HIGH=OFF).
+   * Power-on policy for debug: LED01=ON, LED02/03/04=OFF.
+   */
+  HAL_GPIO_WritePin(GPIOA, SSR1_EN_Pin|SSR2_EN_Pin|SSR3_EN_Pin|RS485_DE_Pin, GPIO_PIN_RESET);
   HAL_GPIO_WritePin(GPIOA, LED04_Pin, GPIO_PIN_SET);
-
-  /*Configure GPIO pin Output Level (LOW active: LED01=ON(LOW), LED02/03/04=OFF(HIGH)) */
   HAL_GPIO_WritePin(GPIOB, LED01_Pin, GPIO_PIN_RESET);
   HAL_GPIO_WritePin(GPIOB, LED02_Pin|LED03_Pin, GPIO_PIN_SET);
 

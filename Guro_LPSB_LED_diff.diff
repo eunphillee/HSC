@@ -1,0 +1,358 @@
+diff --git a/Guro_LPSB/.cproject b/Guro_LPSB/.cproject
+index e58d503..90f9915 100644
+--- a/Guro_LPSB/.cproject
++++ b/Guro_LPSB/.cproject
+@@ -46,6 +46,10 @@
+ 									<listOptionValue builtIn="false" value="../Drivers/STM32F0xx_HAL_Driver/Inc/Legacy"/>
+ 									<listOptionValue builtIn="false" value="../Drivers/CMSIS/Device/ST/STM32F0xx/Include"/>
+ 									<listOptionValue builtIn="false" value="../Drivers/CMSIS/Include"/>
++									<listOptionValue builtIn="false" value="../Modbus/Inc"/>
++									<listOptionValue builtIn="false" value="../IO/Inc"/>
++									<listOptionValue builtIn="false" value="../Application/Inc"/>
++									<listOptionValue builtIn="false" value="${workspace_loc:/${ProjName}}/Application/Inc"/>
+ 								</option>
+ 								<inputType id="com.st.stm32cube.ide.mcu.gnu.managedbuild.tool.c.compiler.input.c.407348901" superClass="com.st.stm32cube.ide.mcu.gnu.managedbuild.tool.c.compiler.input.c"/>
+ 							</tool>
+@@ -74,6 +78,9 @@
+ 					<sourceEntries>
+ 						<entry flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name="Core"/>
+ 						<entry flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name="Drivers"/>
++						<entry flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name="Modbus"/>
++						<entry flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name="IO"/>
++						<entry flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name="Application"/>
+ 					</sourceEntries>
+ 				</configuration>
+ 			</storageModule>
+@@ -120,6 +127,10 @@
+ 									<listOptionValue builtIn="false" value="../Drivers/STM32F0xx_HAL_Driver/Inc/Legacy"/>
+ 									<listOptionValue builtIn="false" value="../Drivers/CMSIS/Device/ST/STM32F0xx/Include"/>
+ 									<listOptionValue builtIn="false" value="../Drivers/CMSIS/Include"/>
++									<listOptionValue builtIn="false" value="../Modbus/Inc"/>
++									<listOptionValue builtIn="false" value="../IO/Inc"/>
++									<listOptionValue builtIn="false" value="../Application/Inc"/>
++									<listOptionValue builtIn="false" value="${workspace_loc:/${ProjName}}/Application/Inc"/>
+ 								</option>
+ 								<inputType id="com.st.stm32cube.ide.mcu.gnu.managedbuild.tool.c.compiler.input.c.1556760656" superClass="com.st.stm32cube.ide.mcu.gnu.managedbuild.tool.c.compiler.input.c"/>
+ 							</tool>
+@@ -148,6 +159,9 @@
+ 					<sourceEntries>
+ 						<entry flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name="Core"/>
+ 						<entry flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name="Drivers"/>
++						<entry flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name="Modbus"/>
++						<entry flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name="IO"/>
++						<entry flags="VALUE_WORKSPACE_PATH|RESOLVED" kind="sourcePath" name="Application"/>
+ 					</sourceEntries>
+ 				</configuration>
+ 			</storageModule>
+@@ -168,4 +182,5 @@
+ 			<autodiscovery enabled="false" problemReportingEnabled="true" selectedProfileId=""/>
+ 		</scannerConfigBuildInfo>
+ 	</storageModule>
++	<storageModule moduleId="org.eclipse.cdt.make.core.buildtargets"/>
+ </cproject>
+\ No newline at end of file
+diff --git a/Guro_LPSB/Application/Inc/led_status.h b/Guro_LPSB/Application/Inc/led_status.h
+new file mode 100644
+index 0000000..24f4708
+--- /dev/null
++++ b/Guro_LPSB/Application/Inc/led_status.h
+@@ -0,0 +1,33 @@
++/**
++ * @file led_status.h
++ * @brief LPSB LED1~4: PWR always on, OUTPUT any-on (LPSB_IsAnyOutputActive), CURRENT/FAULT (normal/overcurrent/sensor), RS485 pulse/idle blink.
++ *        Call LED_Status_Tick_1ms() from 1ms periodic; set fault via LED_Status_SetCurrentFault(); RS485 from Modbus.
++ *        In led_status.c: LED3_NORMAL_SOLID 1 = NORMAL solid ON, 0 = NORMAL 1Hz blink (compile-time).
++ */
++#ifndef LED_STATUS_H
++#define LED_STATUS_H
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++void LED_Status_Init(void);
++void LED_Status_Tick_1ms(void);
++
++/** Current/fault state for LED3 (flag; do not toggle LED in ISR) */
++typedef enum {
++	LED_CURRENT_NORMAL = 0,
++	LED_CURRENT_OVERCURRENT,
++	LED_CURRENT_SENSOR_ERROR
++} LED_CurrentFault_t;
++
++void LED_Status_SetCurrentFault(LED_CurrentFault_t fault);
++
++/** Call on valid RS485 RX or TX (e.g. from Modbus poll context, not ISR) */
++void LED_Status_OnRS485Activity(void);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif /* LED_STATUS_H */
+diff --git a/Guro_LPSB/Application/Src/led_status.c b/Guro_LPSB/Application/Src/led_status.c
+new file mode 100644
+index 0000000..560a330
+--- /dev/null
++++ b/Guro_LPSB/Application/Src/led_status.c
+@@ -0,0 +1,155 @@
++/**
++ * @file led_status.c
++ * @brief LPSB LED policy: LED1(PWR)=always ON; LED2(OUTPUT)=LPSB_IsAnyOutputActive(); LED3(CURRENT/FAULT)=normal/4Hz/2-blink; LED4(RS485)=30ms pulse or 1Hz idle.
++ *        Board: LED01~04 LOW active (LOW=ON, HIGH=OFF). 1ms tick; flag-based, no LED toggle in ISR.
++ */
++#include "led_status.h"
++#include "main.h"
++#include "io_map.h"
++
++#define RS485_PULSE_MS           30u
++#define RS485_IDLE_THRESHOLD_MS  3000u   /* 1Hz blink only when no comm for > 3s */
++#define RS485_1HZ_HALF_MS       500u
++#define CURRENT_4HZ_HALF_MS     125u
++#define LED3_1HZ_HALF_MS        500u
++/* NORMAL: 1=solid ON, 0=1Hz blink (compile-time option) */
++#ifndef LED3_NORMAL_SOLID
++#define LED3_NORMAL_SOLID       1
++#endif
++
++/* LED01~04: LOW active */
++#define LED_PWR_ON()    HAL_GPIO_WritePin(LED01_GPIO_Port, LED01_Pin, GPIO_PIN_RESET)
++#define LED_PWR_OFF()   HAL_GPIO_WritePin(LED01_GPIO_Port, LED01_Pin, GPIO_PIN_SET)
++#define LED_OUTPUT_ON()  HAL_GPIO_WritePin(LED02_GPIO_Port, LED02_Pin, GPIO_PIN_RESET)
++#define LED_OUTPUT_OFF() HAL_GPIO_WritePin(LED02_GPIO_Port, LED02_Pin, GPIO_PIN_SET)
++#define LED_CUR_ON()    HAL_GPIO_WritePin(LED03_GPIO_Port, LED03_Pin, GPIO_PIN_RESET)
++#define LED_CUR_OFF()   HAL_GPIO_WritePin(LED03_GPIO_Port, LED03_Pin, GPIO_PIN_SET)
++#define LED_RS485_ON()  HAL_GPIO_WritePin(LED04_GPIO_Port, LED04_Pin, GPIO_PIN_RESET)
++#define LED_RS485_OFF() HAL_GPIO_WritePin(LED04_GPIO_Port, LED04_Pin, GPIO_PIN_SET)
++
++static uint32_t last_tick;
++
++/* LED4(RS485): last_comm_tick_ms is updated only in LED_Status_OnRS485Activity(). 1Hz blink only when (now - last_comm_tick_ms) > 3000. */
++static uint32_t last_comm_tick_ms;
++static uint16_t rs485_pulse_ms;
++
++/* LED3(CURRENT/FAULT): state machine phase, reset on fault change */
++static volatile LED_CurrentFault_t current_fault = LED_CURRENT_NORMAL;
++static LED_CurrentFault_t prev_fault = (LED_CurrentFault_t)-1;
++static uint16_t cur_4hz_phase_ms;
++static uint16_t cur_1hz_phase_ms;   /* for NORMAL when LED3_NORMAL_SOLID==0 */
++static uint16_t sensor_phase_ms;    /* 0..1000 ms cycle for 2-blink repeat */
++
++void LED_Status_Init(void)
++{
++	last_tick = HAL_GetTick();
++	last_comm_tick_ms = last_tick;
++	rs485_pulse_ms = 0;
++	current_fault = LED_CURRENT_NORMAL;
++	prev_fault = (LED_CurrentFault_t)-1;
++	cur_4hz_phase_ms = 0;
++	cur_1hz_phase_ms = 0;
++	sensor_phase_ms = 0;
++
++	LED_OUTPUT_OFF();
++	LED_CUR_ON();
++	LED_RS485_OFF();
++	LED_PWR_ON();
++}
++
++void LED_Status_SetCurrentFault(LED_CurrentFault_t fault)
++{
++	current_fault = fault;
++}
++
++void LED_Status_OnRS485Activity(void)
++{
++	rs485_pulse_ms = RS485_PULSE_MS;
++	last_comm_tick_ms = HAL_GetTick();
++}
++
++void LED_Status_Tick_1ms(void)
++{
++	uint32_t now = HAL_GetTick();
++	uint32_t elapsed = (now >= last_tick) ? (now - last_tick) : 0;
++	if (elapsed == 0) return;
++	last_tick = now;
++	if (elapsed > 100u) elapsed = 100u;
++
++	/* ----- LED1 (PWR): always ON ----- */
++	LED_PWR_ON();
++
++	/* ----- LED2 (OUTPUT): LPSB_IsAnyOutputActive() (SSR1/2/3; later can use actual output when protection/force-off added) ----- */
++	if (LPSB_IsAnyOutputActive())
++		LED_OUTPUT_ON();
++	else
++		LED_OUTPUT_OFF();
++
++	/* ----- LED3 (CURRENT/FAULT): state machine, phase reset on fault change ----- */
++	if (current_fault != prev_fault) {
++		prev_fault = current_fault;
++		cur_4hz_phase_ms = 0;
++		cur_1hz_phase_ms = 0;
++		sensor_phase_ms = 0;
++	}
++
++	switch (current_fault) {
++	case LED_CURRENT_NORMAL:
++#if LED3_NORMAL_SOLID
++		LED_CUR_ON();
++#else
++		cur_1hz_phase_ms += (uint16_t)elapsed;
++		if (cur_1hz_phase_ms >= LED3_1HZ_HALF_MS * 2u)
++			cur_1hz_phase_ms -= LED3_1HZ_HALF_MS * 2u;
++		if (cur_1hz_phase_ms < LED3_1HZ_HALF_MS)
++			LED_CUR_ON();
++		else
++			LED_CUR_OFF();
++#endif
++		break;
++	case LED_CURRENT_OVERCURRENT:
++		cur_4hz_phase_ms += (uint16_t)elapsed;
++		if (cur_4hz_phase_ms >= CURRENT_4HZ_HALF_MS * 2u)
++			cur_4hz_phase_ms -= CURRENT_4HZ_HALF_MS * 2u;
++		if (cur_4hz_phase_ms < CURRENT_4HZ_HALF_MS)
++			LED_CUR_ON();
++		else
++			LED_CUR_OFF();
++		break;
++	case LED_CURRENT_SENSOR_ERROR:
++		sensor_phase_ms += (uint16_t)elapsed;
++		if (sensor_phase_ms >= 1000u)
++			sensor_phase_ms -= 1000u;
++		if (sensor_phase_ms < 125u || (sensor_phase_ms >= 250u && sensor_phase_ms < 375u))
++			LED_CUR_ON();
++		else
++			LED_CUR_OFF();
++		break;
++	default:
++		LED_CUR_ON();
++		break;
++	}
++
++	/* ----- LED4 (RS485): priority 1) 30ms pulse ON, 2) if (now - last_comm_tick_ms) > 3000 then 1Hz blink, 3) else OFF ----- */
++	if (rs485_pulse_ms > 0) {
++		if (rs485_pulse_ms <= elapsed)
++			rs485_pulse_ms = 0;
++		else
++			rs485_pulse_ms -= (uint16_t)elapsed;
++	}
++
++	if (rs485_pulse_ms > 0) {
++		LED_RS485_ON();
++	} else {
++		uint32_t idle_ms = (now >= last_comm_tick_ms) ? (now - last_comm_tick_ms) : 0;
++		if (idle_ms > RS485_IDLE_THRESHOLD_MS) {
++			uint32_t t = (idle_ms - RS485_IDLE_THRESHOLD_MS) % (RS485_1HZ_HALF_MS * 2u);
++			if (t < RS485_1HZ_HALF_MS)
++				LED_RS485_ON();
++			else
++				LED_RS485_OFF();
++		} else {
++			LED_RS485_OFF();
++		}
++	}
++}
+diff --git a/Guro_LPSB/Core/Src/main.c b/Guro_LPSB/Core/Src/main.c
+index 02655ee..88d5250 100644
+--- a/Guro_LPSB/Core/Src/main.c
++++ b/Guro_LPSB/Core/Src/main.c
+@@ -21,7 +21,8 @@
+ 
+ /* Private includes ----------------------------------------------------------*/
+ /* USER CODE BEGIN Includes */
+-
++#include "led_status.h"
++#include "modbus_slave.h"
+ /* USER CODE END Includes */
+ 
+ /* Private typedef -----------------------------------------------------------*/
+@@ -94,7 +95,8 @@ int main(void)
+   MX_USART1_UART_Init();
+   MX_ADC_Init();
+   /* USER CODE BEGIN 2 */
+-
++  ModbusSlave_Init();
++  LED_Status_Init();
+   /* USER CODE END 2 */
+ 
+   /* Infinite loop */
+@@ -104,6 +106,8 @@ int main(void)
+     /* USER CODE END WHILE */
+ 
+     /* USER CODE BEGIN 3 */
++    LED_Status_Tick_1ms();
++    ModbusSlave_Poll();
+   }
+   /* USER CODE END 3 */
+ }
+@@ -279,10 +283,12 @@ static void MX_GPIO_Init(void)
+ 
+   /*Configure GPIO pin Output Level */
+   HAL_GPIO_WritePin(GPIOA, SSR1_EN_Pin|SSR2_EN_Pin|SSR3_EN_Pin|RS485_DE_Pin
+-                          |LED04_Pin, GPIO_PIN_RESET);
++                          , GPIO_PIN_RESET);
++  HAL_GPIO_WritePin(GPIOA, LED04_Pin, GPIO_PIN_SET);
+ 
+-  /*Configure GPIO pin Output Level */
+-  HAL_GPIO_WritePin(GPIOB, LED01_Pin|LED02_Pin|LED03_Pin, GPIO_PIN_RESET);
++  /*Configure GPIO pin Output Level (LOW active: LED01=ON(LOW), LED02/03/04=OFF(HIGH)) */
++  HAL_GPIO_WritePin(GPIOB, LED01_Pin, GPIO_PIN_RESET);
++  HAL_GPIO_WritePin(GPIOB, LED02_Pin|LED03_Pin, GPIO_PIN_SET);
+ 
+   /*Configure GPIO pins : SSR1_EN_Pin SSR2_EN_Pin SSR3_EN_Pin LED04_Pin */
+   GPIO_InitStruct.Pin = SSR1_EN_Pin|SSR2_EN_Pin|SSR3_EN_Pin|LED04_Pin;
+diff --git a/Guro_LPSB/IO/Inc/io_map.h b/Guro_LPSB/IO/Inc/io_map.h
+index 73419b2..a461cc7 100644
+--- a/Guro_LPSB/IO/Inc/io_map.h
++++ b/Guro_LPSB/IO/Inc/io_map.h
+@@ -64,6 +64,9 @@ uint8_t IO_LPSB_ReadCoil(uint16_t idx);
+ void    IO_LPSB_ReadAllDiscrete(uint8_t *bits);
+ void    IO_LPSB_ReadAllCoils(uint8_t *bits);
+ 
++/** @return 1 if any of SSR1/SSR2/SSR3 (channel 0,1,2) output is ON, 0 otherwise. For LED2. */
++uint8_t LPSB_IsAnyOutputActive(void);
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/Guro_LPSB/IO/Src/io_map.c b/Guro_LPSB/IO/Src/io_map.c
+index ddf6376..a916f38 100644
+--- a/Guro_LPSB/IO/Src/io_map.c
++++ b/Guro_LPSB/IO/Src/io_map.c
+@@ -49,3 +49,8 @@ void IO_LPSB_ReadAllCoils(uint8_t *bits)
+     for (uint16_t i = 0; i < COIL_COUNT; i++)
+         bits[i] = IO_LPSB_ReadCoil(i);
+ }
++
++uint8_t LPSB_IsAnyOutputActive(void)
++{
++    return IO_LPSB_ReadCoil(LPSB_COIL_SSR1) || IO_LPSB_ReadCoil(LPSB_COIL_SSR2) || IO_LPSB_ReadCoil(LPSB_COIL_SSR3);
++}
+diff --git a/Guro_LPSB/Modbus/Src/modbus_slave.c b/Guro_LPSB/Modbus/Src/modbus_slave.c
+index 133bfee..8ed7035 100644
+--- a/Guro_LPSB/Modbus/Src/modbus_slave.c
++++ b/Guro_LPSB/Modbus/Src/modbus_slave.c
+@@ -7,6 +7,7 @@
+ #include "modbus_cfg.h"
+ #include "modbus_table.h"
+ #include "io_map.h"
++#include "led_status.h"
+ #include "main.h"
+ #include <string.h>
+ 
+@@ -33,6 +34,7 @@ static void send_response(uint8_t *pdu, size_t pdu_len)
+     set_de_tx();
+     HAL_UART_Transmit(&MODBUS_UART, pdu, (uint16_t)(pdu_len + 2), 100);
+     set_de_rx();
++    LED_Status_OnRS485Activity();
+ }
+ 
+ static void process_frame(void)
+@@ -41,6 +43,8 @@ static void process_frame(void)
+     if (rx_buf[0] != MODBUS_SLAVE_ADDR) return;
+     if (ModbusRTU_CRC16Check(rx_buf, rx_len) != 0) return;
+ 
++    LED_Status_OnRS485Activity();  /* valid RX */
++
+     uint8_t fc = rx_buf[1];
+     uint8_t tx_pdu[64];
+     size_t tx_len = 0;

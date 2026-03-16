@@ -1,0 +1,206 @@
+diff --git a/Guro_Mainboard/Application/Inc/app_config.h b/Guro_Mainboard/Application/Inc/app_config.h
+index 9971165..c8d4ec9 100644
+--- a/Guro_Mainboard/Application/Inc/app_config.h
++++ b/Guro_Mainboard/Application/Inc/app_config.h
+@@ -69,4 +69,9 @@
+ #define SYSTEM_CONFIG_BOOT_LOG_FACTORY_RESET  0
+ #endif
+ 
++/* 4x3000~3002 FC03/FC06 접근 시 디버그 로그: SYSCFG READ id= baud_code= / SYSCFG WRITE reg= value= result= */
++#ifndef SYSCFG_MODBUS_DEBUG_LOG
++#define SYSCFG_MODBUS_DEBUG_LOG  0
++#endif
++
+ #endif /* APP_CONFIG_H */
+diff --git a/Guro_Mainboard/Application/Inc/system_config.h b/Guro_Mainboard/Application/Inc/system_config.h
+index 947bdf3..cae9bcf 100644
+--- a/Guro_Mainboard/Application/Inc/system_config.h
++++ b/Guro_Mainboard/Application/Inc/system_config.h
+@@ -96,7 +96,13 @@ void SystemConfig_LogSkipSave(void);
+ /** Weak: override to log "CFG factory reset done" (when SYSTEM_CONFIG_BOOT_LOG_FACTORY_RESET=1). */
+ void SystemConfig_LogFactoryResetDone(void);
+ 
+-/* ---------- Modbus reserved registers (향후 PC 툴에서 설정 변경 예정) ----------
++/** SYSCFG debug log (when SYSCFG_MODBUS_DEBUG_LOG=1). FC03 read 3000~3002 시 id, baud_code 출력. */
++void UpstreamSlave_LogSyscfgRead(uint16_t id, uint16_t baud_code);
++
++/** SYSCFG debug log. FC06 write 3000/3001/3002 시 reg, value, result(1=OK 0=ERR) 출력. */
++void UpstreamSlave_LogSyscfgWrite(uint16_t reg, uint16_t value, int result_ok);
++
++/* ---------- Modbus system config registers (4x3000~3002 구현 완료) ----------
+  * Holding registers; write 동작은 추후 구현.
+  * 4x3000 : slave_id (1~247)
+  * 4x3001 : baudrate code (0=9600, 1=19200, 2=38400, 3=57600, 4=115200)
+diff --git a/Guro_Mainboard/Application/Src/system_config.c b/Guro_Mainboard/Application/Src/system_config.c
+index af9b8af..aa53988 100644
+--- a/Guro_Mainboard/Application/Src/system_config.c
++++ b/Guro_Mainboard/Application/Src/system_config.c
+@@ -241,10 +241,45 @@ __attribute__((weak)) void SystemConfig_LogSkipSave(void)
+ 	/* Override to log "CFG unchanged, skip save" e.g. via UART. */
+ }
+ 
++#if SYSTEM_CONFIG_BOOT_LOG_FACTORY_RESET
++void SystemConfig_LogFactoryResetDone(void)
++{
++	extern UART_HandleTypeDef huart1;
++	const char *msg = "CFG factory reset done\r\n";
++	(void)HAL_UART_Transmit(&huart1, (const uint8_t *)msg, (uint16_t)strlen(msg), 100);
++}
++#else
+ __attribute__((weak)) void SystemConfig_LogFactoryResetDone(void)
+ {
+ 	/* Override to log "CFG factory reset done" e.g. via UART. */
+ }
++#endif
++
++#ifndef SYSCFG_MODBUS_DEBUG_LOG
++#define SYSCFG_MODBUS_DEBUG_LOG  0
++#endif
++#if SYSCFG_MODBUS_DEBUG_LOG
++void UpstreamSlave_LogSyscfgRead(uint16_t id, uint16_t baud_code)
++{
++	extern UART_HandleTypeDef huart1;
++	char buf[64];
++	int n = snprintf(buf, sizeof(buf), "SYSCFG READ id=%u baud_code=%u\r\n", (unsigned)id, (unsigned)baud_code);
++	if (n > 0)
++		(void)HAL_UART_Transmit(&huart1, (uint8_t *)buf, (uint16_t)n, 100);
++}
++void UpstreamSlave_LogSyscfgWrite(uint16_t reg, uint16_t value, int result_ok)
++{
++	extern UART_HandleTypeDef huart1;
++	char buf[64];
++	int n = snprintf(buf, sizeof(buf), "SYSCFG WRITE reg=%u value=%u result=%s\r\n",
++	                 (unsigned)reg, (unsigned)value, result_ok ? "OK" : "ERR");
++	if (n > 0)
++		(void)HAL_UART_Transmit(&huart1, (uint8_t *)buf, (uint16_t)n, 100);
++}
++#else
++void UpstreamSlave_LogSyscfgRead(uint16_t id, uint16_t baud_code) { (void)id; (void)baud_code; }
++void UpstreamSlave_LogSyscfgWrite(uint16_t reg, uint16_t value, int result_ok) { (void)reg; (void)value; (void)result_ok; }
++#endif
+ 
+ __attribute__((weak)) void SystemConfig_LogCurrent(const system_config_t *cfg)
+ {
+diff --git a/Guro_Mainboard/Gateway/Src/upstream_slave_h2tech.c b/Guro_Mainboard/Gateway/Src/upstream_slave_h2tech.c
+index 18b4474..8ad0c84 100644
+--- a/Guro_Mainboard/Gateway/Src/upstream_slave_h2tech.c
++++ b/Guro_Mainboard/Gateway/Src/upstream_slave_h2tech.c
+@@ -12,6 +12,7 @@
+ #include "reset_reason.h"
+ #include "bsp_gpio.h"
+ #include "system_config.h"
++#include "app_config.h"
+ 
+ #define EX_ILLEGAL_FUNCTION  0x01
+ #define EX_ILLEGAL_DATA_ADDR 0x02
+@@ -226,6 +227,9 @@ static int handle_fc03(uint16_t start_addr, uint16_t count, const void *p_agg,
+             response[6] = 0;
+             response[7] = 0;  /* 4x3002 read: always 0 */
+         }
++#if SYSCFG_MODBUS_DEBUG_LOG
++        UpstreamSlave_LogSyscfgRead(r0, r1);
++#endif
+         return (int)(2 + count * 2u);
+     }
+ 
+@@ -315,6 +319,9 @@ static int handle_fc06(uint16_t start_addr, const uint8_t *write_data,
+     if (start_addr == SYSCFG_MODBUS_SLAVE_ID_REG) {
+         const system_config_t *cur = SystemConfig_Get();
+         if (!cur || value < SYSTEM_CONFIG_SLAVE_ID_MIN || value > SYSTEM_CONFIG_SLAVE_ID_MAX) {
++#if SYSCFG_MODBUS_DEBUG_LOG
++            UpstreamSlave_LogSyscfgWrite(SYSCFG_MODBUS_SLAVE_ID_REG, value, 0);
++#endif
+             response[0] = 0x86;
+             response[1] = EX_ILLEGAL_DATA_VAL;
+             return 2;
+@@ -322,10 +329,16 @@ static int handle_fc06(uint16_t start_addr, const uint8_t *write_data,
+         system_config_t cfg = *cur;
+         cfg.slave_id = (uint8_t)(value & 0xFF);
+         if (SystemConfig_Save(&cfg) != 0) {
++#if SYSCFG_MODBUS_DEBUG_LOG
++            UpstreamSlave_LogSyscfgWrite(SYSCFG_MODBUS_SLAVE_ID_REG, value, 0);
++#endif
+             response[0] = 0x86;
+             response[1] = EX_ILLEGAL_DATA_VAL;
+             return 2;
+         }
++#if SYSCFG_MODBUS_DEBUG_LOG
++        UpstreamSlave_LogSyscfgWrite(SYSCFG_MODBUS_SLAVE_ID_REG, value, 1);
++#endif
+         response[0] = 0x06;
+         response[1] = (uint8_t)(start_addr >> 8);
+         response[2] = (uint8_t)(start_addr & 0xFF);
+@@ -334,10 +347,14 @@ static int handle_fc06(uint16_t start_addr, const uint8_t *write_data,
+         return 6;
+     }
+ 
+-    /* 4x3001: baudrate code (0~4) -> EEPROM save. UART baud는 재부팅 후 적용. */
++    /* 4x3001: baudrate code (0~4) -> EEPROM save only.
++     * 보드레이트는 즉시 적용되지 않음. 다음 재부팅 시 main.c에서 Load 후 huart1.Init.BaudRate 적용. */
+     if (start_addr == SYSCFG_MODBUS_BAUDRATE_CODE_REG) {
+         const system_config_t *cur = SystemConfig_Get();
+         if (!cur || value > 4u) {
++#if SYSCFG_MODBUS_DEBUG_LOG
++            UpstreamSlave_LogSyscfgWrite(SYSCFG_MODBUS_BAUDRATE_CODE_REG, value, 0);
++#endif
+             response[0] = 0x86;
+             response[1] = EX_ILLEGAL_DATA_VAL;
+             return 2;
+@@ -346,10 +363,16 @@ static int handle_fc06(uint16_t start_addr, const uint8_t *write_data,
+         system_config_t cfg = *cur;
+         cfg.baudrate = baud;
+         if (SystemConfig_Save(&cfg) != 0) {
++#if SYSCFG_MODBUS_DEBUG_LOG
++            UpstreamSlave_LogSyscfgWrite(SYSCFG_MODBUS_BAUDRATE_CODE_REG, value, 0);
++#endif
+             response[0] = 0x86;
+             response[1] = EX_ILLEGAL_DATA_VAL;
+             return 2;
+         }
++#if SYSCFG_MODBUS_DEBUG_LOG
++        UpstreamSlave_LogSyscfgWrite(SYSCFG_MODBUS_BAUDRATE_CODE_REG, value, 1);
++#endif
+         response[0] = 0x06;
+         response[1] = (uint8_t)(start_addr >> 8);
+         response[2] = (uint8_t)(start_addr & 0xFF);
+@@ -361,15 +384,24 @@ static int handle_fc06(uint16_t start_addr, const uint8_t *write_data,
+     /* 4x3002: factory reset command. value=1 -> SystemConfig_FactoryReset() */
+     if (start_addr == SYSCFG_MODBUS_FACTORY_RESET_REG) {
+         if (value != 1u) {
++#if SYSCFG_MODBUS_DEBUG_LOG
++            UpstreamSlave_LogSyscfgWrite(SYSCFG_MODBUS_FACTORY_RESET_REG, value, 0);
++#endif
+             response[0] = 0x86;
+             response[1] = EX_ILLEGAL_DATA_VAL;
+             return 2;
+         }
+         if (SystemConfig_FactoryReset() != 0) {
++#if SYSCFG_MODBUS_DEBUG_LOG
++            UpstreamSlave_LogSyscfgWrite(SYSCFG_MODBUS_FACTORY_RESET_REG, value, 0);
++#endif
+             response[0] = 0x86;
+             response[1] = EX_ILLEGAL_DATA_VAL;
+             return 2;
+         }
++#if SYSCFG_MODBUS_DEBUG_LOG
++        UpstreamSlave_LogSyscfgWrite(SYSCFG_MODBUS_FACTORY_RESET_REG, value, 1);
++#endif
+         response[0] = 0x06;
+         response[1] = (uint8_t)(start_addr >> 8);
+         response[2] = (uint8_t)(start_addr & 0xFF);
+diff --git a/Guro_Mainboard/docs/EEPROM_SYSTEM_CONFIG.md b/Guro_Mainboard/docs/EEPROM_SYSTEM_CONFIG.md
+index 56b1f62..33c2ea1 100644
+--- a/Guro_Mainboard/docs/EEPROM_SYSTEM_CONFIG.md
++++ b/Guro_Mainboard/docs/EEPROM_SYSTEM_CONFIG.md
+@@ -65,8 +65,10 @@
+ - **FC03**: start=3000, count=1~3 → [slave_id], [slave_id, baudrate_code], [slave_id, baudrate_code, 0].
+ - **FC06**: 단일 레지스터 쓰기. 성공 시 normal write response. 실패 시 0x03.
+ - **baudrate code**: 0=9600, 1=19200, 2=38400, 3=57600, 4=115200.
+-- **UART baud 적용**: 저장 즉시가 아닌 **다음 부팅 시** main.c에서 Load 후 huart1.Init.BaudRate 적용. 통신 중 재설정을 피하기 위한 안전 방식.
++- **UART baud 적용**: 저장 즉시가 아닌 **다음 부팅 시** main.c에서 Load 후 huart1.Init.BaudRate 적용. 통신 중 재설정을 피하기 위한 안전 방식. (코드 주석: upstream_slave_h2tech.c 4x3001 처리부에도 동일 내용 명시)
+ - 부팅 로그 / UART 로그 옵션(`SYSTEM_CONFIG_BOOT_LOG` 등)으로 변경 결과 확인 가능.
++- **SYSCFG_MODBUS_DEBUG_LOG** (app_config.h): 1로 설정 시 FC03 read 3000~3002 → "SYSCFG READ id=%u baud_code=%u", FC06 write → "SYSCFG WRITE reg=%u value=%u result=OK/ERR" 한 줄씩 UART1 출력.
++- **SYSTEM_CONFIG_BOOT_LOG_FACTORY_RESET**: 1로 설정 시 Factory reset 직후 "CFG factory reset done" 한 줄 UART1 출력 (system_config.c에서 구현).
+ 
+ ---
+ 

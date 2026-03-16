@@ -6,6 +6,7 @@
  *     LED2 = SSR1 (coil 0) status, LED3 = SSR2 (coil 1), LED4 = SSR3 (coil 2).
  *   When LED_DIAG_COMM_OUTPUT==0: LED2=any output, LED3=current/fault, LED4=RS485.
  *   Board: LED01~04 LOW active (LOW=ON, HIGH=OFF). SSR outputs: active-high (GPIO_SET=ON).
+ *   Design: simplest for debugging / visual verification first; not production-polish.
  */
 #include "led_status.h"
 #include "main.h"

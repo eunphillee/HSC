@@ -1,0 +1,199 @@
+diff --git a/Guro_Mainboard/Application/Inc/upstream_pc_protocol.h b/Guro_Mainboard/Application/Inc/upstream_pc_protocol.h
+--- a/Guro_Mainboard/Application/Inc/upstream_pc_protocol.h
++++ b/Guro_Mainboard/Application/Inc/upstream_pc_protocol.h
+@@ -18,7 +18,7 @@ extern "C" {
+ #define UPSTREAM_TX_BUF_SIZE  128
+ 
+ void UpstreamPC_Init(void);
+-void UpstreamPC_Poll(void);
++void UpstreamPC_Poll(const aggregated_status_t *agg);
+ int  UpstreamPC_SendStatus(const aggregated_status_t *status);
+ 
+ typedef void (*upstream_cmd_cb_t)(uint8_t cmd, const uint8_t *data, uint8_t len);
+@@ -27,6 +27,9 @@ void UpstreamPC_SetCommandCallback(upstream_cmd_cb_t cb);
+ void UpstreamPC_UART_RxEventCallback(uint16_t Size);
+ void UpstreamPC_TxCpltCallback(void);
+ 
++/** Optional debug: get invalid frame counts (length / CRC). */
++void UpstreamPC_GetInvalidCounts(uint32_t *p_len, uint32_t *p_crc);
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/Guro_Mainboard/Application/Src/upstream_pc_protocol.c b/Guro_Mainboard/Application/Src/upstream_pc_protocol.c
+--- a/Guro_Mainboard/Application/Src/upstream_pc_protocol.c
++++ b/Guro_Mainboard/Application/Src/upstream_pc_protocol.c
+@@ -1,20 +1,40 @@
+ /**
+  * @file upstream_pc_protocol.c
+- * @brief USART2 upstream: ReceiveToIdle_IT, frame parser, non-blocking TX.
++ * @brief USART2 upstream: ring-buffer RX, 3.5char frame boundary, Modbus RTU slave (ID 9) + STX/ETX.
++ *        RTU frame end = 4ms silence; FC-based expected length; TX guard 2ms after response.
+  */
+ #include "upstream_pc_protocol.h"
+ #include "main.h"
+ #include "led_status.h"
++#include "modbus_rtu.h"
++#include "upstream_slave_h2tech.h"
+ #include <string.h>
++#include <stdio.h>
++
++#define UPSTREAM_MODBUS_SLAVE_ID  9
++#define MODBUS_RESP_BUF_SIZE     (1 + 64 + 2)
++#define RX_RING_SIZE             256
++#define FRAME_END_MS             4    /* 3.5 char time @ 9600 bps */
++#define TX_GUARD_MS              2
++#define UPSTREAM_DEBUG_LOG       0    /* 1 = hex + CRC + FC/addr log */
+ 
+ extern UART_HandleTypeDef huart2;
+ 
+ static uint8_t rx_buf[UPSTREAM_RX_BUF_SIZE];
+ static uint8_t tx_buf[UPSTREAM_TX_BUF_SIZE];
+-static volatile uint8_t rx_ready;
++static uint8_t rx_accum[RX_RING_SIZE];
++static volatile uint16_t rx_accum_len;
++static volatile uint32_t last_rx_tick;
+ static uint8_t tx_busy;
+ static upstream_cmd_cb_t cmd_cb;
++static uint32_t invalid_len_count;
++static uint32_t invalid_crc_count;
++#if UPSTREAM_DEBUG_LOG
++__attribute__((weak)) void UpstreamPC_Log(const char *msg, int len) { (void)msg; (void)len; }
++#endif
+ 
+ void UpstreamPC_Init(void)
+ {
+-	rx_ready = 0;
++	rx_accum_len = 0;
++	last_rx_tick = 0;
+ 	tx_busy = 0;
+ 	cmd_cb = NULL;
++	invalid_len_count = 0;
++	invalid_crc_count = 0;
+ 	(void)HAL_UARTEx_ReceiveToIdle_IT(&huart2, rx_buf, UPSTREAM_RX_BUF_SIZE);
+ }
+ 
+ void UpstreamPC_UART_RxEventCallback(uint16_t Size)
+ {
+-	if (Size > 0 && Size <= UPSTREAM_RX_BUF_SIZE)
+-		rx_ready = (uint8_t)Size;
++	if (Size == 0 || Size > UPSTREAM_RX_BUF_SIZE) return;
++	uint32_t now = HAL_GetTick();
++	if ((uint16_t)(rx_accum_len + Size) <= RX_RING_SIZE) {
++		memcpy(rx_accum + rx_accum_len, rx_buf, (size_t)Size);
++		rx_accum_len += (uint16_t)Size;
++	} else {
++		rx_accum_len = 0;
++	}
++	last_rx_tick = now;
++	(void)HAL_UARTEx_ReceiveToIdle_IT(&huart2, rx_buf, UPSTREAM_RX_BUF_SIZE);
+ }
+ 
+-static void parse_frame(uint8_t len)
++static void parse_frame(const uint8_t *frame, uint8_t len)
+ {
+ 	if (len < 4) return;
+-	if (rx_buf[0] != UPSTREAM_STX || rx_buf[len - 1] != UPSTREAM_ETX) return;
+-	uint8_t chk = xor_checksum(rx_buf + 1, (size_t)(len - 2));
+-	if (chk != rx_buf[len - 2]) return;
++	if (frame[0] != UPSTREAM_STX || frame[len - 1] != UPSTREAM_ETX) return;
++	uint8_t chk = xor_checksum(frame + 1, (size_t)(len - 2));
++	if (chk != frame[len - 2]) return;
+ 	LED_Status_OnRS485Activity();
+-	uint8_t cmd = rx_buf[1];
+-	uint8_t payload_len = len - 4;
+-	const uint8_t *payload = payload_len > 0 ? &rx_buf[2] : NULL;
++	uint8_t cmd = frame[1];
++	uint8_t payload_len = len - 4;
++	const uint8_t *payload = payload_len > 0 ? &frame[2] : NULL;
+ 	if (cmd_cb) cmd_cb(cmd, payload, payload_len);
+ }
+ 
+-void UpstreamPC_Poll(void)
++/* PC: 0-based addresses; H2Map_ModbusAddrToH2Dec(start_addr)=start_addr+1 */
++static void process_modbus_frame(const uint8_t *frame, size_t frame_len, const aggregated_status_t *agg);
++#if UPSTREAM_DEBUG_LOG
++static void log_frame(const uint8_t *frame, size_t len, int crc_ok, uint8_t fc, uint16_t addr);
++#endif
++
++void UpstreamPC_Poll(const aggregated_status_t *agg)
+ {
+-	if (rx_ready) {
+-		uint8_t len = rx_ready;
+-		rx_ready = 0;
+-		/* Modbus RTU (slave 9) ... */
+-		if (len >= 4 && rx_buf[0] == UPSTREAM_MODBUS_SLAVE_ID && ModbusRTU_CRC16Check(rx_buf, (size_t)len) == 0) {
+-			...
+-		} else {
+-			parse_frame(len);
+-		}
+-		(void)HAL_UARTEx_ReceiveToIdle_IT(&huart2, rx_buf, UPSTREAM_RX_BUF_SIZE);
+-	}
++	if (rx_accum_len == 0) return;
++	if ((HAL_GetTick() - last_rx_tick) < (uint32_t)FRAME_END_MS) return;
++	uint16_t frame_len = rx_accum_len;
++	static uint8_t frame_buf[RX_RING_SIZE];
++	if (frame_len > RX_RING_SIZE) frame_len = (uint16_t)RX_RING_SIZE;
++	memcpy(frame_buf, rx_accum, (size_t)frame_len);
++	rx_accum_len = 0;
++	if (frame_len >= 4 && frame_buf[0] == UPSTREAM_MODBUS_SLAVE_ID) {
++		size_t expected = ModbusRTU_GetExpectedRequestLength(frame_buf, (size_t)frame_len);
++		if (expected == 0 || (size_t)frame_len < expected) {
++			invalid_len_count++;
++#if UPSTREAM_DEBUG_LOG
++			log_frame(frame_buf, (size_t)frame_len, 0, 0, 0);
++#endif
++			return;
++		}
++		if (ModbusRTU_CRC16Check(frame_buf, expected) != 0) {
++			invalid_crc_count++;
++#if UPSTREAM_DEBUG_LOG
++			log_frame(frame_buf, expected, 0, frame_buf[1], (uint16_t)((frame_buf[2]<<8)|frame_buf[3]));
++#endif
++			return;
++		}
++#if UPSTREAM_DEBUG_LOG
++		log_frame(frame_buf, expected, 1, frame_buf[1], (uint16_t)((frame_buf[2]<<8)|frame_buf[3]));
++#endif
++		process_modbus_frame(frame_buf, expected, agg);
++		return;
++	}
++	parse_frame(frame_buf, (uint8_t)frame_len);
+ }
+ 
++void UpstreamPC_GetInvalidCounts(uint32_t *p_len, uint32_t *p_crc)
++{
++	if (p_len) *p_len = invalid_len_count;
++	if (p_crc) *p_crc = invalid_crc_count;
++}
++
+ diff --git a/Guro_Mainboard/Modbus/Inc/modbus_rtu.h b/Guro_Mainboard/Modbus/Inc/modbus_rtu.h
+ --- a/Guro_Mainboard/Modbus/Inc/modbus_rtu.h
++++ b/Guro_Mainboard/Modbus/Inc/modbus_rtu.h
+@@ -58,6 +58,13 @@ int ModbusRTU_ParseFC16Request(...);
+ int ModbusRTU_IsExceptionResponse(...);
+ 
++/** Get expected Modbus RTU request frame length (incl. CRC). Return 0 if need more / unknown FC. */
++size_t ModbusRTU_GetExpectedRequestLength(const uint8_t *frame, size_t len);
++
+ diff --git a/Guro_Mainboard/Modbus/Src/modbus_rtu.c b/Guro_Mainboard/Modbus/Src/modbus_rtu.c
+ --- a/Guro_Mainboard/Modbus/Src/modbus_rtu.c
++++ b/Guro_Mainboard/Modbus/Src/modbus_rtu.c
++/* Expected request length (slave+FC+payload+CRC). */
++size_t ModbusRTU_GetExpectedRequestLength(const uint8_t *frame, size_t len)
++{
++    if (len < 2) return 0;
++    switch (frame[1]) {
++    case 0x01: case 0x02: case 0x03: case 0x04: case 0x05: case 0x06: return 8;
++    case 0x0F: if (len < 7) return 0; return (size_t)(7 + (uint16_t)frame[6] + 2);
++    case 0x10: if (len < 6) return 0; return (size_t)(7 + ((uint16_t)((frame[4]<<8)|frame[5])*2) + 2);
++    default: return 0;
++    }
++}
++
+ diff --git a/Guro_Mainboard/Gateway/Inc/h2tech_address_map.h b/Guro_Mainboard/Gateway/Inc/h2tech_address_map.h
+--- a/Guro_Mainboard/Gateway/Inc/h2tech_address_map.h
++++ b/Guro_Mainboard/Gateway/Inc/h2tech_address_map.h
+-/* Modbus start_addr -> H2TECH dec: h2_dec = start_addr + 1 */
++/* Modbus start_addr -> H2TECH dec: h2_dec = start_addr + 1.
++ * PC tools send 0-based addresses (e.g. coil 0 = first coil); FC05/FC15 use this mapping. */
