@@ -159,11 +159,15 @@ int main(void)
     if (ACS712_RMS_Poll(&s_rms))
     {
       /* Feed Modbus register map (adc_app storage).
-       * RMS DMA currently samples only one channel (ADC_CH5 = PA5 = ACS_ADC03).
-       * Populate ADC3 fields so FC03(0,12) returns live data instead of zeros.
+       * RMS DMA samples 3 channels in scan+DMA interleaved buffer:
+       * ADC1=CH3(PA3), ADC2=CH4(PA4), ADC3=CH5(PA5).
        */
-      LPSB_ADC_SetStoredAvg(2, s_rms.last_avg_adc);
-      LPSB_ADC_SetStoredPkpk(2, s_rms.last_pkpk_adc);
+      LPSB_ADC_SetStoredAvg(0, s_rms.last_avg_adc_ch[0]);
+      LPSB_ADC_SetStoredAvg(1, s_rms.last_avg_adc_ch[1]);
+      LPSB_ADC_SetStoredAvg(2, s_rms.last_avg_adc_ch[2]);
+      LPSB_ADC_SetStoredPkpk(0, s_rms.last_pkpk_adc_ch[0]);
+      LPSB_ADC_SetStoredPkpk(1, s_rms.last_pkpk_adc_ch[1]);
+      LPSB_ADC_SetStoredPkpk(2, s_rms.last_pkpk_adc_ch[2]);
     }
     {
       uint32_t now = HAL_GetTick();
@@ -285,7 +289,8 @@ static void MX_ADC_Init(void)
   */
   sConfig.Channel = ADC_CHANNEL_3;
   sConfig.Rank = ADC_RANK_CHANNEL_NUMBER;
-  sConfig.SamplingTime = ADC_SAMPLETIME_1CYCLE_5;
+  /* ACS712 출력은 소스 임피던스/RC 영향이 있어 충분한 sampling time 권장 */
+  sConfig.SamplingTime = ADC_SAMPLETIME_71CYCLES_5;
   if (HAL_ADC_ConfigChannel(&hadc, &sConfig) != HAL_OK)
   {
     Error_Handler();

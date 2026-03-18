@@ -30,10 +30,17 @@ extern "C" {
 
 typedef struct
 {
-  float offset_v;     /**< measured DC offset at ADC input (V) */
-  float last_irms_a;  /**< last computed RMS current (A) */
-  uint16_t last_avg_adc;   /**< last block average (ADC counts) */
-  uint16_t last_pkpk_adc;  /**< last block pkpk (ADC counts) */
+  /* Legacy single-channel fields (kept for compatibility; now mirror ADC3). */
+  float offset_v;     /**< measured DC offset at ADC input (V) (ADC3) */
+  float last_irms_a;  /**< last computed RMS current (A) (ADC3) */
+  uint16_t last_avg_adc;   /**< last block average (ADC counts) (ADC3) */
+  uint16_t last_pkpk_adc;  /**< last block pkpk (ADC counts) (ADC3) */
+
+  /* New: 3-channel scan+DMA results (ADC1/2/3 = PA3/4/5). */
+  float offset_v_ch[3];       /**< DC offset per channel (V) */
+  float last_irms_a_ch[3];    /**< RMS current per channel (A) */
+  uint16_t last_avg_adc_ch[3];  /**< average ADC per channel (counts) */
+  uint16_t last_pkpk_adc_ch[3]; /**< pkpk ADC per channel (counts) */
 } ACS712_RmsState;
 
 /** Configuration constants (board-specific) */
@@ -43,12 +50,12 @@ typedef struct
 #define ACS712_NOISE_FLOOR_A       (0.02f)        /* clamp below this */
 
 /** Sampling configuration */
-#define ACS712_DMA_BUF_LEN         (256u)         /* 128 or 256 recommended */
+#define ACS712_DMA_BUF_LEN         (256u)         /* N samples per channel (128 or 256 recommended) */
 
 /**
  * Initialize RMS module:
- * - Configure ADC channel (single channel)
- * - Start TIM (TRGO) and ADC DMA (circular)
+ * - ADC is expected to be configured in scan mode (CH3/CH4/CH5, forward)
+ * - Start ADC DMA (circular, timer-triggered)
  *
  * @param hadc ADC handle used in project (e.g., hadc)
  * @param htim TRGO timer handle (e.g., htim3)
@@ -56,7 +63,7 @@ typedef struct
  * @return HAL_OK on success
  */
 HAL_StatusTypeDef ACS712_RMS_Start(ADC_HandleTypeDef *hadc,
-                                  uint32_t adc_channel);
+                                  uint32_t adc_channel /* kept; ignored in scan mode */);
 
 /** Stop ADC DMA + timer. */
 void ACS712_RMS_Stop(ADC_HandleTypeDef *hadc);

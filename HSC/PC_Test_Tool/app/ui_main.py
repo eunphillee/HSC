@@ -474,6 +474,9 @@ class MainWindow(QMainWindow):
         # ADC3 전류 유무 히스테리시스: 현재 표시 상태 / 마지막 안정 상태
         self._lpsb_current_state = "OFF"       # "OFF" | "ON" | "UNSTABLE"
         self._lpsb_last_stable_state = "OFF"  # "OFF" | "ON"
+        # ADC1/ADC2 전류 유무 히스테리시스 상태 (ADC3와 동일 기준 확장)
+        self._lpsb_current_state_ch1 = "OFF"
+        self._lpsb_current_state_ch2 = "OFF"
         # HPSB와 동일 크기 느낌을 위해 LPSB는 확장 대신 기본 Preferred 사용
         gb_lpsb.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
         right_layout.addWidget(gb_lpsb)
@@ -1083,6 +1086,24 @@ class MainWindow(QMainWindow):
         self._log.log_info("[LPSB] ADC RAW READ")
         self._log.log_info(f"[LPSB] ADC_AVG  ADC1={adc1} ADC2={adc2} ADC3={adc3}")
         self._log.log_info(f"[LPSB] ADC_PKPK ADC1={pk1} ADC2={pk2} ADC3={pk3}")
+        # ADC1 전류 유무 히스테리시스 (ADC3와 동일 기준)
+        prev1 = self._lpsb_current_state_ch1
+        if prev1 == "OFF" and pk1 >= 50:
+            state1 = "ON"
+        elif prev1 == "ON" and pk1 <= 37:
+            state1 = "OFF"
+        else:
+            state1 = prev1 if prev1 in ("ON", "OFF") else "OFF"
+        self._lpsb_current_state_ch1 = state1
+        # ADC2 전류 유무 히스테리시스 (ADC3와 동일 기준)
+        prev2 = self._lpsb_current_state_ch2
+        if prev2 == "OFF" and pk2 >= 50:
+            state2 = "ON"
+        elif prev2 == "ON" and pk2 <= 37:
+            state2 = "OFF"
+        else:
+            state2 = prev2 if prev2 in ("ON", "OFF") else "OFF"
+        self._lpsb_current_state_ch2 = state2
         # ADC3 전류 유무 히스테리시스 (ON/OFF만): OFF→ON pk3>=50, ON→OFF pk3<=37, 그 외 현재 상태 유지
         prev = self._lpsb_current_state
         if prev == "OFF" and pk3 >= 50:
@@ -1092,7 +1113,7 @@ class MainWindow(QMainWindow):
         else:
             state = prev if prev in ("ON", "OFF") else "OFF"
         self._lpsb_current_state = state
-        self._log.log_info(f"[LPSB] CURRENT ADC3={state}")
+        self._log.log_info(f"[LPSB] CURRENT ADC1={state1} ADC2={state2} ADC3={state}")
         # 추가 메타: slave id / heartbeat / fw version (새 펌웨어 반영 여부 확인용)
         if len(regs) >= 9:
             try:
