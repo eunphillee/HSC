@@ -15,6 +15,8 @@ class MainboardWorker(QObject):
     sniff_result = pyqtSignal(list)                # 연결 직후 2초 수신 테스트 결과 (바이트 리스트)
     # HPSB/LPSB: ok, sense[14], coil_bits[14], error_flags u16, err
     sub_data_result = pyqtSignal(bool, object, object, object, object)
+    # Direct LPSB: FC03 start=0 count=9 (SSR 상태 + ADC1/2/3 + ID/heartbeat/fw)
+    lpsb_adc_result = pyqtSignal(bool, object, object)  # ok, regs[9] or None, err
 
     def __init__(self, client):
         super().__init__()
@@ -135,6 +137,34 @@ class MainboardWorker(QObject):
             return
         ok, err = self._client.write_coil_direct(1, coil_index, value)
         self.write_result.emit(ok, err)
+
+    def on_request_write_direct_lpsb_coil(self, coil_index: int, value: bool):
+        """LPSB 다이렉트: FC05 slave_id=2, coil_addr=0,1,2 (SSR1,2,3). 메인보드 경유 없음."""
+        if not self._client.connected:
+            self.write_result.emit(False, "Not connected")
+            return
+        if coil_index < 0 or coil_index > 2:
+            self.write_result.emit(False, "coil_index 0..2 only")
+            return
+        ok, err = self._client.write_coil_direct(2, coil_index, value)
+        self.write_result.emit(ok, err)
+
+    def on_request_read_direct_lpsb_adc(self):
+        """LPSB 다이렉트: FC03 slave_id=2, start=0, count=12 → regs[0..11].
+        regs[3..5]=ADC1~3 AVG(raw), regs[9..11]=ADC1~3 PKPK.
+        """
+        if not self._client.connected:
+            self.lpsb_adc_result.emit(False, None, "Not connected")
+            return
+        try:
+            ok, result = self._client.read_holding_registers_direct(2, 0, 12)
+        except Exception as e:
+            self.lpsb_adc_result.emit(False, None, f"{type(e).__name__}: {e}")
+            return
+        if not ok:
+            self.lpsb_adc_result.emit(False, None, result)
+            return
+        self.lpsb_adc_result.emit(True, result, None)
 
     def on_request_diagnostic_sequence(self):
         """

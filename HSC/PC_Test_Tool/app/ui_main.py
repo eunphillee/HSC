@@ -5,10 +5,11 @@ All Modbus RTU to single Mainboard slave. Exceptions handled safely; no crash on
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QComboBox, QPushButton, QLabel, QSpinBox, QFrame, QMessageBox,
-    QPlainTextEdit, QGroupBox, QCheckBox, QApplication,
+    QPlainTextEdit, QGroupBox, QCheckBox, QApplication, QSizePolicy,
 )
 from PyQt6.QtCore import pyqtSignal, Qt, QTimer
-from PyQt6.QtGui import QFont, QShowEvent
+from PyQt6.QtGui import QFont, QShowEvent, QPixmap
+from pathlib import Path
 
 import pymodbus
 from pymodbus.client.sync import ModbusSerialClient
@@ -133,8 +134,10 @@ class MainWindow(QMainWindow):
     request_sub_pulse = pyqtSignal(int)       # LPSB VB pulse index 0..4
     request_write_sub_coil = pyqtSignal(int, bool)  # addr 898..909, value (FC05 to Mainboard)
     request_write_direct_hpsb_coil = pyqtSignal(int, bool)  # coil_index 0..2, value (HPSB 다이렉트, Slave 1)
+    request_write_direct_lpsb_coil = pyqtSignal(int, bool)  # coil_index 0..2, value (LPSB 다이렉트, Slave 2)
     request_diagnostic_sequence = pyqtSignal()  # run HPSB/LPSB LED diagnostic sequence
     request_sniff = pyqtSignal()  # 연결 직후 2초 수신 테스트 (Direct HPSB)
+    request_read_direct_lpsb_adc = pyqtSignal()  # Direct LPSB: FC03 start=0,count=9 → ADC raw 등
 
     def __init__(self):
         super().__init__()
@@ -163,15 +166,23 @@ class MainWindow(QMainWindow):
         self._env_poll_timer.setInterval(5000)
         self._env_poll_timer.timeout.connect(lambda: self.request_read_env.emit())
         self._sub_poll_timer = QTimer(self)
-        self._sub_poll_timer.setInterval(2000)  # HPSB/LPSB 2초 주기
-        self._sub_poll_timer.timeout.connect(lambda: self.request_read_sub.emit())
+        self._sub_poll_timer.setInterval(2000)  # HPSB/LPSB 2초 주기 (Direct LPSB면 FC03 ADC read)
+        self._sub_poll_timer.timeout.connect(self._on_sub_poll_tick)
         self._sub_auto_poll = False
+        # Direct LPSB: SSR ON 동안 ADC 자동 폴링 (500ms)
+        self._lpsb_adc_poll_timer = QTimer(self)
+        self._lpsb_adc_poll_timer.setInterval(500)
+        self._lpsb_adc_poll_timer.timeout.connect(self._on_lpsb_adc_poll_tick)
+        self._lpsb_adc_poll_inflight = False
+        self._lpsb_adc_poll_running = False
         self._seen_0xaa_since_connect = False
         self._modbus_fail_0xaa_hint_shown = False
         self._direct_hpsb_rx_total = 0  # 직접 HPSB 연결 후 수신 누적 바이트 (진단용)
         self._direct_diag_timer = QTimer(self)
         self._direct_diag_timer.setInterval(3000)  # 3초마다 수신 0이면 안내
         self._direct_diag_timer.timeout.connect(self._on_direct_diag_tick)
+        # direct mode: "none" / "hpsb" / "lpsb"
+        self._direct_mode: str = "none"
         self._build_ui()
         self._refresh_ports()
         self._set_connected_ui(False)
@@ -188,6 +199,7 @@ class MainWindow(QMainWindow):
         self.request_sub_pulse.connect(self._worker.on_request_sub_pulse, Qt.ConnectionType.QueuedConnection)
         self.request_write_sub_coil.connect(self._worker.on_request_write_sub_coil, Qt.ConnectionType.QueuedConnection)
         self.request_write_direct_hpsb_coil.connect(self._worker.on_request_write_direct_hpsb_coil, Qt.ConnectionType.QueuedConnection)
+        self.request_write_direct_lpsb_coil.connect(self._worker.on_request_write_direct_lpsb_coil, Qt.ConnectionType.QueuedConnection)
         self.request_diagnostic_sequence.connect(self._worker.on_request_diagnostic_sequence, Qt.ConnectionType.QueuedConnection)
         self.request_sniff.connect(self._worker.on_request_sniff, Qt.ConnectionType.QueuedConnection)
         self._worker.di_result.connect(self._on_di_result)
@@ -197,6 +209,8 @@ class MainWindow(QMainWindow):
         self._worker.env_result.connect(self._on_env_result)
         self._worker.write_result.connect(self._on_write_result)
         self._worker.raw_bytes_received.connect(self._on_raw_bytes)
+        self.request_read_direct_lpsb_adc.connect(self._worker.on_request_read_direct_lpsb_adc, Qt.ConnectionType.QueuedConnection)
+        self._worker.lpsb_adc_result.connect(self._on_lpsb_adc_result)
 
     def _build_ui(self):
         central = QWidget()
@@ -223,16 +237,14 @@ class MainWindow(QMainWindow):
         self._baud.setMinimumWidth(70)
         self._baud.setEnabled(False)
         top_lay.addWidget(self._baud)
-        top_lay.addWidget(QLabel("Slave ID:"))
+        lbl_slave = QLabel("Slave ID:")
+        self._lbl_slave_id = lbl_slave
+        top_lay.addWidget(lbl_slave)
         self._slave_id = QSpinBox()
         self._slave_id.setRange(1, 247)
         self._slave_id.setValue(MAINBOARD_SLAVE_ID_DEFAULT)
         self._slave_id.setMinimumWidth(50)
         top_lay.addWidget(self._slave_id)
-        self._chk_direct_hpsb = QCheckBox("Direct HPSB (Slave 1)")
-        self._chk_direct_hpsb.setToolTip("체크 시 HPSB만 직결 테스트. Slave ID=1, FC05 coil 0/1/2 → RELAY1/2/3. 메인보드 경유 없음.")
-        self._chk_direct_hpsb.stateChanged.connect(self._on_direct_hpsb_changed)
-        top_lay.addWidget(self._chk_direct_hpsb)
         self._btn_connect = QPushButton("Connect")
         self._btn_connect.clicked.connect(self._do_connect)
         top_lay.addWidget(self._btn_connect)
@@ -246,14 +258,16 @@ class MainWindow(QMainWindow):
         top_lay.addStretch()
         main_layout.addWidget(top)
 
-        # ---- Content: Left (Mainboard) + Right (HPSB/LPSB) ----
+        # ---- Content: Left(Mainboard + HPSB/LPSB) + Right(Log sidebar) ----
         content_row = QHBoxLayout()
-        content_row.setSpacing(16)
+        content_row.setSpacing(12)
 
         # ----- Left: Mainboard 테스트 (기존 구조 유지) -----
         left_w = QWidget()
         left_layout = QVBoxLayout(left_w)
-        left_layout.setSpacing(12)
+        # 맥북 13인치(실질 세로 ~900)에서 첫 번째 컬럼 카드들이 균형 있게 보이도록
+        # 세로 간격을 조금 줄여서 상/하 여백을 최적화한다.
+        left_layout.setSpacing(8)
         left_layout.setContentsMargins(0, 0, 0, 0)
 
         card_out, lay_out = card_frame("Mainboard Outputs (Relay1~4)")
@@ -328,22 +342,51 @@ class MainWindow(QMainWindow):
         btn_read_env.clicked.connect(lambda: self.request_read_env.emit())
         lay_env.addWidget(btn_read_env)
         self._btn_read_env = btn_read_env
+        # 첫 번째 컬럼 카드들은 내용 높이에 맞게 배치하고,
+        # 아래쪽 여유 공간은 컬럼 전체가 아니라 하단 여백으로 남기기 위해 Env 카드는 Expanding 대신 Preferred 사용.
+        card_env.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
         left_layout.addWidget(card_env)
-
         left_layout.addStretch()
-        content_row.addWidget(left_w)
+        # 전체 가로 3등분: left_w (Mainboard), right_w (HPSB/LPSB), log_w (Log)
+        # col1: 초기에는 col2/col3와 비슷한 폭, 이후 가로 리사이즈 시 폭 고정
+        left_w.setMinimumWidth(460)
+        left_w.setMaximumWidth(460)
+        left_w.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+        content_row.addWidget(left_w, 0)
 
-        # ----- Right: 제어 / HPSB / LPSB -----
+        # ----- Middle: 제어 / HPSB / LPSB -----
         right_w = QWidget()
-        right_w.setMinimumWidth(300)
+        # col2: 초기에는 col1/col3와 비슷한 폭, 이후 가로 리사이즈 시 폭 고정
+        right_w.setMinimumWidth(460)
+        right_w.setMaximumWidth(460)
         right_layout = QVBoxLayout(right_w)
         right_layout.setSpacing(12)
         right_layout.setContentsMargins(0, 0, 0, 0)
 
+        # ---- Direct mode block: HPSB / LPSB 선택 ----
+        gb_direct = QGroupBox("Direct Mode")
+        lay_direct = QVBoxLayout(gb_direct)
+        row_direct = QHBoxLayout()
+        # 체크박스 2개를 세로로 배치 (이미지처럼 단순하게)
+        col_direct = QVBoxLayout()
+        self._chk_direct_hpsb = QCheckBox("Direct HPSB (Slave 1)")
+        self._chk_direct_hpsb.stateChanged.connect(self._on_direct_hpsb_changed)
+        self._chk_direct_lpsb = QCheckBox("Direct LPSB (Slave 2)")
+        self._chk_direct_lpsb.stateChanged.connect(self._on_direct_lpsb_changed)
+        col_direct.addWidget(self._chk_direct_hpsb)
+        col_direct.addWidget(self._chk_direct_lpsb)
+        row_direct.addLayout(col_direct)
+        row_direct.addStretch()
+        lay_direct.addLayout(row_direct)
+        self._mode_label = QLabel("Mode: Mainboard routing")
+        self._mode_label.setStyleSheet("color: #cccccc; font-size: 11px;")
+        lay_direct.addWidget(self._mode_label)
+        right_layout.addWidget(gb_direct)
+
         gb_ctrl = QGroupBox("제어")
         lay_ctrl = QVBoxLayout(gb_ctrl)
         btn_read_once = QPushButton("Read once (HPSB/LPSB)")
-        btn_read_once.clicked.connect(lambda: self.request_read_sub.emit())
+        btn_read_once.clicked.connect(self._on_read_once_clicked)
         lay_ctrl.addWidget(btn_read_once)
         self._btn_read_sub = btn_read_once
         btn_diag_seq = QPushButton("LED diagnostic sequence")
@@ -380,6 +423,7 @@ class MainWindow(QMainWindow):
             col.addWidget(cur_lbl)
             hpsb_row.addLayout(col)
         lay_hpsb.addLayout(hpsb_row)
+        lay_hpsb.addSpacing(6)
         self._hpsb_comm_label = QLabel("Comm: -")
         lay_hpsb.addWidget(self._hpsb_comm_label)
         right_layout.addWidget(gb_hpsb)
@@ -388,7 +432,9 @@ class MainWindow(QMainWindow):
         lay_lpsb = QVBoxLayout(gb_lpsb)
         self._lpsb_select_btns = []
         lpsb_sel_row = QHBoxLayout()
-        for i, name in enumerate(["LPSB 2", "LPSB 3", "LPSB 4"]):
+        lpsb_names = ["LPSB 2", "LPSB 3", "LPSB 4"]
+        self._lpsb_slave_ids = [2, 4, 8]  # UI 이름과 매핑되는 실제 LPSB slave ID
+        for i, name in enumerate(lpsb_names):
             b = QPushButton(name)
             b.setCheckable(True)
             b.clicked.connect(lambda checked, idx=i: self._on_lpsb_select(idx))
@@ -422,33 +468,82 @@ class MainWindow(QMainWindow):
         lay_lpsb.addLayout(lpsb_ssr_row)
         self._lpsb_comm_label = QLabel("Comm: -")
         lay_lpsb.addWidget(self._lpsb_comm_label)
+        # Guro mulsan 로고는 LPSB 박스 밖, 두 번째 컬럼 하단에 배치 (아래에서 right_layout 에 추가)
+        # LPSB SSR 현재 상태 (Direct LPSB 모드에서 토글 기준)
+        self._lpsb_ssr_state = [False, False, False]
+        # ADC3 전류 유무 히스테리시스: 현재 표시 상태 / 마지막 안정 상태
+        self._lpsb_current_state = "OFF"       # "OFF" | "ON" | "UNSTABLE"
+        self._lpsb_last_stable_state = "OFF"  # "OFF" | "ON"
+        # HPSB와 동일 크기 느낌을 위해 LPSB는 확장 대신 기본 Preferred 사용
+        gb_lpsb.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
         right_layout.addWidget(gb_lpsb)
+        # Guro mulsan 로고 (LPSB 박스 라인 밖, 바로 아래 10px 고정)
+        logo_label = QLabel()
+        for base in [Path(__file__).resolve().parent, Path(__file__).resolve().parent.parent]:
+            logo_path = base / "guro_logo.png"
+            if not logo_path.exists():
+                logo_path = base / "resources" / "guro_logo.png"
+            if logo_path.exists():
+                pixmap = QPixmap(str(logo_path))
+                if not pixmap.isNull():
+                    logo_label.setPixmap(
+                        pixmap.scaled(
+                            135,
+                            80,
+                            Qt.AspectRatioMode.KeepAspectRatio,
+                            Qt.TransformationMode.SmoothTransformation,
+                        )
+                    )
+                break
+        logo_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        logo_label.setMaximumWidth(150)
+        logo_label.setMaximumHeight(80)
+        logo_label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        right_layout.addSpacing(0)
+        # 로고는 "LPSB 바로 아래" 위치 고정. 창 확대 시 남는 공간은 로고 아래로만 늘어남.
+        row_logo = QHBoxLayout()
+        row_logo.addStretch()
+        row_logo.addWidget(logo_label)
+        right_layout.addLayout(row_logo)
         right_layout.addStretch()
-        content_row.addWidget(right_w)
+
+        # Middle 컬럼 추가 (가로 폭 고정, 세로 확장)
+        right_w.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+        content_row.addWidget(right_w, 0)
+
+        # ---- 오른쪽: Log 전용 세로 패널 ----
+        log_w = QWidget()
+        log_lay = QVBoxLayout(log_w)
+        log_lay.setContentsMargins(0, 0, 0, 0)
+        # Log 패널은 GroupBox 스타일로 (HPSB/LPSB와 동일 테두리)
+        card_log = QGroupBox("Log")
+        lay_log = QVBoxLayout(card_log)
+        self._log_edit = QPlainTextEdit()
+        self._log_edit.setReadOnly(True)
+        self._log_edit.setMinimumHeight(200)
+        self._log_edit.setFont(QFont("Consolas", 10))
+        lay_log.addWidget(self._log_edit)
+        h2 = QHBoxLayout()
+        btn_clear2 = QPushButton("Clear")
+        btn_clear2.clicked.connect(self._log_clear)
+        h2.addWidget(btn_clear2)
+        h2.addStretch()
+        lay_log.addLayout(h2)
+        # Log 컬럼은 가로/세로 모두 확장
+        card_log.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        log_lay.addWidget(card_log)
+        log_w.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        content_row.addWidget(log_w, 1)
 
         main_layout.addLayout(content_row)
 
-        # ---- F) Log ----
-        card_log, lay_log = card_frame("Log")
-        self._log_edit = QPlainTextEdit()
-        self._log_edit.setReadOnly(True)
-        self._log_edit.setMinimumHeight(140)
-        self._log_edit.setFont(QFont("Consolas", 10))
-        lay_log.addWidget(self._log_edit)
-        h = QHBoxLayout()
-        btn_clear = QPushButton("Clear")
-        btn_clear.clicked.connect(self._log_clear)
-        h.addWidget(btn_clear)
-        h.addStretch()
-        lay_log.addLayout(h)
-        main_layout.addWidget(card_log)
-
         self.setCentralWidget(central)
-        # 실행 시 열리는 크기: 880×640 (가로가 세로보다 넓은 비율). 리사이즈는 자유롭게.
-        self._default_width = 880
-        self._default_height = 640
+        # 실행 시 열리는 크기: 1440×900 (MacBook Pro 13\" 해상도 기준).
+        self._default_width = 1440
+        self._default_height = 900
         self.resize(self._default_width, self._default_height)
-        self.setMinimumSize(720, 500)
+        # 세로는 자유롭게 리사이즈 가능, 가로 최소 폭만 제한
+        self.setMinimumSize(1024, 640)
         self._first_show = True
 
         self._log.log_line.connect(self._on_log_line)
@@ -460,14 +555,89 @@ class MainWindow(QMainWindow):
             self._first_show = False
             self.resize(self._default_width, self._default_height)
 
-    def _on_direct_hpsb_changed(self, state):
-        """Direct HPSB 체크 시 Slave ID=1 고정, 해제 시 메인보드 기본값(9) 복원."""
-        if state == Qt.CheckState.Checked.value:
-            self._slave_id.setValue(1)
-            self._slave_id.setEnabled(False)
+    def _update_mode_label(self):
+        if self._direct_mode == "hpsb":
+            text = "Mode: Direct HPSB (Slave 1)"
+        elif self._direct_mode == "lpsb":
+            text = "Mode: Direct LPSB (Slave 2)"
         else:
-            self._slave_id.setValue(MAINBOARD_SLAVE_ID_DEFAULT)
-            self._slave_id.setEnabled(not self._client.connected)
+            text = "Mode: Mainboard routing"
+        self._mode_label.setText(text)
+
+    def _current_lpsb_slave_id(self) -> int | None:
+        try:
+            return self._lpsb_slave_ids[self._selected_lpsb_index]
+        except Exception:
+            return None
+
+    def _compute_lpsb_ssr_enable(self) -> bool:
+        """
+        LPSB SSR 버튼 활성/비활성 조건:
+        - 연결됨
+        - Direct Mode == lpsb
+        - 선택된 보드의 실제 slave ID == 2 (현재 Direct LPSB 대상)
+        """
+        slave_id = self._current_lpsb_slave_id()
+        return bool(
+            self._client.connected
+            and self._direct_mode == "lpsb"
+            and slave_id == 2
+        )
+
+    def _update_lpsb_ssr_button_state(self):
+        enable = self._compute_lpsb_ssr_enable()
+        for btn in self._lpsb_ssr_btns:
+            btn.setEnabled(enable)
+
+    def _log_lpsb_selection_state(self, context: str):
+        slave_id = self._current_lpsb_slave_id()
+        idx = getattr(self, "_selected_lpsb_index", 0)
+        name = self._lpsb_select_btns[idx].text() if 0 <= idx < len(self._lpsb_select_btns) else "N/A"
+        enabled = self._compute_lpsb_ssr_enable()
+        self._log.log_info(f"[LPSB] ({context}) select idx={idx} name={name} slave={slave_id}")
+        self._log.log_info(f"[LPSB] ({context}) direct_mode={self._direct_mode} connected={self._client.connected}")
+        self._log.log_info(f"[LPSB] ({context}) SSR buttons enabled={enabled}")
+
+    def _on_direct_hpsb_changed(self, state: int):
+        checked = state == Qt.CheckState.Checked.value
+        if checked:
+            # HPSB direct 선택 시 LPSB direct 해제
+            if self._chk_direct_lpsb.isChecked():
+                self._chk_direct_lpsb.blockSignals(True)
+                self._chk_direct_lpsb.setChecked(False)
+                self._chk_direct_lpsb.blockSignals(False)
+            self._direct_mode = "hpsb"
+            self._log.log_info("→ Mode: Direct HPSB (Slave 1)")
+        else:
+            # 둘 다 해제된 경우만 none 으로
+            if not self._chk_direct_lpsb.isChecked():
+                self._direct_mode = "none"
+                self._log.log_info("→ Mode: Mainboard routing")
+        self._update_mode_label()
+        self._set_connected_ui(self._client.connected)
+        self._update_lpsb_ssr_button_state()
+        self._log_lpsb_selection_state("direct_hpsb_changed")
+        self._update_lpsb_auto_adc_poll("direct_hpsb_changed")
+
+    def _on_direct_lpsb_changed(self, state: int):
+        checked = state == Qt.CheckState.Checked.value
+        if checked:
+            # LPSB direct 선택 시 HPSB direct 해제
+            if self._chk_direct_hpsb.isChecked():
+                self._chk_direct_hpsb.blockSignals(True)
+                self._chk_direct_hpsb.setChecked(False)
+                self._chk_direct_hpsb.blockSignals(False)
+            self._direct_mode = "lpsb"
+            self._log.log_info("→ Mode: Direct LPSB (Slave 2)")
+        else:
+            if not self._chk_direct_hpsb.isChecked():
+                self._direct_mode = "none"
+                self._log.log_info("→ Mode: Mainboard routing")
+        self._update_mode_label()
+        self._set_connected_ui(self._client.connected)
+        self._update_lpsb_ssr_button_state()
+        self._log_lpsb_selection_state("direct_lpsb_changed")
+        self._update_lpsb_auto_adc_poll("direct_lpsb_changed")
 
     def _tag_for_request(self, func: str, addr: int | str, count_or_value: int | str) -> str:
         """보드 태그: [MAIN], [HPSB], [LPSB1], [LPSB2], [LPSB3]. PC는 메인보드와만 통신하며, 메인보드가 UART2로 HPSB/LPSB 폴링한 결과를 보여줌."""
@@ -478,7 +648,12 @@ class MainWindow(QMainWindow):
         if a == SUB_SENSE_REG or a == SUB_COIL_STATUS_START or (func == "FC02" and 868 <= a <= 879):
             return "[HPSB][LPSB1][LPSB2][LPSB3]"
         if func == "FC05" and 0 <= a <= 2:
-            return "[DIRECT]" if self._chk_direct_hpsb.isChecked() else "[HPSB]"  # Direct HPSB: one-click one-request
+            # Direct HPSB/LPSB: slave 1/2 coil 0..2
+            if self._direct_mode == "hpsb":
+                return "[DIRECT HPSB]"
+            if self._direct_mode == "lpsb":
+                return "[DIRECT LPSB]"
+            return "[HPSB]"
         if func == "FC05" and SUB_HPSB_COIL_BASE <= a < SUB_HPSB_COIL_BASE + 3:
             return "[HPSB]"
         if func == "FC05" and SUB_LPSB_COIL_BASE <= a < SUB_LPSB_COIL_BASE + 9:
@@ -526,31 +701,44 @@ class MainWindow(QMainWindow):
         self._btn_connect.setEnabled(not connected)
         self._btn_disconnect.setEnabled(connected)
         self._port_combo.setEnabled(not connected)
-        self._slave_id.setEnabled(not connected and not self._chk_direct_hpsb.isChecked())
-        self._chk_direct_hpsb.setEnabled(not connected)
-        direct_mode = connected and self._chk_direct_hpsb.isChecked()
-        self._btn_read_di.setEnabled(connected and not direct_mode)
-        self._btn_read_pc_led.setEnabled(connected and not direct_mode)
-        self._btn_read_env.setEnabled(connected and not direct_mode)
-        self._btn_read_sub.setEnabled(connected and not direct_mode)
-        self._chk_auto_poll.setEnabled(connected and not self._chk_direct_hpsb.isChecked())
+        # Slave ID는 direct mode가 아닐 때만 보이도록 (direct=HPSB/LPSB 는 slave 1/2 고정)
+        show_slave = self._direct_mode == "none"
+        self._lbl_slave_id.setVisible(show_slave)
+        self._slave_id.setVisible(show_slave)
+        self._slave_id.setEnabled(not connected and show_slave)
+        # direct 모드에 따라 일부 버튼 제어 (Mainboard 경유 HPSB/LPSB 읽기/제어만 제한)
+        direct_mode_active = connected and (self._direct_mode in ("hpsb", "lpsb"))
+        self._btn_read_di.setEnabled(connected)          # Mainboard DI는 항상 가능
+        self._btn_read_pc_led.setEnabled(connected)      # PC LED도 항상 가능
+        self._btn_read_env.setEnabled(connected)         # Env도 항상 가능
+        # Read once 버튼은 Direct LPSB 모드에서도 사용:
+        # - Mainboard routing: HPSB/LPSB sub read
+        # - Direct LPSB: LPSB FC03 (ADC raw 포함) read
+        self._btn_read_sub.setEnabled(connected)
+        # Direct HPSB에서는 자동 폴링 없음; Direct LPSB·메인보드에서는 Auto poll 사용 가능
+        self._chk_auto_poll.setEnabled(connected and (self._direct_mode != "hpsb"))
         for b in self._hpsb_btns:
             b.setEnabled(connected)
         for b in self._lpsb_select_btns:
-            b.setEnabled(connected and not direct_mode)
+            b.setEnabled(connected and not direct_mode_active)
         for b in self._lpsb_ssr_btns:
-            b.setEnabled(connected and not direct_mode)
+            b.setEnabled(connected and not direct_mode_active)
         for chk in self._relay_checks:
-            chk.setEnabled(connected and not direct_mode)
-        self._btn_pc_on.setEnabled(connected and not direct_mode)
-        self._btn_pc_reset.setEnabled(connected and not direct_mode)
+            chk.setEnabled(connected)
+        self._btn_pc_on.setEnabled(connected and not direct_mode_active)
+        self._btn_pc_reset.setEnabled(connected and not direct_mode_active)
+        self._update_mode_label()
+        self._update_lpsb_ssr_button_state()
+        self._log_lpsb_selection_state("set_connected_ui")
+        self._update_lpsb_auto_adc_poll("set_connected_ui")
         if connected:
             self._status_badge.setText("Connected")
             self._status_badge.setStyleSheet("color: #00c853; font-weight: bold; padding: 4px 8px;")
             self._seen_0xaa_since_connect = False
             self._modbus_fail_0xaa_hint_shown = False
-            self._log.set_raw_line_only(self._chk_direct_hpsb.isChecked())  # Direct HPSB: \r\n만 보고 한 줄씩 출력 (스테이지/긴 문자열용)
-            if self._chk_direct_hpsb.isChecked():
+            is_direct_hpsb = self._direct_mode == "hpsb"
+            self._log.set_raw_line_only(is_direct_hpsb)  # Direct HPSB: \r\n만 보고 한 줄씩 출력
+            if is_direct_hpsb:
                 # Direct HPSB: no Modbus 자동 폴링. HPSB_TEST 등 보드→PC raw 수신 표시 시도
                 self._direct_hpsb_rx_total = 0
                 self._raw_poll_timer.start()
@@ -581,6 +769,7 @@ class MainWindow(QMainWindow):
             self._chk_auto_poll.setChecked(False)
             self._status_badge.setText("Disconnected")
             self._status_badge.setStyleSheet("color: #555555; font-weight: bold; padding: 4px 8px;")
+            self._stop_lpsb_auto_adc_poll("disconnect")
 
     def _refresh_ports(self):
         try:
@@ -637,7 +826,7 @@ class MainWindow(QMainWindow):
 
     def _on_direct_diag_tick(self):
         """직접 HPSB 연결 시 3초마다: 수신이 한 번도 없으면 원인 분리용 안내."""
-        if not self._client.connected or not self._chk_direct_hpsb.isChecked():
+        if not self._client.connected or self._direct_mode != "hpsb":
             return
         if self._direct_hpsb_rx_total > 0:
             return
@@ -691,7 +880,7 @@ class MainWindow(QMainWindow):
         """보드에서 보낸 raw 바이트를 로그에 표시."""
         if bytes_list and 0xAA in bytes_list:
             self._seen_0xaa_since_connect = True
-        if bytes_list and self._chk_direct_hpsb.isChecked():
+        if bytes_list and self._direct_mode == "hpsb":
             self._direct_hpsb_rx_total += len(bytes_list)
         self._log.log_raw_rx(bytes_list)
 
@@ -770,13 +959,30 @@ class MainWindow(QMainWindow):
                 else:
                     self._log.log_info("힌트: 메인보드 빌드에서 ENABLE_PC_TEST_AA_STREAM=0, USE_PC_TEST_UART1_SLAVE=1 인지 확인하세요. (0xAA 전용 모드면 Modbus 응답 없음)")
 
+    def _on_read_once_clicked(self):
+        """Read once 버튼:
+        - Mainboard routing: 기존 HPSB/LPSB sub read
+        - Direct LPSB 모드: LPSB 보드 FC03(0,9)로 ADC raw 포함 상태를 1회 읽기
+        """
+        if not self._client.connected:
+            self._log.log_info("[MAIN] Not connected")
+            return
+        if self._direct_mode == "lpsb":
+            self._log.log_info("[LPSB] Direct FC03 (start=0,count=12) read 요청")
+            self.request_read_direct_lpsb_adc.emit()
+        elif self._direct_mode == "hpsb":
+            # 아직 Direct HPSB read once 동작은 정의하지 않음. 힌트만 출력.
+            self._log.log_info("[HPSB] Direct HPSB 모드에서는 현재 Read once 동작이 정의되어 있지 않습니다.")
+        else:
+            self.request_read_sub.emit()
+
     def _on_hpsb_relay_click(self, idx: int):
         """HPSB RELAY 버튼: Direct HPSB면 FC05 slave=1 coil=idx(0,1,2). 아니면 FC05 addr 898+idx → Mainboard 경유."""
         btn = self._hpsb_btns[idx]
         value = btn.isChecked()
         self._hpsb_strips[idx].set_state(value)
-        if self._chk_direct_hpsb.isChecked():
-            self._log.log_info(f"[DEBUG] Button: HPSB RELAY{idx + 1} EN (Direct) -> FC05 slave=1 coil={idx} val={1 if value else 0}")
+        if self._direct_mode == "hpsb":
+            self._log.log_info(f"[DEBUG] Button: HPSB RELAY{idx + 1} EN (Direct HPSB) -> FC05 slave=1 coil={idx} val={1 if value else 0}")
             self.request_write_direct_hpsb_coil.emit(idx, value)
         else:
             addr = SUB_HPSB_COIL_BASE + idx
@@ -800,24 +1006,177 @@ class MainWindow(QMainWindow):
                 self._lpsb_ssr_btns[i].setChecked(on)
                 v = sense[base_s + i] if base_s + i < len(sense) else 0
                 self._lpsb_current_labels[i].setText(f"current: {v}")
+        # LPSB 선택에 따라 SSR 버튼 활성/비활성도 갱신
+        self._update_lpsb_ssr_button_state()
+        self._log_lpsb_selection_state("lpsb_select")
 
     def _on_lpsb_ssr_click(self, ssr_idx: int):
-        """LPSB SSR 버튼: FC05 addr 901 + selected_board*3 + ssr_idx, value=checked → Mainboard가 LPSB(2/4/8)에 전달."""
+        """LPSB SSR 버튼: Direct LPSB 모드에서만 선택된 보드 slave ID 기준으로 토글 제어.
+        현재 Direct 제어는 slave=2 보드만 지원한다.
+        """
         btn = self._lpsb_ssr_btns[ssr_idx]
-        value = btn.isChecked()
-        self._lpsb_strips[ssr_idx].set_state(value)
-        sel = getattr(self, "_selected_lpsb_index", 0)
-        addr = SUB_LPSB_COIL_BASE + sel * 3 + ssr_idx
-        self._log.log_info(f"[DEBUG] Button: LPSB SSR{ssr_idx + 1} EN (board {sel}) -> FC05 addr={addr} val={1 if value else 0}")
-        self.request_write_sub_coil.emit(addr, value)
+        slave_id = self._current_lpsb_slave_id()
+        # Direct LPSB 모드가 아니면 토글을 되돌리고 안내만 남김
+        if self._direct_mode != "lpsb":
+            self._log.log_info("[LPSB] Direct LPSB (Slave 2) 모드에서만 SSR 제어가 가능합니다.")
+            btn.blockSignals(True)
+            btn.setChecked(self._lpsb_ssr_state[ssr_idx])
+            btn.blockSignals(False)
+            self._lpsb_strips[ssr_idx].set_state(self._lpsb_ssr_state[ssr_idx])
+            return
+        # 선택된 LPSB 보드가 slave 2가 아니면 Direct 제어 미지원
+        if slave_id != 2:
+            self._log.log_info(f"[LPSB] 현재 선택 보드 slave={slave_id} (Direct 제어는 slave=2만 지원). SSR 버튼 비활성 대상.")
+            btn.blockSignals(True)
+            btn.setChecked(self._lpsb_ssr_state[ssr_idx])
+            btn.blockSignals(False)
+            self._lpsb_strips[ssr_idx].set_state(self._lpsb_ssr_state[ssr_idx])
+            return
+        # 연결 안 된 경우
+        if not self._client.connected:
+            self._log.log_info("[LPSB] Not connected")
+            btn.blockSignals(True)
+            btn.setChecked(self._lpsb_ssr_state[ssr_idx])
+            btn.blockSignals(False)
+            self._lpsb_strips[ssr_idx].set_state(self._lpsb_ssr_state[ssr_idx])
+            return
+
+        # 내부 상태 토글
+        new_state = not self._lpsb_ssr_state[ssr_idx]
+        self._lpsb_ssr_state[ssr_idx] = new_state
+        btn.blockSignals(True)
+        btn.setChecked(new_state)
+        btn.blockSignals(False)
+        self._lpsb_strips[ssr_idx].set_state(new_state)
+
+        # Modbus FC05: Slave 2, coil = ssr_idx, value = ON/OFF
+        onoff_str = "ON" if new_state else "OFF"
+        self._log.log_info(f"[LPSB] Write Coil {ssr_idx} \u2192 {onoff_str}")
+        self._log.log_info(f"[LPSB] SSR{ssr_idx + 1} {onoff_str}")
+        self.request_write_direct_lpsb_coil.emit(ssr_idx, new_state)
+        # 디버깅: SSR1/2/3 ON 직후 ADC raw를 바로 읽어 Log에 출력 (전류 흐름/채널 매핑 확인용)
+        if new_state and ssr_idx in (0, 1, 2):
+            self._log.log_info(f"[LPSB] SSR{ssr_idx + 1} ON -> read ADC AVG/PKPK (FC03 start=0,count=12)")
+            QTimer.singleShot(200, lambda: self.request_read_direct_lpsb_adc.emit())
+        # SSR ON/OFF 상태에 따라 자동 ADC 폴링 시작/중지
+        self._update_lpsb_auto_adc_poll("lpsb_ssr_click")
+
+    def _on_lpsb_adc_result(self, ok: bool, regs: list | None, err: str | None):
+        """Direct LPSB 모드에서 FC03(0,12) 결과 처리: ADC AVG + PKPK를 Log에 출력하고 current 라벨에 표시."""
+        # inflight 해제 (성공/실패 모두)
+        self._lpsb_adc_poll_inflight = False
+        if not ok or regs is None or len(regs) < 12:
+            msg = err or "FC03 read fail"
+            self._log.log_info(f"[LPSB] ADC raw read fail: {msg}")
+            self._lpsb_comm_label.setText("Comm: (read fail)")
+            for lbl in self._lpsb_current_labels:
+                lbl.setText("current")
+            self._update_lpsb_auto_adc_poll("lpsb_adc_result_fail")
+            return
+        try:
+            adc1, adc2, adc3 = regs[3], regs[4], regs[5]
+            pk1, pk2, pk3 = regs[9], regs[10], regs[11]
+        except Exception:
+            self._log.log_info("[LPSB] ADC raw read fail: invalid regs")
+            self._lpsb_comm_label.setText("Comm: (read fail)")
+            return
+        self._log.log_info("[LPSB] ADC RAW READ")
+        self._log.log_info(f"[LPSB] ADC_AVG  ADC1={adc1} ADC2={adc2} ADC3={adc3}")
+        self._log.log_info(f"[LPSB] ADC_PKPK ADC1={pk1} ADC2={pk2} ADC3={pk3}")
+        # ADC3 전류 유무 히스테리시스 (ON/OFF만): OFF→ON pk3>=50, ON→OFF pk3<=37, 그 외 현재 상태 유지
+        prev = self._lpsb_current_state
+        if prev == "OFF" and pk3 >= 50:
+            state = "ON"
+        elif prev == "ON" and pk3 <= 37:
+            state = "OFF"
+        else:
+            state = prev if prev in ("ON", "OFF") else "OFF"
+        self._lpsb_current_state = state
+        self._log.log_info(f"[LPSB] CURRENT ADC3={state}")
+        # 추가 메타: slave id / heartbeat / fw version (새 펌웨어 반영 여부 확인용)
+        if len(regs) >= 9:
+            try:
+                sid = regs[6]
+                hb = regs[7]
+                fw = regs[8]
+                self._log.log_info(f"[LPSB] META slave={sid} heartbeat={hb} fw=0x{fw:04X}")
+            except Exception:
+                pass
+        # LPSB current 칸에 ADC raw 표시
+        self._lpsb_current_labels[0].setText(f"ADC1: {adc1} (pkpk {pk1})")
+        self._lpsb_current_labels[1].setText(f"ADC2: {adc2} (pkpk {pk2})")
+        self._lpsb_current_labels[2].setText(f"ADC3: {adc3} (pkpk {pk3})")
+        self._lpsb_comm_label.setText("Comm: OK")
+        # reg0~2 = SSR1~3 상태 → 스트립/버튼/내부 상태 동기화
+        for i in range(3):
+            on = (regs[i] & 1) != 0 if i < len(regs) else False
+            self._lpsb_ssr_state[i] = on
+            self._lpsb_strips[i].set_state(on)
+            self._lpsb_ssr_btns[i].blockSignals(True)
+            self._lpsb_ssr_btns[i].setChecked(on)
+            self._lpsb_ssr_btns[i].blockSignals(False)
+        self._update_lpsb_auto_adc_poll("lpsb_adc_result_ok")
+
+    def _any_lpsb_ssr_on(self) -> bool:
+        try:
+            return any(bool(x) for x in self._lpsb_ssr_state)
+        except Exception:
+            return False
+
+    def _start_lpsb_auto_adc_poll(self, context: str):
+        if self._lpsb_adc_poll_running:
+            return
+        self._lpsb_adc_poll_running = True
+        self._lpsb_adc_poll_inflight = False
+        self._lpsb_adc_poll_timer.start()
+        self._log.log_info("[LPSB] Auto ADC poll started (500ms)")
+        self._on_lpsb_adc_poll_tick()
+
+    def _stop_lpsb_auto_adc_poll(self, context: str):
+        if not self._lpsb_adc_poll_running:
+            return
+        self._lpsb_adc_poll_running = False
+        self._lpsb_adc_poll_inflight = False
+        self._lpsb_adc_poll_timer.stop()
+        self._log.log_info("[LPSB] Auto ADC poll stopped")
+
+    def _update_lpsb_auto_adc_poll(self, context: str):
+        """Direct LPSB 모드에서 SSR이 하나라도 ON이면 ADC 자동 폴링 시작, 모두 OFF면 중지."""
+        if (not self._client.connected) or (self._direct_mode != "lpsb"):
+            self._stop_lpsb_auto_adc_poll(context)
+            return
+        if self._any_lpsb_ssr_on():
+            self._start_lpsb_auto_adc_poll(context)
+        else:
+            self._stop_lpsb_auto_adc_poll(context)
+
+    def _on_lpsb_adc_poll_tick(self):
+        """500ms 주기 자동 ADC 폴링. 이전 요청 응답 전에는 중복 요청 금지."""
+        if (not self._client.connected) or (self._direct_mode != "lpsb"):
+            self._stop_lpsb_auto_adc_poll("adc_poll_tick_not_ready")
+            return
+        if not self._any_lpsb_ssr_on():
+            self._stop_lpsb_auto_adc_poll("adc_poll_tick_all_off")
+            return
+        if self._lpsb_adc_poll_inflight:
+            return
+        self._lpsb_adc_poll_inflight = True
+        self.request_read_direct_lpsb_adc.emit()
+
+    def _on_sub_poll_tick(self):
+        """2초 주기: Direct LPSB면 FC03(ADC) 읽기, 아니면 기존 HPSB/LPSB sub read."""
+        if not self._client.connected:
+            return
+        if self._direct_mode == "lpsb":
+            self.request_read_direct_lpsb_adc.emit()
+        else:
+            self.request_read_sub.emit()
 
     def _on_auto_poll_changed(self, state):
-        if self._chk_direct_hpsb.isChecked():
-            return  # Direct HPSB: auto poll disabled
         self._sub_auto_poll = state == Qt.CheckState.Checked
         if self._sub_auto_poll and self._client.connected:
             self._sub_poll_timer.start()
-            self.request_read_sub.emit()
+            self._on_sub_poll_tick()
         else:
             self._sub_poll_timer.stop()
 

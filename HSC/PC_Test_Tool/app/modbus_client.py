@@ -567,6 +567,34 @@ class ModbusClient:
                     self._response_logger(False, None)
                 return False, format_modbus_error(exc=e)
 
+    def read_holding_registers_direct(
+        self, slave_id: int, start: int, count: int
+    ) -> tuple[bool, list[int] | str]:
+        """FC03 read holding registers from given slave (e.g. LPSB slave_id=2).
+        Returns (True, list of register values) or (False, error_string)."""
+        with self._lock:
+            ok, err = self._ensure_socket_open()
+            if not ok:
+                return False, err or "Not connected"
+            try:
+                if self._request_logger:
+                    self._request_logger(slave_id, "FC03", start, count)
+                rr = self._client.read_holding_registers(
+                    address=start,
+                    count=count,
+                    unit=slave_id,
+                )
+                if self._response_logger:
+                    self._response_logger(not rr.isError(), _response_exception_code(rr))
+                if rr.isError():
+                    return False, format_modbus_error(resp=rr)
+                regs = list(rr.registers) if rr.registers else []
+                return True, regs
+            except Exception as e:
+                if self._response_logger:
+                    self._response_logger(False, None)
+                return False, format_modbus_error(exc=e)
+
     def write_coil_direct(self, slave_id: int, coil_addr: int, value: bool) -> tuple[bool, str | None]:
         """FC05 직접 전송 (메인보드 경유 없음). raw_only 연결이면 시리얼로 프레임만 전송."""
         with self._lock:
