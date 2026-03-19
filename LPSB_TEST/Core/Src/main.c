@@ -54,6 +54,7 @@ static uint8_t uart_rx_byte;
 static uint32_t s_adc_tick;
 static ACS712_RmsState s_rms;
 static uint32_t s_rms_print_tick;
+static uint32_t s_led4_hb_tick;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -131,6 +132,7 @@ int main(void)
   LPSB_LED_Sequence();
   s_adc_tick = HAL_GetTick();
   s_rms_print_tick = HAL_GetTick();
+  s_led4_hb_tick = HAL_GetTick();
   HAL_UART_Receive_IT(&huart1, &uart_rx_byte, 1);
 
   /* Start RMS measurement on ADC3 channel (ADC_CH5 = PA5 = ACS_ADC03).
@@ -154,6 +156,15 @@ int main(void)
     LPSB_Heartbeat();
     /* RS485 활동 LED4 타임아웃 처리 (TX/RX 후 약 50ms 뒤 OFF) */
     RS485_ActivityTick();
+    /* 전원/루프 동작 확인용: LED4를 5초마다 1회 짧게 점멸 (RS485 activity LED 로직 재사용) */
+    {
+      uint32_t now = HAL_GetTick();
+      if ((now - s_led4_hb_tick) >= 5000u)
+      {
+        s_led4_hb_tick = now;
+        RS485_NotifyRxActivity(); /* LED4 ON + timestamp; RS485_ActivityTick()이 50ms 후 OFF */
+      }
+    }
 
     /* RMS poll + periodic debug print */
     if (ACS712_RMS_Poll(&s_rms))

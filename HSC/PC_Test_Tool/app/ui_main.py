@@ -1086,23 +1086,10 @@ class MainWindow(QMainWindow):
         self._log.log_info("[LPSB] ADC RAW READ")
         self._log.log_info(f"[LPSB] ADC_AVG  ADC1={adc1} ADC2={adc2} ADC3={adc3}")
         self._log.log_info(f"[LPSB] ADC_PKPK ADC1={pk1} ADC2={pk2} ADC3={pk3}")
-        # ADC1 전류 유무 히스테리시스 (ADC3와 동일 기준)
-        prev1 = self._lpsb_current_state_ch1
-        if prev1 == "OFF" and pk1 >= 50:
-            state1 = "ON"
-        elif prev1 == "ON" and pk1 <= 37:
-            state1 = "OFF"
-        else:
-            state1 = prev1 if prev1 in ("ON", "OFF") else "OFF"
+        # ADC1/ADC2 전류 유무 (PKPK 단순 기준): pk<=9 OFF, pk>=10 ON
+        state1 = "ON" if pk1 >= 10 else "OFF"
+        state2 = "ON" if pk2 >= 10 else "OFF"
         self._lpsb_current_state_ch1 = state1
-        # ADC2 전류 유무 히스테리시스 (ADC3와 동일 기준)
-        prev2 = self._lpsb_current_state_ch2
-        if prev2 == "OFF" and pk2 >= 50:
-            state2 = "ON"
-        elif prev2 == "ON" and pk2 <= 37:
-            state2 = "OFF"
-        else:
-            state2 = prev2 if prev2 in ("ON", "OFF") else "OFF"
         self._lpsb_current_state_ch2 = state2
         # ADC3 전류 유무 히스테리시스 (ON/OFF만): OFF→ON pk3>=50, ON→OFF pk3<=37, 그 외 현재 상태 유지
         prev = self._lpsb_current_state
