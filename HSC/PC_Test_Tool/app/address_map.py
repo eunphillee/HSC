@@ -3,7 +3,7 @@ Mainboard Modbus address map (1:1 with mainboard firmware).
 Change only these constants when firmware mapping changes; UI logic stays the same.
 All addresses for a single slave (Mainboard only).
 """
-# Slave ID for Mainboard (default)
+# Slave ID for Mainboard (default, H2Tech 문서 기준)
 MAINBOARD_SLAVE_ID_DEFAULT = 9
 
 # ---- Mainboard I/O (FC03/FC06) ----
@@ -51,3 +51,29 @@ SUB_LPSB_COIL_BASE = 901   # FC05 addr 901..909 = LPSB1/2/3 coil 0,1,2 each (h2_
 SUB_LPSB_COIL_COUNT = 9    # 901..903=LPSB1, 904..906=LPSB2, 907..909=LPSB3
 # error_flags (FC03 2112): bit0=AGG_ERR_COMM_HPSB, bit1=AGG_ERR_COMM_LPSB
 ERROR_FLAGS_REG = 2112
+
+
+# ---- H2Tech 문서 주소(1x/4x) -> Modbus PDU 0-based offset 변환 ----
+# 문서 표기 예: 1x0821, 1x0892 / 실제 요청은 address=0-based
+DOC1X_DI_BASE = 821
+DOC1X_COIL_BASE = 892
+DOC4X_BASE = 2000
+
+
+def doc1x_to_offset(doc_addr: int) -> int:
+    """문서 1x 주소를 0-based offset으로 변환.
+    - DI 영역: 821 기준
+    - Coil 영역: 892 기준
+    """
+    if doc_addr >= DOC1X_COIL_BASE:
+        return doc_addr - DOC1X_COIL_BASE
+    if doc_addr >= DOC1X_DI_BASE:
+        return doc_addr - DOC1X_DI_BASE
+    return 0
+
+
+def doc4x_to_offset(doc_addr: int) -> int:
+    """문서 4x 주소를 0-based offset으로 변환."""
+    if doc_addr < DOC4X_BASE:
+        return 0
+    return doc_addr - DOC4X_BASE

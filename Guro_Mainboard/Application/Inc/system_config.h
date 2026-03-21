@@ -14,7 +14,7 @@ extern "C" {
 
 #define SYSTEM_CONFIG_MAGIC    0x4853u  /* "HS" */
 #define SYSTEM_CONFIG_VERSION  1u
-#define SYSTEM_CONFIG_DEFAULT_SLAVE_ID  9u
+#define SYSTEM_CONFIG_DEFAULT_SLAVE_ID  1u
 #define SYSTEM_CONFIG_DEFAULT_BAUDRATE  9600u
 
 /* slave_id valid range (Modbus) */
@@ -45,7 +45,7 @@ typedef struct __attribute__((packed)) {
 	uint16_t crc;
 } system_config_t;
 
-/** Set default values (magic, version=1, slave_id=9, baudrate=9600). */
+/** Set default values (magic, version=1, slave_id=1, baudrate=9600). */
 void SystemConfig_SetDefaults(system_config_t *cfg);
 
 /**

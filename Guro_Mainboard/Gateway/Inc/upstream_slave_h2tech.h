@@ -1,7 +1,7 @@
 /**
  * @file upstream_slave_h2tech.h
- * @brief Upstream Modbus Slave (PC link): H2TECH address handling skeleton.
- *        MAIN acts as slave on USART2; uses h2tech_address_map + aggregated image.
+ * @brief Upstream Modbus Slave (PC link): H2TECH address handling.
+ *        MAIN acts as slave on USART1; uses h2tech_address_map + aggregated image.
  */
 #ifndef UPSTREAM_SLAVE_H2TECH_H
 #define UPSTREAM_SLAVE_H2TECH_H
@@ -14,7 +14,7 @@ extern "C" {
 
 /**
  * Handle one Modbus request from PC (H2TECH addresses).
- * @param fc         Modbus function code (01..04 read, 05/06/15/16 write).
+ * @param fc         Modbus function code (01/02/03/04/05/06/15/16 지원).
  * @param start_addr H2TECH logical start address (e.g. 821).
  * @param count      Number of coils/discrete/registers.
  * @param write_data For FC05/06/15/16, payload; else NULL.

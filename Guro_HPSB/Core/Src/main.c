@@ -54,6 +54,9 @@ static uint32_t s_tx_test_last_tick;
 #if HPSB_RS485_TX_STRING_TEST
 static uint32_t s_string_test_last_tick;
 #endif
+#if HPSB_OKOK_STREAM_TEST
+static uint32_t s_okok_test_last_tick;
+#endif
 #if HPSB_MAX3485_TX_AA_TEST
 static uint32_t s_aa_test_tick;
 #endif
@@ -154,6 +157,9 @@ int main(void)
 #if HPSB_RS485_TX_STRING_TEST
   s_string_test_last_tick = HAL_GetTick();
 #endif
+#if HPSB_OKOK_STREAM_TEST
+  s_okok_test_last_tick = HAL_GetTick();
+#endif
 #endif
 #if HPSB_MAX3485_TX_AA_TEST
   s_aa_test_tick = HAL_GetTick();
@@ -196,6 +202,13 @@ int main(void)
         ModbusSlave_SendTestString("HPSB_OK\r\n", 8);
         HAL_GPIO_WritePin(LED02_GPIO_Port, LED02_Pin, GPIO_PIN_SET);    /* LED2 OFF (송신 완료 후) */
         s_string_test_last_tick = HAL_GetTick();
+    }
+    __WFI();
+#elif HPSB_OKOK_STREAM_TEST
+    /* ASCII 브리지 테스트: 1초마다 "OKOK\r\n" 송신 (DE=TX -> TX -> TC -> DE=RX는 ModbusSlave_SendTestString에서 처리) */
+    if ((HAL_GetTick() - s_okok_test_last_tick) >= 1000u) {
+        ModbusSlave_SendTestString("OKOK\r\n", 6);
+        s_okok_test_last_tick = HAL_GetTick();
     }
     __WFI();
 #else
@@ -382,8 +395,10 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOA, RLY_EN01_Pin|RLY_EN02_Pin|RLY_EN03_Pin|RS485_DE_Pin
-                          |LED04_Pin, GPIO_PIN_RESET);
+  /* Set initial relay outputs to LOW (GPIO_PIN_RESET). */
+  HAL_GPIO_WritePin(GPIOA, RLY_EN01_Pin|RLY_EN02_Pin|RLY_EN03_Pin, GPIO_PIN_RESET);
+  /* RS485 DE idle = RX (LOW) */
+  HAL_GPIO_WritePin(GPIOA, RS485_DE_Pin|LED04_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOB, LED01_Pin|LED02_Pin|LED03_Pin, GPIO_PIN_RESET);

@@ -37,6 +37,7 @@ static volatile uint16_t rx_accum_len;
 static volatile uint32_t last_rx_tick;
 static uint8_t tx_busy;
 static upstream_cmd_cb_t cmd_cb;
+static volatile uint8_t s_uart2_rx_it_paused;
 
 static uint32_t invalid_len_count;
 static uint32_t invalid_crc_count;
@@ -60,13 +61,50 @@ void UpstreamPC_Init(void)
 	cmd_cb = NULL;
 	invalid_len_count = 0;
 	invalid_crc_count = 0;
+	s_uart2_rx_it_paused = 0;
+	(void)HAL_UARTEx_ReceiveToIdle_IT(&huart2, rx_buf, UPSTREAM_RX_BUF_SIZE);
+}
+
+void UpstreamPC_PauseUart2RxIT(void)
+{
+	/* ReceiveToIdle_IT로 활성화된 UART2 RX를 중지한다.
+	 * 하위통신 트랜잭션에서 HAL_UART_Receive()가 응답 바이트를 독점 수신하도록 보장. */
+	(void)HAL_UART_AbortReceive_IT(&huart2);
+	s_uart2_rx_it_paused = 1;
+}
+
+void UpstreamPC_ResumeUart2RxIT(void)
+{
+	if (!s_uart2_rx_it_paused) return;
+	s_uart2_rx_it_paused = 0;
 	(void)HAL_UARTEx_ReceiveToIdle_IT(&huart2, rx_buf, UPSTREAM_RX_BUF_SIZE);
 }
 
 void UpstreamPC_UART_RxEventCallback(uint16_t Size)
 {
 	if (Size == 0 || Size > UPSTREAM_RX_BUF_SIZE) return;
+	if (s_uart2_rx_it_paused) return;
 	uint32_t now = HAL_GetTick();
+
+#if UART2_RS485_SUB_TXRX_TEST_ENABLE && UART2_RS485_SUB_RX_LOG_ENABLE && USE_PC_TEST_UART1_SLAVE
+	/* RX 생존 테스트 중: 수신 이벤트가 발생하면 UART1으로 1바이트만 출력(부담 최소화). */
+	{
+		static uint32_t s_last_uart2_rx_log_ms;
+		/* 짧은 시간에 이벤트가 연속으로 뜨는 것을 일부 완화(약 100ms 최소 간격) */
+		if (s_last_uart2_rx_log_ms == 0u || (now - s_last_uart2_rx_log_ms) >= 100u) {
+			uint8_t b0 = rx_buf[0];
+			char c = (b0 >= 32u && b0 <= 126u) ? (char)b0 : '.';
+			char logbuf[64];
+			int n = snprintf(logbuf, sizeof(logbuf),
+				"[UART2 RX] %02X (%c)\r\n", b0, c);
+			if (n > 0) {
+				(void)HAL_UART_Transmit(&huart1, (const uint8_t *)logbuf, (uint16_t)n, 20);
+			}
+			s_last_uart2_rx_log_ms = now;
+		}
+	}
+#endif
+
 	if ((uint16_t)(rx_accum_len + Size) <= RX_RING_SIZE) {
 		memcpy(rx_accum + rx_accum_len, rx_buf, (size_t)Size);
 		rx_accum_len += (uint16_t)Size;

@@ -10,13 +10,15 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import pyqtSignal, Qt, QTimer
 from PyQt6.QtGui import QFont, QShowEvent, QPixmap
 from pathlib import Path
+from collections import deque
 
 import pymodbus
 from pymodbus.client.sync import ModbusSerialClient
 
-from .modbus_client import ModbusClient
+from .modbus_client import ModbusClient, build_fc05_rtu_frame
 from .worker import MainboardWorker, create_worker_and_thread
 from .logger import LogHandler
+from .doc_modbus_panel import DocModbusPanel
 from .address_map import (
     MAINBOARD_SLAVE_ID_DEFAULT,
     MAIN_DI_REG,
@@ -33,6 +35,8 @@ from .address_map import (
     MAIN_ENV_REG,
 )
 
+from PyQt6.QtWidgets import QTabWidget
+
 
 DARK_QSS = """
 QMainWindow, QWidget { background-color: #1e1e1e; }
@@ -48,7 +52,7 @@ QPushButton:disabled { background-color: #252525; color: #555555; border-color: 
 QCheckBox { color: #e0e0e0; spacing: 6px; }
 QCheckBox::indicator { width: 18px; height: 18px; border-radius: 3px; border: 2px solid #3a3a3a; background: #252525; }
 QCheckBox::indicator:checked { background: #2d8cf0; border-color: #2d8cf0; }
-QPlainTextEdit { background-color: #1e1e1e; color: #e0e0e0; font-family: Consolas, Monaco, monospace; font-size: 12px; border: 1px solid #3a3a3a; border-radius: 4px; }
+QPlainTextEdit { background-color: #1e1e1e; color: #e0e0e0; font-family: Menlo, Monaco, "Courier New", monospace; font-size: 12px; border: 1px solid #3a3a3a; border-radius: 4px; }
 """
 
 
@@ -138,6 +142,12 @@ class MainWindow(QMainWindow):
     request_diagnostic_sequence = pyqtSignal()  # run HPSB/LPSB LED diagnostic sequence
     request_sniff = pyqtSignal()  # 연결 직후 2초 수신 테스트 (Direct HPSB)
     request_read_direct_lpsb_adc = pyqtSignal()  # Direct LPSB: FC03 start=0,count=9 → ADC raw 등
+    # 문서 기반 Modbus 테스트 (Tab2, worker thread 경유)
+    request_doc_fc01 = pyqtSignal(int, int, int)       # unit, start, count
+    request_doc_fc02 = pyqtSignal(int, int, int)       # unit, start, count
+    request_doc_fc04 = pyqtSignal(int, int, int)       # unit, start, count
+    request_doc_fc05 = pyqtSignal(int, int, bool)      # unit, addr, value
+    request_doc_fc15 = pyqtSignal(int, int, object)    # unit, start, values(list[bool])
 
     def __init__(self):
         super().__init__()
@@ -152,13 +162,24 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self._log.log_info(f"Startup: {type(e).__name__}: {e}")
         self._last_log_tag = "[MAIN]"
+        self._pending_hpsb_write: tuple[int, bool] | None = None
+        self._last_req_route: str = "mainboard-routing"
+        self._simple_hpsb_mode: bool = True
+        self._hpsb_probe_inflight: bool = False
+        self._log_buffer: deque[str] = deque()
         self._client.set_request_logger(self._on_request_log)
         self._client.set_response_logger(self._on_response_log)
         self._client.set_tx_frame_hex_logger(self._on_tx_frame_hex)
+        self._client.set_raw_exception_logger(lambda msg: self._log.log_info(msg))
         self._thread, self._worker = create_worker_and_thread(self._client)
         self._thread.start()
         self._connect_worker_signals()
         self._log_lines: list[str] = []
+        self._log_max_lines = 400
+        self._log_flush_timer = QTimer(self)
+        self._log_flush_timer.setInterval(80)
+        self._log_flush_timer.timeout.connect(self._flush_log_buffer)
+        self._log_flush_timer.start()
         self._raw_poll_timer = QTimer(self)
         self._raw_poll_timer.setInterval(50)  # 50ms마다 raw RX 확인 (HPSB_TEST 1초 주기 수신 놓치지 않도록)
         self._raw_poll_timer.timeout.connect(self._poll_raw_rx)
@@ -166,7 +187,7 @@ class MainWindow(QMainWindow):
         self._env_poll_timer.setInterval(5000)
         self._env_poll_timer.timeout.connect(lambda: self.request_read_env.emit())
         self._sub_poll_timer = QTimer(self)
-        self._sub_poll_timer.setInterval(2000)  # HPSB/LPSB 2초 주기 (Direct LPSB면 FC03 ADC read)
+        self._sub_poll_timer.setInterval(5000)  # 기본은 느리게(5초) 유지; 기본 auto poll OFF
         self._sub_poll_timer.timeout.connect(self._on_sub_poll_tick)
         self._sub_auto_poll = False
         # Direct LPSB: SSR ON 동안 ADC 자동 폴링 (500ms)
@@ -178,6 +199,7 @@ class MainWindow(QMainWindow):
         self._seen_0xaa_since_connect = False
         self._modbus_fail_0xaa_hint_shown = False
         self._direct_hpsb_rx_total = 0  # 직접 HPSB 연결 후 수신 누적 바이트 (진단용)
+        self._pc_rx_byte_count = 0      # USART raw RX 누적(필터 무관)
         self._direct_diag_timer = QTimer(self)
         self._direct_diag_timer.setInterval(3000)  # 3초마다 수신 0이면 안내
         self._direct_diag_timer.timeout.connect(self._on_direct_diag_tick)
@@ -186,6 +208,14 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._refresh_ports()
         self._set_connected_ui(False)
+        # 실행 시 열리는 크기: 1440×900 (MacBook Pro 13" 해상도 기준).
+        self._default_width = 1440
+        self._default_height = 900
+        self.resize(self._default_width, self._default_height)
+        # 세로는 자유롭게 리사이즈 가능, 가로 최소 폭만 제한
+        self.setMinimumSize(1024, 640)
+        self._first_show = True
+        self._log.log_line.connect(self._on_log_line)
 
     def _connect_worker_signals(self):
         self.request_read_di.connect(self._worker.on_request_read_di, Qt.ConnectionType.QueuedConnection)
@@ -211,6 +241,17 @@ class MainWindow(QMainWindow):
         self._worker.raw_bytes_received.connect(self._on_raw_bytes)
         self.request_read_direct_lpsb_adc.connect(self._worker.on_request_read_direct_lpsb_adc, Qt.ConnectionType.QueuedConnection)
         self._worker.lpsb_adc_result.connect(self._on_lpsb_adc_result)
+        # Doc tab signals
+        self.request_doc_fc01.connect(self._worker.on_request_doc_fc01, Qt.ConnectionType.QueuedConnection)
+        self.request_doc_fc02.connect(self._worker.on_request_doc_fc02, Qt.ConnectionType.QueuedConnection)
+        self.request_doc_fc04.connect(self._worker.on_request_doc_fc04, Qt.ConnectionType.QueuedConnection)
+        self.request_doc_fc05.connect(self._worker.on_request_doc_fc05, Qt.ConnectionType.QueuedConnection)
+        self.request_doc_fc15.connect(self._worker.on_request_doc_fc15, Qt.ConnectionType.QueuedConnection)
+        self._worker.doc_fc01_result.connect(self._on_doc_fc01_result)
+        self._worker.doc_fc02_result.connect(self._on_doc_fc02_result)
+        self._worker.doc_fc04_result.connect(self._on_doc_fc04_result)
+        self._worker.doc_fc05_result.connect(self._on_doc_fc05_result)
+        self._worker.doc_fc15_result.connect(self._on_doc_fc15_result)
 
     def _build_ui(self):
         central = QWidget()
@@ -257,6 +298,22 @@ class MainWindow(QMainWindow):
         top_lay.addWidget(self._status_badge)
         top_lay.addStretch()
         main_layout.addWidget(top)
+
+        # ---- Tabs: 기존 테스트 UI 유지 + 문서 기반 Modbus 테스트 추가 ----
+        tabs = QTabWidget()
+        tabs.setDocumentMode(True)
+        tabs.setMovable(False)
+        tabs.setTabsClosable(False)
+        main_layout.addWidget(tabs, 1)
+
+        # =========================
+        # Tab 1) 기존 테스트 UI (그대로 유지)
+        # =========================
+        tab_existing = QWidget()
+        tabs.addTab(tab_existing, "기존 보드 테스트")
+        tab_existing_lay = QVBoxLayout(tab_existing)
+        tab_existing_lay.setContentsMargins(0, 0, 0, 0)
+        tab_existing_lay.setSpacing(0)
 
         # ---- Content: Left(Mainboard + HPSB/LPSB) + Right(Log sidebar) ----
         content_row = QHBoxLayout()
@@ -385,6 +442,9 @@ class MainWindow(QMainWindow):
 
         gb_ctrl = QGroupBox("제어")
         lay_ctrl = QVBoxLayout(gb_ctrl)
+        self._btn_main_minimal = QPushButton("Mainboard minimal test (FC03 2100/2)")
+        self._btn_main_minimal.clicked.connect(self._on_mainboard_minimal_test)
+        lay_ctrl.addWidget(self._btn_main_minimal)
         btn_read_once = QPushButton("Read once (HPSB/LPSB)")
         btn_read_once.clicked.connect(self._on_read_once_clicked)
         lay_ctrl.addWidget(btn_read_once)
@@ -401,6 +461,15 @@ class MainWindow(QMainWindow):
 
         gb_hpsb = QGroupBox("HPSB (Slave 1)")
         lay_hpsb = QVBoxLayout(gb_hpsb)
+        hpsb_tools = QHBoxLayout()
+        self._chk_hpsb_simple = QCheckBox("Simple mode (no read-first probe)")
+        self._chk_hpsb_simple.setChecked(True)
+        self._chk_hpsb_simple.stateChanged.connect(lambda s: setattr(self, "_simple_hpsb_mode", s == Qt.CheckState.Checked.value))
+        self._btn_hpsb_probe = QPushButton("HPSB Read Probe")
+        self._btn_hpsb_probe.clicked.connect(self._run_hpsb_probe_only)
+        hpsb_tools.addWidget(self._chk_hpsb_simple)
+        hpsb_tools.addWidget(self._btn_hpsb_probe)
+        lay_hpsb.addLayout(hpsb_tools)
         self._hpsb_strips = []
         self._hpsb_btns = []
         self._hpsb_current_labels = []
@@ -525,6 +594,18 @@ class MainWindow(QMainWindow):
         self._log_edit.setReadOnly(True)
         self._log_edit.setMinimumHeight(200)
         self._log_edit.setFont(QFont("Consolas", 10))
+        self._log_edit.setMaximumBlockCount(self._log_max_lines)
+        row_log_opt = QHBoxLayout()
+        row_log_opt.addWidget(QLabel("Level:"))
+        self._cmb_log_level = QComboBox()
+        self._cmb_log_level.addItems(["BASIC", "FLOW", "RAW"])
+        self._cmb_log_level.setCurrentText("FLOW")
+        row_log_opt.addWidget(self._cmb_log_level)
+        self._chk_log_raw = QCheckBox("Show RAW frames")
+        self._chk_log_raw.setChecked(False)
+        row_log_opt.addWidget(self._chk_log_raw)
+        row_log_opt.addStretch()
+        lay_log.addLayout(row_log_opt)
         lay_log.addWidget(self._log_edit)
         h2 = QHBoxLayout()
         btn_clear2 = QPushButton("Clear")
@@ -538,18 +619,44 @@ class MainWindow(QMainWindow):
         log_w.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         content_row.addWidget(log_w, 1)
 
-        main_layout.addLayout(content_row)
+        tab_existing_lay.addLayout(content_row)
+
+        # =========================
+        # Tab 2) 문서 기반 Modbus 테스트 (추가 패널)
+        # =========================
+        tab_doc = DocModbusPanel(self._log)
+        tab_doc.set_request_callbacks(
+            lambda unit, start, count: self.request_doc_fc01.emit(unit, start, count),
+            lambda unit, start, count: self.request_doc_fc02.emit(unit, start, count),
+            lambda unit, start, count: self.request_doc_fc04.emit(unit, start, count),
+            lambda unit, addr, value: self.request_doc_fc05.emit(unit, addr, value),
+            lambda unit, start, values: self.request_doc_fc15.emit(unit, start, values),
+        )
+        self._doc_panel = tab_doc
+        tabs.addTab(tab_doc, "문서 기반 Modbus 테스트")
 
         self.setCentralWidget(central)
-        # 실행 시 열리는 크기: 1440×900 (MacBook Pro 13\" 해상도 기준).
-        self._default_width = 1440
-        self._default_height = 900
-        self.resize(self._default_width, self._default_height)
-        # 세로는 자유롭게 리사이즈 가능, 가로 최소 폭만 제한
-        self.setMinimumSize(1024, 640)
-        self._first_show = True
 
-        self._log.log_line.connect(self._on_log_line)
+    # ---- Doc tab result handlers (worker thread -> UI thread) ----
+    def _on_doc_fc01_result(self, ok: bool, bits: list | None, err: str | None):
+        if hasattr(self, "_doc_panel"):
+            self._doc_panel.on_fc01_result(ok, bits, err)
+
+    def _on_doc_fc02_result(self, ok: bool, bits: list | None, err: str | None):
+        if hasattr(self, "_doc_panel"):
+            self._doc_panel.on_fc02_result(ok, bits, err)
+
+    def _on_doc_fc04_result(self, ok: bool, regs: list | None, err: str | None):
+        if hasattr(self, "_doc_panel"):
+            self._doc_panel.on_fc04_result(ok, regs, err)
+
+    def _on_doc_fc05_result(self, ok: bool, err: str | None):
+        if hasattr(self, "_doc_panel"):
+            self._doc_panel.on_fc05_result(ok, err)
+
+    def _on_doc_fc15_result(self, ok: bool, err: str | None):
+        if hasattr(self, "_doc_panel"):
+            self._doc_panel.on_fc15_result(ok, err)
 
     def showEvent(self, event: QShowEvent):
         """첫 표시 시 880×640으로 열리도록 함 (저장된 창 크기 무시)."""
@@ -676,19 +783,94 @@ class MainWindow(QMainWindow):
 
     def _on_request_log(self, unit: int, func: str, addr: int | str, count_or_value: int | str):
         self._last_log_tag = self._tag_for_request(func, addr, count_or_value)
+        try:
+            a = int(addr)
+        except Exception:
+            a = -1
+
+        if self._direct_mode == "hpsb" and unit == 1:
+            self._last_req_route = "direct-hpsb"
+            self._log.log_info(f"[PC->HPSB] tx unit=1 fc={func.replace('FC', '')} addr={a} val/count={count_or_value}")
+        elif self._direct_mode == "lpsb" and unit == 2:
+            self._last_req_route = "direct-lpsb"
+            self._log.log_info(f"[PC->LPSB] tx unit=2 fc={func.replace('FC', '')} addr={a} val/count={count_or_value}")
+        else:
+            self._last_req_route = "mainboard-routing"
+            self._log.log_info(f"[PC->MB] tx unit={unit} fc={func.replace('FC', '')} addr={a} val/count={count_or_value}")
+            if func == "FC05" and SUB_HPSB_COIL_BASE <= a < SUB_HPSB_COIL_BASE + 3:
+                coil = a - SUB_HPSB_COIL_BASE
+                try:
+                    v_bool = bool(int(count_or_value))
+                except Exception:
+                    v_bool = False
+                raw = build_fc05_rtu_frame(1, coil, v_bool)
+                raw_hex = " ".join(f"{x:02X}" for x in raw)
+                self._log.log_info(f"[MB] parsed request target=HPSB slave=1 coil={coil}")
+                self._log.log_info(f"[MB->HPSB] tx raw len={len(raw)} data={raw_hex}")
+                self._log.log_info(f"[MB->HPSB] tx slave=1 fc=05 coil={coil}")
         self._log.log_request(self._last_log_tag, unit, func, addr, count_or_value)
 
     def _on_response_log(self, ok: bool, exception_code: int | None):
+        if self._last_req_route == "mainboard-routing":
+            if ok:
+                self._log.log_info("[MB->HPSB] rx raw ... (response received)")
+            else:
+                if exception_code is not None:
+                    self._log.log_info(f"[MB->HPSB] rx exception 0x{exception_code:02X}")
+                else:
+                    self._log.log_info("[MB->HPSB] timeout waiting response")
         self._log.log_response(self._last_log_tag, ok, exception_code)
 
     def _on_tx_frame_hex(self, msg: str):
         """Direct HPSB FC05 시 실제 전송 프레임 hex 로그 (01 05 00 00 FF 00 CRC_L CRC_H 형식)."""
         self._log.log_info(msg)
 
+    def _allow_log_line(self, line: str) -> bool:
+        if "[PC-TOOL]" in line:
+            return True
+        # Firmware-side UART debug lines should always be visible for protocol debugging.
+        if "[UART2-MB]" in line:
+            return True
+        if "[MB->HPSB]" in line:
+            return True
+        if "[HPSB-SLAVE]" in line or "[HPSB]" in line:
+            return True
+        level = self._cmb_log_level.currentText() if hasattr(self, "_cmb_log_level") else "FLOW"
+        low = line.lower()
+        is_raw = (" raw " in low) or ("data=" in line and "tx" in low) or ("tx frame (hex)" in low)
+        if is_raw and hasattr(self, "_chk_log_raw") and not self._chk_log_raw.isChecked():
+            return False
+        if level == "RAW":
+            return True
+        if level == "FLOW":
+            if " | [RX] " in line:
+                return False
+            return True
+        # BASIC: 성공/실패/예외 중심
+        keys = ("Response:", "RX OK", "RX EXC", "RX ERR", "Fail", "OK", "Connect", "Disconnect")
+        return any(k in line for k in keys)
+
+    def _flush_log_buffer(self):
+        if not self._log_buffer:
+            return
+        batch = []
+        while self._log_buffer and len(batch) < 40:
+            batch.append(self._log_buffer.popleft())
+        if not batch:
+            return
+        try:
+            self._log_edit.appendPlainText("\n".join(batch))
+        except Exception:
+            pass
+
     def _on_log_line(self, line: str):
         self._log_lines.append(line)
+        if len(self._log_lines) > self._log_max_lines:
+            self._log_lines = self._log_lines[-self._log_max_lines :]
+        if not self._allow_log_line(line):
+            return
         try:
-            self._log_edit.appendPlainText(line)
+            self._log_buffer.append(line)
         except Exception:
             pass
 
@@ -696,9 +878,30 @@ class MainWindow(QMainWindow):
         try:
             self._log.clear()
             self._log_lines.clear()
+            self._log_buffer.clear()
             self._log_edit.clear()
         except Exception:
             pass
+
+    def _on_mainboard_minimal_test(self):
+        """최소 모드: Mainboard FC03 2100/2만 1회 요청."""
+        if not self._client.connected:
+            self._log.log_info("[MAIN] Not connected")
+            return
+        self._log.log_info("[MINIMAL] FC03 addr=2100 cnt=2 unit=9 (single shot)")
+        self.request_read_di.emit()
+
+    def _run_hpsb_probe_only(self):
+        """수동 HPSB probe 전용 버튼. write 없이 sub read만 수행."""
+        if not self._client.connected:
+            self._log.log_info("[HPSB] Not connected")
+            return
+        if self._hpsb_probe_inflight:
+            self._log.log_info("[HPSB] probe already in progress")
+            return
+        self._hpsb_probe_inflight = True
+        self._log.log_info("[HPSB] manual read probe start")
+        self.request_read_sub.emit()
 
     def _set_connected_ui(self, connected: bool):
         self._btn_connect.setEnabled(not connected)
@@ -718,10 +921,12 @@ class MainWindow(QMainWindow):
         # - Mainboard routing: HPSB/LPSB sub read
         # - Direct LPSB: LPSB FC03 (ADC raw 포함) read
         self._btn_read_sub.setEnabled(connected)
+        self._btn_main_minimal.setEnabled(connected)
         # Direct HPSB에서는 자동 폴링 없음; Direct LPSB·메인보드에서는 Auto poll 사용 가능
         self._chk_auto_poll.setEnabled(connected and (self._direct_mode != "hpsb"))
         for b in self._hpsb_btns:
             b.setEnabled(connected)
+        self._btn_hpsb_probe.setEnabled(connected and (self._direct_mode != "hpsb"))
         for b in self._lpsb_select_btns:
             b.setEnabled(connected and not direct_mode_active)
         for b in self._lpsb_ssr_btns:
@@ -735,12 +940,16 @@ class MainWindow(QMainWindow):
         self._log_lpsb_selection_state("set_connected_ui")
         self._update_lpsb_auto_adc_poll("set_connected_ui")
         if connected:
-            self._status_badge.setText("Connected")
+            self._pc_rx_byte_count = 0
+            self._status_badge.setText("Connected | RX count: 0")
             self._status_badge.setStyleSheet("color: #00c853; font-weight: bold; padding: 4px 8px;")
             self._seen_0xaa_since_connect = False
             self._modbus_fail_0xaa_hint_shown = False
             is_direct_hpsb = self._direct_mode == "hpsb"
             self._log.set_raw_line_only(is_direct_hpsb)  # Direct HPSB: \r\n만 보고 한 줄씩 출력
+            self._log.log_info("[PC-TOOL] serial read thread started")
+            # Mainboard→PC 문자열/원바이트도 확인하기 위해 direct 모드와 무관하게 raw polling을 유지
+            self._raw_poll_timer.start()
             if is_direct_hpsb:
                 # Direct HPSB: no Modbus 자동 폴링. HPSB_TEST 등 보드→PC raw 수신 표시 시도
                 self._direct_hpsb_rx_total = 0
@@ -759,7 +968,6 @@ class MainWindow(QMainWindow):
                 else:
                     self._log.log_info("→ [DIRECT] 보드→PC 수신: 이 툴에서 raw 수신 미지원. 터미널에서 screen ... 9600 로 확인하세요.")
             else:
-                self._raw_poll_timer.start()
                 # self._env_poll_timer.start()
                 self._log.log_info("→ Read DI 버튼을 눌러 보드 응답을 확인하세요. (보드는 요청 받을 때만 응답 전송)")
         else:
@@ -819,6 +1027,8 @@ class MainWindow(QMainWindow):
             self._client.disconnect()
         except Exception:
             pass
+        self._hpsb_probe_inflight = False
+        self._pending_hpsb_write = None
         self._set_connected_ui(False)
         self._log.log_tagged("[MAIN]", "Disconnect", "", "", "OK")
 
@@ -881,6 +1091,12 @@ class MainWindow(QMainWindow):
 
     def _on_raw_bytes(self, bytes_list: list):
         """보드에서 보낸 raw 바이트를 로그에 표시."""
+        if not bytes_list:
+            return
+        for b in bytes_list:
+            self._pc_rx_byte_count += 1
+            self._log.log_info(f"[PC-TOOL] rx byte=0x{b:02X}")
+        self._status_badge.setText(f"Connected | RX count: {self._pc_rx_byte_count}")
         if bytes_list and 0xAA in bytes_list:
             self._seen_0xaa_since_connect = True
         if bytes_list and self._direct_mode == "hpsb":
@@ -971,12 +1187,19 @@ class MainWindow(QMainWindow):
             self._log.log_info("[MAIN] Not connected")
             return
         if self._direct_mode == "lpsb":
+            self._log.log_info("[PC-TOOL] route=direct-lpsb slave=2")
             self._log.log_info("[LPSB] Direct FC03 (start=0,count=12) read 요청")
             self.request_read_direct_lpsb_adc.emit()
         elif self._direct_mode == "hpsb":
+            self._log.log_info("[PC-TOOL] route=direct-hpsb slave=1")
             # 아직 Direct HPSB read once 동작은 정의하지 않음. 힌트만 출력.
             self._log.log_info("[HPSB] Direct HPSB 모드에서는 현재 Read once 동작이 정의되어 있지 않습니다.")
         else:
+            self._log.log_info("[PC-TOOL] route=mainboard-routing target=HPSB/LPSB")
+            if self._hpsb_probe_inflight:
+                self._log.log_info("[MAIN] read request ignored (request in progress)")
+                return
+            self._hpsb_probe_inflight = True
             self.request_read_sub.emit()
 
     def _on_hpsb_relay_click(self, idx: int):
@@ -985,12 +1208,23 @@ class MainWindow(QMainWindow):
         value = btn.isChecked()
         self._hpsb_strips[idx].set_state(value)
         if self._direct_mode == "hpsb":
+            self._log.log_info("[PC-TOOL] route=direct-hpsb slave=1")
             self._log.log_info(f"[DEBUG] Button: HPSB RELAY{idx + 1} EN (Direct HPSB) -> FC05 slave=1 coil={idx} val={1 if value else 0}")
             self.request_write_direct_hpsb_coil.emit(idx, value)
         else:
             addr = SUB_HPSB_COIL_BASE + idx
-            self._log.log_info(f"[DEBUG] Button: HPSB RELAY{idx + 1} EN -> FC05 addr={addr} val={1 if value else 0}")
-            self.request_write_sub_coil.emit(addr, value)
+            self._log.log_info("[PC-TOOL] route=mainboard-routing target=HPSB slave=1")
+            if self._simple_hpsb_mode:
+                self._log.log_info(f"[HPSB] simple mode: single FC05 write relay{idx + 1}")
+                self.request_write_sub_coil.emit(addr, value)
+            else:
+                if self._hpsb_probe_inflight:
+                    self._log.log_info("[HPSB] read-first probe already in progress")
+                    return
+                self._log.log_info(f"[HPSB] read-first probe start: request sub read before FC05 (relay{idx + 1})")
+                self._hpsb_probe_inflight = True
+                self._pending_hpsb_write = (addr, value)
+                self.request_read_sub.emit()
 
     def _on_lpsb_select(self, idx: int):
         """LPSB 2/3/4 선택. 하나만 선택되도록. 선택 시 해당 보드 데이터로 SSR/current 갱신."""
@@ -1021,6 +1255,7 @@ class MainWindow(QMainWindow):
         slave_id = self._current_lpsb_slave_id()
         # Direct LPSB 모드가 아니면 토글을 되돌리고 안내만 남김
         if self._direct_mode != "lpsb":
+            self._log.log_info("[PC-TOOL] route=mainboard-routing target=LPSB")
             self._log.log_info("[LPSB] Direct LPSB (Slave 2) 모드에서만 SSR 제어가 가능합니다.")
             btn.blockSignals(True)
             btn.setChecked(self._lpsb_ssr_state[ssr_idx])
@@ -1029,6 +1264,7 @@ class MainWindow(QMainWindow):
             return
         # 선택된 LPSB 보드가 slave 2가 아니면 Direct 제어 미지원
         if slave_id != 2:
+            self._log.log_info(f"[PC-TOOL] route=direct-lpsb selected-slave={slave_id} unsupported")
             self._log.log_info(f"[LPSB] 현재 선택 보드 slave={slave_id} (Direct 제어는 slave=2만 지원). SSR 버튼 비활성 대상.")
             btn.blockSignals(True)
             btn.setChecked(self._lpsb_ssr_state[ssr_idx])
@@ -1053,6 +1289,7 @@ class MainWindow(QMainWindow):
         self._lpsb_strips[ssr_idx].set_state(new_state)
 
         # Modbus FC05: Slave 2, coil = ssr_idx, value = ON/OFF
+        self._log.log_info("[PC-TOOL] route=direct-lpsb slave=2")
         onoff_str = "ON" if new_state else "OFF"
         self._log.log_info(f"[LPSB] Write Coil {ssr_idx} \u2192 {onoff_str}")
         self._log.log_info(f"[LPSB] SSR{ssr_idx + 1} {onoff_str}")
@@ -1178,6 +1415,9 @@ class MainWindow(QMainWindow):
         if self._direct_mode == "lpsb":
             self.request_read_direct_lpsb_adc.emit()
         else:
+            if self._hpsb_probe_inflight:
+                return
+            self._hpsb_probe_inflight = True
             self.request_read_sub.emit()
 
     def _on_auto_poll_changed(self, state):
@@ -1191,7 +1431,11 @@ class MainWindow(QMainWindow):
     def _on_sub_data_result(self, ok: bool, sense: list | None, coils: list | None, flags: int | None, err: str | None):
         AGG_ERR_COMM_HPSB = 1
         AGG_ERR_COMM_LPSB = 2
+        self._hpsb_probe_inflight = False
         if not ok:
+            if self._pending_hpsb_write is not None:
+                self._log.log_info(f"[MB->HPSB] read-first probe fail -> write skipped ({err or 'sub read fail'})")
+                self._pending_hpsb_write = None
             self._hpsb_comm_label.setText("Comm: (read fail)")
             self._lpsb_comm_label.setText("Comm: (read fail)")
             if err:
@@ -1222,6 +1466,12 @@ class MainWindow(QMainWindow):
         self._last_sense = sense
         self._last_coils = coils
         self._log.log_tagged("[HPSB][LPSB1][LPSB2][LPSB3]", "FC03/FC02", SUB_SENSE_REG, "sub", "OK")
+        if self._pending_hpsb_write is not None:
+            addr, value = self._pending_hpsb_write
+            self._pending_hpsb_write = None
+            self._log.log_info("[MB->HPSB] read-first probe OK (sub read success)")
+            self._log.log_info(f"[DEBUG] continue FC05 after probe: addr={addr} val={1 if value else 0}")
+            self.request_write_sub_coil.emit(addr, value)
 
     def closeEvent(self, event):
         try:

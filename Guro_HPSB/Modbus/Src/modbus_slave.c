@@ -14,6 +14,11 @@
 #include <stdio.h>
 #include <stdarg.h>
 
+#define EX_ILLEGAL_FUNCTION      0x01u
+#define EX_ILLEGAL_DATA_ADDRESS  0x02u
+#define EX_ILLEGAL_DATA_VALUE    0x03u
+#define EX_SLAVE_DEVICE_FAILURE  0x04u
+
 extern UART_HandleTypeDef huart1;
 
 /* RS485/HPSB 공통 로그 함수: 구현이 없으면 no-op. RS485 direction/PA11 디버그에서 사용. */
@@ -180,6 +185,7 @@ void ModbusSlave_PA8_Log(const char *msg) { (void)msg; }
 #endif
 
 /** Raw 수신 프레임을 hex 문자열로 출력. HPSB_Debug_Log()로 전달 (weak 구현 시 no-op). */
+__attribute__((unused))
 static void print_hex(const char *prefix, const uint8_t *buf, uint16_t len)
 {
     char line[80];
@@ -209,6 +215,21 @@ static void print_hex(const char *prefix, const uint8_t *buf, uint16_t len)
     }
 }
 
+/* Debug helper: one-line raw dump for PC side parsing */
+static void log_rx_raw_one_line(void)
+{
+    char line[220];
+    int off = snprintf(line, sizeof(line), "[HPSB-SLAVE] rx raw len=%u data=",
+                       (unsigned)rx_len);
+    if (off < 0 || (size_t)off >= sizeof(line)) return;
+    for (uint16_t i = 0; i < rx_len; i++) {
+        if (off > (int)(sizeof(line) - 5)) break;
+        off += snprintf(line + off, sizeof(line) - (size_t)off, "%02X%s",
+                        (unsigned)rx_buf[i], (i + 1u < rx_len) ? " " : "\r\n");
+    }
+    HPSB_RS485_Log(line);
+}
+
 void ModbusSlave_Init(void)
 {
 #if HPSB_PA8_TRACE
@@ -228,6 +249,10 @@ void ModbusSlave_Init(void)
 
 static void send_response(uint8_t *pdu, size_t pdu_len)
 {
+    HPSB_RS485_Log("[HPSB-SLAVE] send response\r\n");
+    char l[64];
+    int ln = snprintf(l, sizeof(l), "[HPSB-SLAVE] tx resp len=%u\r\n", (unsigned)(pdu_len + 2u));
+    if (ln > 0) HPSB_Debug_Log(l);
     HPSB_dbg_reply_started = 1;
     HPSB_dbg_reply_done = 0;
     /* 응답 송신 직전: LED1 ON (직후 OFF로 응답 완료 표시) */
@@ -267,6 +292,21 @@ static void send_response(uint8_t *pdu, size_t pdu_len)
     dbg_led123_on_ms(500);
 }
 
+static void send_exception(uint8_t req_fc, uint8_t ex_code, const char *reason)
+{
+    uint8_t pdu[8];
+    char dbg[96];
+    pdu[0] = MODBUS_SLAVE_ADDR;
+    pdu[1] = (uint8_t)(req_fc | 0x80u);
+    pdu[2] = ex_code;
+    if (reason == NULL) reason = "?";
+    (void)snprintf(dbg, sizeof(dbg), "[HPSB-SLAVE] exception 0x%02X reason=%s\r\n", (unsigned)ex_code, reason);
+    HPSB_Debug_Log(dbg);
+    (void)snprintf(dbg, sizeof(dbg), "[HPSB-SLAVE] tx resp len=%u\r\n", 5u);
+    HPSB_Debug_Log(dbg);
+    send_response(pdu, 3u);
+}
+
 static void process_frame(void)
 {
     set_de_rx();  /* 실패/early return 모든 경로에서 RX 복귀 보장 */
@@ -279,12 +319,22 @@ static void process_frame(void)
 #if HPSB_PA8_TRACE
     HPSB_RS485_Log("[RS485] process_frame start ensure RX\r\n");
 #endif
-    /* 수신 raw 프레임 hex 출력 (기대: 01 05 00 00 FF 00 CRC_L CRC_H). HPSB_Debug_Log 구현 시 출력. */
-    print_hex("RX frame:", rx_buf, rx_len);
-    {
-        char dbg[48];
-        (void)snprintf(dbg, sizeof(dbg), "[HPSB] rx_len=%u\r\n", (unsigned)rx_len);
-        HPSB_Debug_Log(dbg);
+    /* 수신 raw 프레임 로그: byte stream 원문 비교용 */
+    log_rx_raw_one_line();
+
+    /* slave id 디버그(요청 1바이트 vs 내 주소) */
+    if (rx_len >= 1u) {
+        char dbg_id[96];
+        (void)snprintf(dbg_id, sizeof(dbg_id),
+                       "[HPSB-SLAVE] my_slave_id=%u req_slave_id=%u\r\n",
+                       (unsigned)MODBUS_SLAVE_ADDR, (unsigned)rx_buf[0]);
+        HPSB_RS485_Log(dbg_id);
+    } else {
+        char dbg_id[96];
+        (void)snprintf(dbg_id, sizeof(dbg_id),
+                       "[HPSB-SLAVE] my_slave_id=%u req_slave_id=NA\r\n",
+                       (unsigned)MODBUS_SLAVE_ADDR);
+        HPSB_RS485_Log(dbg_id);
     }
 
     /* 1) 첫 바이트 수신: LED1 비블로킹 표시 (수신 경로에서 HAL_Delay 금지) */
@@ -294,6 +344,15 @@ static void process_frame(void)
 #endif
     if (rx_len < 4) {
         HPSB_Debug_Log("[HPSB] rx_len<4 invalid\r\n");
+#if 1
+        HPSB_RS485_Log("[HPSB-SLAVE] drop reason=rx_len<4\r\n");
+        /* FC05는 요청 프레임이 불완전해도 timeout을 피하기 위해 예외 응답을 보낸다. */
+        if (rx_len >= 2u && rx_buf[1] == 0x05u) {
+            HPSB_RS485_Log("[HPSB-SLAVE] FC05 exception send (rx_len<4)\r\n");
+            send_exception(0x05u, EX_SLAVE_DEVICE_FAILURE, "rx_len<4 (debug)");
+            return;
+        }
+#endif
 #if HPSB_RS485_DEBUG_LOG
         log_rs485("[HPSB_RS485] no response invalid frame len\r\n");
 #endif
@@ -306,13 +365,26 @@ static void process_frame(void)
         (void)snprintf(dbg, sizeof(dbg), "[HPSB] slave_id=%u fc=0x%02X\r\n", (unsigned)rx_buf[0], (unsigned)rx_buf[1]);
         HPSB_Debug_Log(dbg);
     }
-    if (rx_buf[0] != MODBUS_SLAVE_ADDR) {
-        HPSB_Debug_Log("[HPSB] A. slave id mismatch\r\n");
+    {
+        uint8_t req_fc = (rx_len >= 2u) ? rx_buf[1] : 0u;
+        if (rx_buf[0] != MODBUS_SLAVE_ADDR) {
+            HPSB_Debug_Log("[HPSB] A. slave id mismatch\r\n");
+#if 1
+            /* FC05는 디버깅 단계에서 "무응답"을 없애기 위해,
+             * slave id mismatch여도 예외응답을 전송한다. */
+            if (req_fc == 0x05u && rx_len >= 2u) {
+                HPSB_RS485_Log("[HPSB-SLAVE] drop reason=slave id mismatch (fc05)\r\n");
+                send_exception(req_fc, EX_SLAVE_DEVICE_FAILURE, "slave id mismatch (debug)");
+                return;
+            }
+#endif
 #if HPSB_RS485_DEBUG_LOG
         log_rs485("[HPSB_RS485] no response slave id mismatch (got %u)\r\n", (unsigned)rx_buf[0]);
 #endif
-        set_de_rx();
-        return;
+            HPSB_RS485_Log("[HPSB-SLAVE] drop reason=slave id mismatch\r\n");
+            set_de_rx();
+            return;
+        }
     }
     HPSB_dbg_slave_match = 1;
     HAL_GPIO_TogglePin(LED04_GPIO_Port, LED04_Pin);  /* slave id 일치 시 LED4 토글 */
@@ -332,11 +404,21 @@ static void process_frame(void)
     if (ModbusRTU_CRC16Check(rx_buf, rx_len) != 0) {
         HPSB_dbg_crc_ok = 0;
         HPSB_Debug_Log("[HPSB] B. CRC fail (see rx_crc vs calc_crc above)\r\n");
+#if 1
+        /* FC05는 디버깅 단계에서 "무응답"을 없애기 위해,
+         * CRC fail이어도 예외응답을 전송한다. */
+        if (rx_len >= 2u && rx_buf[1] == 0x05u) {
+            HPSB_RS485_Log("[HPSB-SLAVE] drop reason=CRC fail (fc05)\r\n");
+            send_exception(0x05u, EX_SLAVE_DEVICE_FAILURE, "CRC fail (debug)");
+            return;
+        }
+#endif
 #if HPSB_RS485_DEBUG_LOG
         log_rs485("[HPSB_RS485] no response CRC fail\r\n");
 #endif
         /* CRC fail: LED1 triple blink (non-blocking) */
         dbg_led1_blink3_start();
+        HPSB_RS485_Log("[HPSB-SLAVE] drop reason=CRC fail\r\n");
         set_de_rx();
         return;
     }
@@ -347,12 +429,20 @@ static void process_frame(void)
     uint8_t fc = rx_buf[1];
     uint8_t tx_pdu[MODBUS_MAX_PDU_LEN];
     size_t tx_len = 0;
+    {
+        uint16_t addr = (uint16_t)((rx_buf[2] << 8) | rx_buf[3]);
+        uint16_t cv = (uint16_t)((rx_buf[4] << 8) | rx_buf[5]);
+        char dbg[96];
+        (void)snprintf(dbg, sizeof(dbg), "[HPSB-SLAVE] parsed fc=%02X addr=%u val/count=%u\r\n",
+                       (unsigned)fc, (unsigned)addr, (unsigned)cv);
+        HPSB_Debug_Log(dbg);
+    }
 
     switch (fc) {
         case 0x01: {
             uint16_t start = (uint16_t)((rx_buf[2] << 8) | rx_buf[3]);
             uint16_t num   = (uint16_t)((rx_buf[4] << 8) | rx_buf[5]);
-            if (start + num > COIL_COUNT) break;
+            if (start + num > COIL_COUNT) { send_exception(fc, EX_ILLEGAL_DATA_ADDRESS, "fc01 addr out of range"); break; }
             uint8_t coil_bits[COIL_COUNT];
             uint8_t coil_bytes[1];
             for (uint16_t i = 0; i < num; i++) coil_bits[i] = ModbusTable_GetCoil(start + i);
@@ -365,7 +455,7 @@ static void process_frame(void)
             uint16_t start = (uint16_t)((rx_buf[2] << 8) | rx_buf[3]);
             uint16_t num   = (uint16_t)((rx_buf[4] << 8) | rx_buf[5]);
             ModbusTable_RefreshDiscrete();
-            if (start + num > DISCRETE_COUNT) break;
+            if (start + num > DISCRETE_COUNT) { send_exception(fc, EX_ILLEGAL_DATA_ADDRESS, "fc02 addr out of range"); break; }
             uint8_t disc_bits[DISCRETE_COUNT];
             uint8_t disc_bytes[1];
             for (uint16_t i = 0; i < num; i++) disc_bits[i] = ModbusTable_GetDiscrete(start + i);
@@ -377,7 +467,7 @@ static void process_frame(void)
         case 0x03: {
             uint16_t start = (uint16_t)((rx_buf[2] << 8) | rx_buf[3]);
             uint16_t num   = (uint16_t)((rx_buf[4] << 8) | rx_buf[5]);
-            if (start + num > HOLDING_REG_COUNT) break;
+            if (start + num > HOLDING_REG_COUNT) { send_exception(fc, EX_ILLEGAL_DATA_ADDRESS, "fc03 addr out of range"); break; }
             uint16_t regs[HOLDING_REG_COUNT];
             for (uint16_t i = 0; i < num; i++) regs[i] = ModbusTable_GetHoldingReg(start + i);
             tx_len = ModbusRTU_BuildFC03Response(tx_pdu, MODBUS_SLAVE_ADDR, regs, num);
@@ -388,7 +478,7 @@ static void process_frame(void)
             uint16_t start = (uint16_t)((rx_buf[2] << 8) | rx_buf[3]);
             uint16_t num   = (uint16_t)((rx_buf[4] << 8) | rx_buf[5]);
             ModbusTable_RefreshInputRegs();
-            if (start + num > INPUT_REG_COUNT) break;
+            if (start + num > INPUT_REG_COUNT) { send_exception(fc, EX_ILLEGAL_DATA_ADDRESS, "fc04 addr out of range"); break; }
             uint16_t regs[INPUT_REG_COUNT];
             for (uint16_t i = 0; i < num; i++) regs[i] = ModbusTable_GetInputReg(start + i);
             tx_len = ModbusRTU_BuildFC04Response(tx_pdu, MODBUS_SLAVE_ADDR, regs, num);
@@ -396,14 +486,26 @@ static void process_frame(void)
             break;
         }
         case 0x05: {
+                HPSB_RS485_Log("[HPSB-SLAVE] ENTER FC05\r\n");
             uint16_t coil_addr; uint8_t value;
+            uint8_t v_hi = rx_buf[4];
+            uint8_t v_lo = rx_buf[5];
+            {
+                char dbg[96];
+                (void)snprintf(dbg, sizeof(dbg),
+                    "[HPSB-SLAVE] parsed fc=05 addr=%u val_raw=0x%02X%02X\r\n",
+                    (unsigned)((rx_buf[2] << 8) | rx_buf[3]), (unsigned)v_hi, (unsigned)v_lo);
+                HPSB_Debug_Log(dbg);
+            }
             if (ModbusRTU_ParseFC05Request(rx_buf, rx_len, &coil_addr, &value) != 0) {
+                HPSB_RS485_Log("[HPSB-SLAVE] drop reason=FC05 parse fail\r\n");
                 HPSB_Debug_Log("[HPSB] C. FC05 parse fail\r\n");
 #if HPSB_RS485_DEBUG_LOG
                 log_rs485("[HPSB_RS485] fc05 parse fail\r\n");
 #endif
                 /* FC05 parse fail: LED2 triple blink (non-blocking) */
                 dbg_led2_blink3_start();
+                send_exception(fc, EX_ILLEGAL_DATA_VALUE, "invalid coil value (expect FF00/0000)");
                 set_de_rx();
                 break;
             }
@@ -412,16 +514,24 @@ static void process_frame(void)
                 (void)snprintf(dbg, sizeof(dbg), "[HPSB] FC05 coil_addr=%u value=%u\r\n", (unsigned)coil_addr, (unsigned)value);
                 HPSB_Debug_Log(dbg);
             }
+            {
+                char dbg2[80];
+                (void)snprintf(dbg2, sizeof(dbg2), "[HPSB-SLAVE] parsed addr=%u value=%u\r\n",
+                                (unsigned)coil_addr, (unsigned)value);
+                HPSB_Debug_Log(dbg2);
+            }
 #if HPSB_RS485_DEBUG_LOG
             log_rs485("[HPSB_RS485] fc05 addr=%u value=%u\r\n", (unsigned)coil_addr, (unsigned)value);
 #endif
             if (coil_addr >= COIL_COUNT) {
+                HPSB_RS485_Log("[HPSB-SLAVE] drop reason=FC05 coil_addr out of range\r\n");
                 HPSB_Debug_Log("[HPSB] coil_addr out of range\r\n");
 #if HPSB_RS485_DEBUG_LOG
                 log_rs485("[HPSB_RS485] exception response (invalid coil addr)\r\n");
 #endif
                 /* 잘못된 coil 주소: LED3 비블로킹 450ms */
                 dbg_led3_pulse_ms(450);
+                send_exception(fc, EX_ILLEGAL_DATA_ADDRESS, "fc05 coil out of range");
                 set_de_rx();
                 break;
             }
@@ -431,18 +541,22 @@ static void process_frame(void)
                 HPSB_Debug_Log("[HPSB] FC05 coil_addr==0 OK\r\n");
             /* coil_addr==0 success: LED3 hold ON 500ms. coil_addr!=0: short pulse. */
             dbg_led3_pulse_ms(coil_addr == 0u ? 500u : 300u);
-            ModbusTable_SetCoil(coil_addr, value);
 #if HPSB_RS485_DEBUG_LOG
             log_rs485("[HPSB_RS485] before response\r\n");
 #endif
             tx_len = ModbusRTU_BuildFC05Response(tx_pdu, MODBUS_SLAVE_ADDR, coil_addr, value);
             send_response(tx_pdu, tx_len);
+            /* Important:
+             * 응답 전 coil 상태를 먼저 바꾸면(특히 릴레이/SSR 전원이 RS485 트랜시버에 영향을 주는 보드일 때)
+             * send_response 송신이 끊기면서 master가 0 received로 타임아웃 날 수 있다.
+             * 그래서 coil 반영은 응답 전송 이후로 미룬다. */
+            ModbusTable_SetCoil(coil_addr, value);
             break;
         }
         case 0x06: {
             uint16_t reg_addr; uint16_t value;
-            if (ModbusRTU_ParseFC06Request(rx_buf, rx_len, &reg_addr, &value) != 0) break;
-            if (reg_addr >= HOLDING_REG_COUNT) break;
+            if (ModbusRTU_ParseFC06Request(rx_buf, rx_len, &reg_addr, &value) != 0) { send_exception(fc, EX_ILLEGAL_DATA_VALUE, "fc06 parse fail"); break; }
+            if (reg_addr >= HOLDING_REG_COUNT) { send_exception(fc, EX_ILLEGAL_DATA_ADDRESS, "fc06 reg out of range"); break; }
             ModbusTable_SetHoldingReg(reg_addr, value);
             tx_len = ModbusRTU_BuildFC06Response(tx_pdu, MODBUS_SLAVE_ADDR, reg_addr, value);
             send_response(tx_pdu, tx_len);
@@ -451,8 +565,8 @@ static void process_frame(void)
         case 0x0F: {
             uint16_t start_addr, num_coils;
             uint8_t coil_bytes[4];
-            if (ModbusRTU_ParseFC15Request(rx_buf, rx_len, &start_addr, &num_coils, coil_bytes, sizeof(coil_bytes)) != 0) break;
-            if (start_addr + num_coils > COIL_COUNT) break;
+            if (ModbusRTU_ParseFC15Request(rx_buf, rx_len, &start_addr, &num_coils, coil_bytes, sizeof(coil_bytes)) != 0) { send_exception(fc, EX_ILLEGAL_DATA_VALUE, "fc15 parse fail"); break; }
+            if (start_addr + num_coils > COIL_COUNT) { send_exception(fc, EX_ILLEGAL_DATA_ADDRESS, "fc15 addr out of range"); break; }
             ModbusTable_SetCoilBytesFrom(start_addr, coil_bytes, num_coils);
             tx_len = ModbusRTU_BuildFC15Response(tx_pdu, MODBUS_SLAVE_ADDR, start_addr, num_coils);
             send_response(tx_pdu, tx_len);
@@ -461,8 +575,8 @@ static void process_frame(void)
         case 0x10: {
             uint16_t start_addr, num_regs;
             uint16_t regs[HOLDING_REG_COUNT];
-            if (ModbusRTU_ParseFC16Request(rx_buf, rx_len, &start_addr, &num_regs, regs, HOLDING_REG_COUNT) != 0) break;
-            if (start_addr + num_regs > HOLDING_REG_COUNT) break;
+            if (ModbusRTU_ParseFC16Request(rx_buf, rx_len, &start_addr, &num_regs, regs, HOLDING_REG_COUNT) != 0) { send_exception(fc, EX_ILLEGAL_DATA_VALUE, "fc16 parse fail"); break; }
+            if (start_addr + num_regs > HOLDING_REG_COUNT) { send_exception(fc, EX_ILLEGAL_DATA_ADDRESS, "fc16 addr out of range"); break; }
             ModbusTable_SetHoldingRegs(start_addr, regs, num_regs);
             tx_len = ModbusRTU_BuildFC16Response(tx_pdu, MODBUS_SLAVE_ADDR, start_addr, num_regs);
             send_response(tx_pdu, tx_len);
@@ -472,6 +586,7 @@ static void process_frame(void)
 #if HPSB_RS485_DEBUG_LOG
             log_rs485("[HPSB_RS485] no response unsupported fc=0x%02X\r\n", (unsigned)fc);
 #endif
+            send_exception(fc, EX_ILLEGAL_FUNCTION, "unsupported function");
             set_de_rx();
             break;
     }
@@ -499,6 +614,23 @@ void ModbusSlave_Poll(void)
         if (rx_len < MODBUS_RTU_RX_BUF_SIZE) {
             rx_buf[rx_len++] = b;
             HAL_GPIO_TogglePin(LED02_GPIO_Port, LED02_Pin);  /* 바이트 수신 시 LED2 토글 */
+
+            /* Fixed-length Modbus RTU requests (8 bytes) can be recognized immediately.
+             * This avoids relying solely on FRAME_SILENCE_MS timing, which can fail when
+             * inter-byte gaps are larger than expected. */
+            if (rx_len == 8u) {
+                uint8_t fc_now = rx_buf[1];
+                if (fc_now == 0x01u || fc_now == 0x02u ||
+                    fc_now == 0x03u || fc_now == 0x04u ||
+                    fc_now == 0x05u || fc_now == 0x06u) {
+                    process_frame();
+                    rx_len = 0u;
+                    last_rx_tick = 0u;
+                    uart_clear_errors();
+                    set_de_rx();
+                    /* Continue draining UART in case next frame already started. */
+                }
+            }
 #if HPSB_RS485_DEBUG_LOG
             if (rx_len == 1)
                 log_rs485("[HPSB_RS485] frame byte received\r\n");
@@ -531,9 +663,26 @@ void ModbusSlave_SendTestFrame(void)
 void ModbusSlave_SendTestString(const char *str, uint16_t len)
 {
     if (str == NULL || len == 0) return;
+
+    /* ASCII 브리지 OKOK 테스트용 로그/DE 추적.
+     * 목표 순서(OKOK 문자열 기준):
+     *   DE=TX
+     *   UART transmit("OKOK\r\n")
+     *   TC wait
+     *   DE=RX
+     */
     set_de_tx();
+#if HPSB_OKOK_STREAM_TEST
+    /* payload 원문 비교를 위해 hex raw만 남김 (ASCII OKOK 문자열 라벨은 제외) */
+    HPSB_RS485_Log("[HPSB-TX] DE=TX\r\n");
+    HPSB_RS485_Log("[HPSB-TX-RAW] 4F 4B 4F 4B 0D 0A\r\n");
+#endif
     for (volatile uint32_t d = 0; d < 500; d++) { (void)d; }
     HAL_UART_Transmit(&MODBUS_UART, (const uint8_t *)str, len, 100);
     while (__HAL_UART_GET_FLAG(&MODBUS_UART, UART_FLAG_TC) == RESET) { }
+
+#if HPSB_OKOK_STREAM_TEST
+    HPSB_RS485_Log("[HPSB-TX] DE=RX\r\n");
+#endif
     set_de_rx();
 }

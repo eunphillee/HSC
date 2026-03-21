@@ -22,7 +22,19 @@ void HPSB_RS485_Log(const char *msg)
     size_t len = strlen(msg);
     if (len == 0) return;
 
-    /* Best-effort: 디버그용이므로 전송 실패는 무시 */
-    (void)HAL_UART_Transmit(&huart1, (const uint8_t *)msg, (uint16_t)len, 100);
+#ifndef HPSB_RS485_LOG_UART_ENABLE
+#define HPSB_RS485_LOG_UART_ENABLE 0
+#endif
+
+    /* FC05 write 응답이 타임아웃 나지 않게 UART 점유를 완전히 제거한다.
+     * 필요할 때만 HPSB_RS485_LOG_UART_ENABLE=1 로 켜서 UART 로그를 사용한다. */
+#if HPSB_RS485_LOG_UART_ENABLE
+    if (HAL_UART_GetState(&huart1) == HAL_UART_STATE_READY) {
+        /* Best-effort: 디버그용이므로 전송 실패는 무시 */
+        (void)HAL_UART_Transmit(&huart1, (const uint8_t *)msg, (uint16_t)len, 100);
+    }
+#else
+    (void)msg;
+#endif
 }
 

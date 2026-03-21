@@ -26,6 +26,10 @@ void UpstreamPC_SetCommandCallback(upstream_cmd_cb_t cb);
 
 void UpstreamPC_UART_RxEventCallback(uint16_t Size);
 void UpstreamPC_TxCpltCallback(void);
+/* USART2 lower-bus Modbus transaction 구간에서는 ReceiveToIdle_IT를 잠시 중지해
+ * HAL_UART_Receive(블로킹)와 RX 경합을 방지한다. */
+void UpstreamPC_PauseUart2RxIT(void);
+void UpstreamPC_ResumeUart2RxIT(void);
 
 /** Optional debug: get invalid frame counts (length / CRC). Implemented when UPSTREAM_DEBUG_LOG=1 in .c. */
 void UpstreamPC_GetInvalidCounts(uint32_t *p_len, uint32_t *p_crc);

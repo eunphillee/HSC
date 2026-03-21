@@ -110,6 +110,11 @@ class ModbusClient:
         self._request_logger: Callable[[int, str, int | str, int | str], None] | None = None
         self._response_logger: Callable[[bool, int | None], None] | None = None
         self._tx_frame_hex_logger: Callable[[str], None] | None = None
+        self._raw_exception_logger: Callable[[str], None] | None = None
+
+    def set_raw_exception_logger(self, callback: Callable[[str], None] | None):
+        """Set callback(msg) for serial raw-read exceptions (UI immediate debug)."""
+        self._raw_exception_logger = callback
 
     def set_tx_frame_hex_logger(self, callback: Callable[[str], None] | None):
         """Set callback(msg) to log raw TX frame hex (e.g. Direct HPSB FC05)."""
@@ -167,8 +172,23 @@ class ModbusClient:
                     timeout=0.6,
                     retries=0,
                 )
+                # pymodbus connect()는 실패 원인을 숨기는 경우가 있어,
+                # 동일 파라미터로 pyserial을 먼저 열어 예외 메시지를 보존한다.
+                try:
+                    test_ser = serial.Serial(
+                        port=port,
+                        baudrate=baudrate,
+                        bytesize=serial.EIGHTBITS,
+                        parity=serial.PARITY_NONE,
+                        stopbits=serial.STOPBITS_ONE,
+                        timeout=0.1,
+                    )
+                    test_ser.close()
+                except Exception as e:
+                    return False, format_modbus_error(exc=e)
+
                 if not self._client.connect():
-                    return False, "Failed to open port"
+                    return False, "Failed to open port (pymodbus connect returned False)"
                 self._port = port
                 self._baudrate = baudrate
                 self._slave_id = slave_id
@@ -272,12 +292,25 @@ class ModbusClient:
                 return []
             out: list[int] = []
             try:
-                n = getattr(sock, "in_waiting", None) or getattr(sock, "inWaiting", 0) or 0
+                # pyserial 버전에 따라 in_waiting이 "프로퍼티"가 아니라 "메서드"처럼 동작하는 경우가 있음.
+                # 그 경우 n이 method 객체가 되어 `n > 0` 비교에서 TypeError가 발생.
+                n = 0
+                in_waiting = getattr(sock, "in_waiting", None)
+                if in_waiting is not None:
+                    n = in_waiting() if callable(in_waiting) else in_waiting
+                else:
+                    inWaiting = getattr(sock, "inWaiting", 0)
+                    n = inWaiting() if callable(inWaiting) else inWaiting
+                try:
+                    n = int(n) if n is not None else 0
+                except Exception:
+                    n = 0
                 if n > 0:
                     data = sock.read(min(n, 512))
                     out = list(data)
-            except Exception:
-                pass
+            except Exception as e:
+                if self._raw_exception_logger:
+                    self._raw_exception_logger(f"[PC-TOOL] serial read exception={type(e).__name__}: {e}")
             return out
 
     def can_read_raw(self) -> bool:
@@ -301,8 +334,9 @@ class ModbusClient:
                         out.extend(data)
                         if len(out) >= 2048:
                             break
-            except Exception:
-                pass
+            except Exception as e:
+                if self._raw_exception_logger:
+                    self._raw_exception_logger(f"[PC-TOOL] serial sniff exception={type(e).__name__}: {e}")
             finally:
                 self._raw_serial.timeout = prev_timeout
             return out
@@ -590,6 +624,114 @@ class ModbusClient:
                     return False, format_modbus_error(resp=rr)
                 regs = list(rr.registers) if rr.registers else []
                 return True, regs
+            except Exception as e:
+                if self._response_logger:
+                    self._response_logger(False, None)
+                return False, format_modbus_error(exc=e)
+
+    # ---- Generic H2Tech tests (Mainboard only) ----
+    def read_coils(self, start: int, count: int, unit: int | None = None) -> tuple[bool, list[bool] | None, str | None]:
+        with self._lock:
+            ok, err = self._ensure_socket_open()
+            if not ok:
+                return False, None, err or "Not connected"
+            u = self._slave_id if unit is None else unit
+            try:
+                if self._request_logger:
+                    self._request_logger(u, "FC01", start, count)
+                rr = self._client.read_coils(address=start, count=count, unit=u)
+                if self._response_logger:
+                    self._response_logger(not rr.isError(), _response_exception_code(rr))
+                if rr.isError():
+                    return False, None, format_modbus_error(resp=rr)
+                bits = list(rr.bits) if rr.bits else []
+                bits = (bits + [False] * count)[:count]
+                return True, [bool(b) for b in bits], None
+            except Exception as e:
+                if self._response_logger:
+                    self._response_logger(False, None)
+                return False, None, format_modbus_error(exc=e)
+
+    def read_discrete_inputs(self, start: int, count: int, unit: int | None = None) -> tuple[bool, list[bool] | None, str | None]:
+        with self._lock:
+            ok, err = self._ensure_socket_open()
+            if not ok:
+                return False, None, err or "Not connected"
+            u = self._slave_id if unit is None else unit
+            try:
+                if self._request_logger:
+                    self._request_logger(u, "FC02", start, count)
+                rr = self._client.read_discrete_inputs(address=start, count=count, unit=u)
+                if self._response_logger:
+                    self._response_logger(not rr.isError(), _response_exception_code(rr))
+                if rr.isError():
+                    return False, None, format_modbus_error(resp=rr)
+                bits = list(rr.bits) if rr.bits else []
+                bits = (bits + [False] * count)[:count]
+                return True, [bool(b) for b in bits], None
+            except Exception as e:
+                if self._response_logger:
+                    self._response_logger(False, None)
+                return False, None, format_modbus_error(exc=e)
+
+    def read_input_registers(self, start: int, count: int, unit: int | None = None) -> tuple[bool, list[int] | None, str | None]:
+        with self._lock:
+            ok, err = self._ensure_socket_open()
+            if not ok:
+                return False, None, err or "Not connected"
+            u = self._slave_id if unit is None else unit
+            try:
+                if self._request_logger:
+                    self._request_logger(u, "FC04", start, count)
+                rr = self._client.read_input_registers(address=start, count=count, unit=u)
+                if self._response_logger:
+                    self._response_logger(not rr.isError(), _response_exception_code(rr))
+                if rr.isError():
+                    return False, None, format_modbus_error(resp=rr)
+                regs = list(rr.registers) if rr.registers else []
+                regs = (regs + [0] * count)[:count]
+                return True, [r & 0xFFFF for r in regs], None
+            except Exception as e:
+                if self._response_logger:
+                    self._response_logger(False, None)
+                return False, None, format_modbus_error(exc=e)
+
+    def write_single_coil(self, addr: int, value: bool, unit: int | None = None) -> tuple[bool, str | None]:
+        with self._lock:
+            ok, err = self._ensure_socket_open()
+            if not ok:
+                return False, err or "Not connected"
+            u = self._slave_id if unit is None else unit
+            try:
+                val_int = 1 if value else 0
+                if self._request_logger:
+                    self._request_logger(u, "FC05", addr, val_int)
+                wr = self._client.write_coil(address=addr, value=value, unit=u)
+                if self._response_logger:
+                    self._response_logger(not wr.isError(), _response_exception_code(wr))
+                if wr.isError():
+                    return False, format_modbus_error(resp=wr)
+                return True, None
+            except Exception as e:
+                if self._response_logger:
+                    self._response_logger(False, None)
+                return False, format_modbus_error(exc=e)
+
+    def write_multiple_coils(self, start: int, values: list[bool], unit: int | None = None) -> tuple[bool, str | None]:
+        with self._lock:
+            ok, err = self._ensure_socket_open()
+            if not ok:
+                return False, err or "Not connected"
+            u = self._slave_id if unit is None else unit
+            try:
+                if self._request_logger:
+                    self._request_logger(u, "FC15", start, len(values))
+                wr = self._client.write_coils(address=start, values=values, unit=u)
+                if self._response_logger:
+                    self._response_logger(not wr.isError(), _response_exception_code(wr))
+                if wr.isError():
+                    return False, format_modbus_error(resp=wr)
+                return True, None
             except Exception as e:
                 if self._response_logger:
                     self._response_logger(False, None)

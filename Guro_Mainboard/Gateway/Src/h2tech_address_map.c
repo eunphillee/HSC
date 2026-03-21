@@ -10,6 +10,11 @@
 
 static volatile uint8_t g_agg_bits[(AGG_BIT_COUNT + 7) / 8] = {0};
 
+/* 문서 주소 기준점 (요구사항: 영역별 offset 기준 분리) */
+#define DOC1X_DI_BASE      821u
+#define DOC1X_COIL_BASE    892u
+#define DOC4X_REG_BASE     2000u
+
 static inline void bit_set(volatile uint8_t* buf, uint16_t idx, bool v) {
     uint16_t byte = idx >> 3;
     uint8_t  mask = (uint8_t)(1u << (idx & 7u));
@@ -168,4 +173,20 @@ bool H2Map_ApplyWrite(const H2_MapEntry_t* e, bool value, uint16_t pulse_ms) {
     default:
         return false;
     }
+}
+
+uint16_t doc1x_to_offset(uint16_t doc_addr)
+{
+    /* 1x 문서 표기라도 입력/출력 영역이 혼재되어 있으므로 기준점 분리 */
+    if (doc_addr >= DOC1X_COIL_BASE)
+        return (uint16_t)(doc_addr - DOC1X_COIL_BASE);
+    if (doc_addr >= DOC1X_DI_BASE)
+        return (uint16_t)(doc_addr - DOC1X_DI_BASE);
+    return 0u;
+}
+
+uint16_t doc4x_to_offset(uint16_t doc_addr)
+{
+    if (doc_addr < DOC4X_REG_BASE) return 0u;
+    return (uint16_t)(doc_addr - DOC4X_REG_BASE);
 }

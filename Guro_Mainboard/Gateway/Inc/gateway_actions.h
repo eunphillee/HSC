@@ -27,6 +27,10 @@ void Gateway_Action_StartPulsePC_RESET_EN(void);
 /** Write sub-board coil (HPSB=1, LPSB1=2, LPSB2=4, LPSB3=8). Called when PC sends FC05 to Mainboard. */
 int Gateway_Action_WriteSubCoil(uint8_t slave_id, uint16_t coil_index, uint8_t value);
 
+/** 메인 자동문 열림 펄스 (비블로킹). 구현: gateway_actions.c */
+void Gateway_Action_PulseMainDoor1(uint16_t pulse_ms);
+void Gateway_Action_PulseMainDoor2(uint16_t pulse_ms);
+
 #ifdef __cplusplus
 }
 #endif

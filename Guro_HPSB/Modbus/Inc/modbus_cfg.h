@@ -14,7 +14,19 @@ extern "C" {
 #define MODBUS_MASTER         0
 #define MODBUS_SLAVE          1
 
+/* Debug/override: FC05 slave-id mismatch 방지를 위해 테스트 시 고정 강제 */
+#ifndef HPSB_FORCE_SLAVE_ID
+#define HPSB_FORCE_SLAVE_ID  1
+#endif
+#ifndef HPSB_FORCE_SLAVE_ID_VALUE
+#define HPSB_FORCE_SLAVE_ID_VALUE 1
+#endif
+
+#if HPSB_FORCE_SLAVE_ID
+#define MODBUS_SLAVE_ADDR     HPSB_FORCE_SLAVE_ID_VALUE
+#else
 #define MODBUS_SLAVE_ADDR     1
+#endif
 #define MODBUS_UART           huart1
 #define MODBUS_DE_GPIO_PORT   RS485_DE_GPIO_Port
 #define MODBUS_DE_GPIO_PIN    RS485_DE_Pin
@@ -47,6 +59,11 @@ extern "C" {
 /* RS485 송신 경로 단독 검증: 1=Modbus 배제, 1초마다 "HPSB_OK\r\n" 송신. HPSB→MAX3485→A/B→PC 경로 확인용. */
 #ifndef HPSB_RS485_TX_STRING_TEST
 #define HPSB_RS485_TX_STRING_TEST  0
+#endif
+
+/* ASCII 브리지 테스트: 1=1초마다 "OKOK\r\n" 송신 (Modbus 디버깅과 분리된 단순 문자열 경로 확인용) */
+#ifndef HPSB_OKOK_STREAM_TEST
+#define HPSB_OKOK_STREAM_TEST  0
 #endif
 
 /* PA9(MCU UART TX) 단독 검증: Modbus/RS485 전부 배제. 0=정상, 1=PA9 GPIO 500ms 토글, 2=PA9 UART 0x55 500ms마다 송신. */

@@ -143,8 +143,15 @@ int ModbusRTU_ParseFC05Request(const uint8_t *frame, size_t len, uint16_t *coil_
 {
     if (len < 8) return -1;
     *coil_addr = (uint16_t)((frame[2] << 8) | frame[3]);
-    *value = (frame[4] == 0xFF && frame[5] == 0x00) ? 1 : 0;
-    return 0;
+    if (frame[4] == 0xFF && frame[5] == 0x00) {
+        *value = 1;
+        return 0;
+    }
+    if (frame[4] == 0x00 && frame[5] == 0x00) {
+        *value = 0;
+        return 0;
+    }
+    return -1; /* invalid coil value (must be 0xFF00 or 0x0000) */
 }
 int ModbusRTU_ParseFC06Request(const uint8_t *frame, size_t len, uint16_t *reg_addr, uint16_t *value)
 {

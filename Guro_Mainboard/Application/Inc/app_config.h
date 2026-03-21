@@ -53,6 +53,32 @@
 #define BOARD_TX_0XAA_ENABLE  0
 #endif
 
+/* USART2(RS485 하단) 통신 생존 테스트
+ * 1초마다 "MB->SUB TEST\r\n" 송신 후, UART2 수신 이벤트가 발생하면 UART1으로 수신 바이트를 로그로 출력합니다.
+ * 테스트 완료 후 0으로 되돌리세요. */
+#ifndef UART2_RS485_SUB_TXRX_TEST_ENABLE
+#define UART2_RS485_SUB_TXRX_TEST_ENABLE  0
+#endif
+
+/* UART2 수신 바이트 로그 출력: (ISR 호출) 부담이 있으므로 테스트 중에만 켜는 것을 권장합니다. */
+#ifndef UART2_RS485_SUB_RX_LOG_ENABLE
+#define UART2_RS485_SUB_RX_LOG_ENABLE  0
+#endif
+
+/* ASCII bridge test mode (UART2 sub-bus):
+ * 1 = Modbus master/poll 대신 USART2에서 ASCII 라인 수신 후 USART1로 로그 브리지.
+ * 목적: HPSB -> Mainboard -> PC 문자열 경로 확인 ("OKOK\r\n"). */
+#ifndef MB_UART2_ASCII_BRIDGE_TEST
+#define MB_UART2_ASCII_BRIDGE_TEST  0
+#endif
+
+/* USART1 PC 전송 문자열 테스트:
+ * 1 = USART1(상위 RS485, DE=PB1)로 "MB_OK\r\n"를 1초마다 송신.
+ * 목적: PC 툴이 UART1 수신을 못 받는지(케이블/포트/시리얼 스레드)부터 물리/소프트 레벨 확인. */
+#ifndef MB_UART1_TX_OK_STREAM_TEST
+#define MB_UART1_TX_OK_STREAM_TEST  0
+#endif
+
 /* 연결 확인용: 1 = 500ms마다 0xAA만 송신(Modbus 미동작). 0 = Modbus 슬레이브 동작(FC05 RELAY/SSR 등 UART1 응답 정상). */
 #ifndef ENABLE_PC_TEST_AA_STREAM
 #define ENABLE_PC_TEST_AA_STREAM  0   /* 0 = PC 테스트 툴 Modbus 요청/응답 사용. 1 = 0xAA 전용(Modbus 무응답). */

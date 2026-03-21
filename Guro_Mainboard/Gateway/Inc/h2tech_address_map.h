@@ -51,6 +51,23 @@ typedef struct {
     const char* name;
 } H2_MapEntry_t;
 
+/* 문서 주소 기반 일반 포인트 표현 (문서-코드 매핑표/디버깅용) */
+typedef struct {
+    uint16_t doc_addr;       /* 문서 표기 주소 (예: 821, 892) */
+    uint16_t modbus_offset;  /* 실제 Modbus PDU 0-based offset */
+    const char* name;
+    uint8_t rw;              /* 0=RO, 1=RW */
+    uint8_t value;           /* bit value */
+} mb_bit_point_t;
+
+typedef struct {
+    uint16_t doc_addr;
+    uint16_t modbus_offset;
+    const char* name;
+    uint8_t rw;              /* 0=RO, 1=RW */
+    uint16_t value;          /* word value */
+} mb_reg_point_t;
+
 /* Aggregated status bit indices (unified bit-image for H2TECH 1x reads). */
 typedef enum {
     AGG_BIT_ONOFF_1 = 0,
@@ -107,6 +124,10 @@ const H2_MapEntry_t* H2Map_FindByDec(H2_Area_t area, uint16_t h2_dec);
 bool H2Map_ReadAggBit(uint16_t agg_bit_index);
 void H2Map_WriteAggBit(uint16_t agg_bit_index, bool v);
 bool H2Map_ApplyWrite(const H2_MapEntry_t* e, bool value, uint16_t pulse_ms);
+
+/* 문서 주소 -> Modbus 0-based offset 변환 (영역별 기준점 분리) */
+uint16_t doc1x_to_offset(uint16_t doc_addr);
+uint16_t doc4x_to_offset(uint16_t doc_addr);
 
 /* Modbus start_addr -> H2TECH dec: h2_dec = start_addr + 1.
  * PC tools send 0-based addresses (e.g. coil 0 = first coil); FC05/FC15 use this mapping. */

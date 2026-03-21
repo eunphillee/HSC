@@ -10,8 +10,16 @@
 #include "led_status.h"
 #include "main.h"
 #include <string.h>
+#include <stdio.h>
+
+#define EX_ILLEGAL_FUNCTION      0x01u
+#define EX_ILLEGAL_DATA_ADDRESS  0x02u
+#define EX_ILLEGAL_DATA_VALUE    0x03u
+#define EX_SLAVE_DEVICE_FAILURE  0x04u
 
 extern UART_HandleTypeDef huart1;
+
+__attribute__((weak)) void LPSB_Debug_Log(const char *msg) { (void)msg; }
 
 static uint8_t rx_buf[64];
 static uint16_t rx_len;
@@ -51,6 +59,9 @@ uint8_t ModbusSlave_GetAddress(void)
 
 static void send_response(uint8_t *pdu, size_t pdu_len)
 {
+    char l[64];
+    int ln = snprintf(l, sizeof(l), "[LPSB-SLAVE] tx resp len=%u\r\n", (unsigned)(pdu_len + 2u));
+    if (ln > 0) LPSB_Debug_Log(l);
     ModbusRTU_AppendCRC(pdu, pdu_len);
     set_de_tx();
     for (volatile uint32_t d = 0; d < 500; d++) { (void)d; }  /* DE settle before TX */
@@ -60,15 +71,49 @@ static void send_response(uint8_t *pdu, size_t pdu_len)
     LED_Status_OnRS485Activity();
 }
 
+static void log_hex(const char *prefix, const uint8_t *buf, uint16_t len)
+{
+    char line[192];
+    int n = snprintf(line, sizeof(line), "%s len=%u data=", prefix, (unsigned)len);
+    if (n < 0) return;
+    for (uint16_t i = 0; i < len && i < 32u && n < (int)(sizeof(line) - 4); i++) {
+        n += snprintf(line + n, sizeof(line) - (size_t)n, "%02X ", buf[i]);
+    }
+    n += snprintf(line + n, sizeof(line) - (size_t)n, "\r\n");
+    if (n > 0) LPSB_Debug_Log(line);
+}
+
+static void send_exception(uint8_t req_fc, uint8_t ex_code, const char *reason)
+{
+    uint8_t pdu[8];
+    char dbg[96];
+    pdu[0] = s_slave_addr;
+    pdu[1] = (uint8_t)(req_fc | 0x80u);
+    pdu[2] = ex_code;
+    if (reason == NULL) reason = "?";
+    (void)snprintf(dbg, sizeof(dbg), "[LPSB-SLAVE] exception 0x%02X reason=%s\r\n", (unsigned)ex_code, reason);
+    LPSB_Debug_Log(dbg);
+    send_response(pdu, 3u);
+}
+
 static void process_frame(void)
 {
     if (rx_len < 4) return;
     if (rx_buf[0] != s_slave_addr) return;
     if (ModbusRTU_CRC16Check(rx_buf, rx_len) != 0) return;
+    log_hex("[LPSB-SLAVE] rx raw", rx_buf, rx_len);
 
     LED_Status_OnRS485Activity();  /* valid RX */
 
     uint8_t fc = rx_buf[1];
+    {
+        uint16_t addr = (uint16_t)((rx_buf[2] << 8) | rx_buf[3]);
+        uint16_t cv = (uint16_t)((rx_buf[4] << 8) | rx_buf[5]);
+        char dbg[96];
+        (void)snprintf(dbg, sizeof(dbg), "[LPSB-SLAVE] parsed fc=%02X addr=%u val/count=%u\r\n",
+                       (unsigned)fc, (unsigned)addr, (unsigned)cv);
+        LPSB_Debug_Log(dbg);
+    }
     uint8_t tx_pdu[64];
     size_t tx_len = 0;
 
@@ -76,7 +121,7 @@ static void process_frame(void)
         case 0x01: {
             uint16_t start = (uint16_t)((rx_buf[2] << 8) | rx_buf[3]);
             uint16_t num   = (uint16_t)((rx_buf[4] << 8) | rx_buf[5]);
-            if (start + num > COIL_COUNT) break;
+            if (start + num > COIL_COUNT) { send_exception(fc, EX_ILLEGAL_DATA_ADDRESS, "fc01 addr out of range"); break; }
             uint8_t coil_bits[COIL_COUNT];
             uint8_t coil_bytes[1];
             for (uint16_t i = 0; i < num; i++) coil_bits[i] = ModbusTable_GetCoil(start + i);
@@ -89,7 +134,7 @@ static void process_frame(void)
             uint16_t start = (uint16_t)((rx_buf[2] << 8) | rx_buf[3]);
             uint16_t num   = (uint16_t)((rx_buf[4] << 8) | rx_buf[5]);
             ModbusTable_RefreshDiscrete();
-            if (start + num > DISCRETE_COUNT) break;
+            if (start + num > DISCRETE_COUNT) { send_exception(fc, EX_ILLEGAL_DATA_ADDRESS, "fc02 addr out of range"); break; }
             uint8_t disc_bits[DISCRETE_COUNT];
             uint8_t disc_bytes[1];
             for (uint16_t i = 0; i < num; i++) disc_bits[i] = ModbusTable_GetDiscrete(start + i);
@@ -101,7 +146,7 @@ static void process_frame(void)
         case 0x03: {
             uint16_t start = (uint16_t)((rx_buf[2] << 8) | rx_buf[3]);
             uint16_t num   = (uint16_t)((rx_buf[4] << 8) | rx_buf[5]);
-            if (start + num > HOLDING_REG_COUNT) break;
+            if (start + num > HOLDING_REG_COUNT) { send_exception(fc, EX_ILLEGAL_DATA_ADDRESS, "fc03 addr out of range"); break; }
             uint16_t regs[HOLDING_REG_COUNT];
             for (uint16_t i = 0; i < num; i++) regs[i] = ModbusTable_GetHoldingReg(start + i);
             tx_len = ModbusRTU_BuildFC03Response(tx_pdu, s_slave_addr, regs, num);
@@ -112,7 +157,7 @@ static void process_frame(void)
             uint16_t start = (uint16_t)((rx_buf[2] << 8) | rx_buf[3]);
             uint16_t num   = (uint16_t)((rx_buf[4] << 8) | rx_buf[5]);
             ModbusTable_RefreshInputRegs();
-            if (start + num > INPUT_REG_COUNT) break;
+            if (start + num > INPUT_REG_COUNT) { send_exception(fc, EX_ILLEGAL_DATA_ADDRESS, "fc04 addr out of range"); break; }
             uint16_t regs[INPUT_REG_COUNT];
             for (uint16_t i = 0; i < num; i++) regs[i] = ModbusTable_GetInputReg(start + i);
             tx_len = ModbusRTU_BuildFC04Response(tx_pdu, s_slave_addr, regs, num);
@@ -121,8 +166,8 @@ static void process_frame(void)
         }
         case 0x05: {
             uint16_t coil_addr; uint8_t value;
-            if (ModbusRTU_ParseFC05Request(rx_buf, rx_len, &coil_addr, &value) != 0) break;
-            if (coil_addr >= COIL_COUNT) break;
+            if (ModbusRTU_ParseFC05Request(rx_buf, rx_len, &coil_addr, &value) != 0) { send_exception(fc, EX_ILLEGAL_DATA_VALUE, "fc05 parse fail"); break; }
+            if (coil_addr >= COIL_COUNT) { send_exception(fc, EX_ILLEGAL_DATA_ADDRESS, "fc05 coil out of range"); break; }
             ModbusTable_SetCoil(coil_addr, value);
             tx_len = ModbusRTU_BuildFC05Response(tx_pdu, s_slave_addr, coil_addr, value);
             send_response(tx_pdu, tx_len);
@@ -130,8 +175,8 @@ static void process_frame(void)
         }
         case 0x06: {
             uint16_t reg_addr; uint16_t value;
-            if (ModbusRTU_ParseFC06Request(rx_buf, rx_len, &reg_addr, &value) != 0) break;
-            if (reg_addr >= HOLDING_REG_COUNT) break;
+            if (ModbusRTU_ParseFC06Request(rx_buf, rx_len, &reg_addr, &value) != 0) { send_exception(fc, EX_ILLEGAL_DATA_VALUE, "fc06 parse fail"); break; }
+            if (reg_addr >= HOLDING_REG_COUNT) { send_exception(fc, EX_ILLEGAL_DATA_ADDRESS, "fc06 reg out of range"); break; }
             ModbusTable_SetHoldingReg(reg_addr, value);
             tx_len = ModbusRTU_BuildFC06Response(tx_pdu, s_slave_addr, reg_addr, value);
             send_response(tx_pdu, tx_len);
@@ -140,8 +185,8 @@ static void process_frame(void)
         case 0x0F: {
             uint16_t start_addr, num_coils;
             uint8_t coil_bytes[4];
-            if (ModbusRTU_ParseFC15Request(rx_buf, rx_len, &start_addr, &num_coils, coil_bytes, sizeof(coil_bytes)) != 0) break;
-            if (start_addr + num_coils > COIL_COUNT) break;
+            if (ModbusRTU_ParseFC15Request(rx_buf, rx_len, &start_addr, &num_coils, coil_bytes, sizeof(coil_bytes)) != 0) { send_exception(fc, EX_ILLEGAL_DATA_VALUE, "fc15 parse fail"); break; }
+            if (start_addr + num_coils > COIL_COUNT) { send_exception(fc, EX_ILLEGAL_DATA_ADDRESS, "fc15 addr out of range"); break; }
             ModbusTable_SetCoilBytesFrom(start_addr, coil_bytes, num_coils);
             tx_len = ModbusRTU_BuildFC15Response(tx_pdu, s_slave_addr, start_addr, num_coils);
             send_response(tx_pdu, tx_len);
@@ -150,14 +195,15 @@ static void process_frame(void)
         case 0x10: {
             uint16_t start_addr, num_regs;
             uint16_t regs[HOLDING_REG_COUNT];
-            if (ModbusRTU_ParseFC16Request(rx_buf, rx_len, &start_addr, &num_regs, regs, HOLDING_REG_COUNT) != 0) break;
-            if (start_addr + num_regs > HOLDING_REG_COUNT) break;
+            if (ModbusRTU_ParseFC16Request(rx_buf, rx_len, &start_addr, &num_regs, regs, HOLDING_REG_COUNT) != 0) { send_exception(fc, EX_ILLEGAL_DATA_VALUE, "fc16 parse fail"); break; }
+            if (start_addr + num_regs > HOLDING_REG_COUNT) { send_exception(fc, EX_ILLEGAL_DATA_ADDRESS, "fc16 addr out of range"); break; }
             ModbusTable_SetHoldingRegs(start_addr, regs, num_regs);
             tx_len = ModbusRTU_BuildFC16Response(tx_pdu, s_slave_addr, start_addr, num_regs);
             send_response(tx_pdu, tx_len);
             break;
         }
         default:
+            send_exception(fc, EX_ILLEGAL_FUNCTION, "unsupported function");
             break;
     }
 }

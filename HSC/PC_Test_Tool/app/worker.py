@@ -17,6 +17,12 @@ class MainboardWorker(QObject):
     sub_data_result = pyqtSignal(bool, object, object, object, object)
     # Direct LPSB: FC03 start=0 count=9 (SSR 상태 + ADC1/2/3 + ID/heartbeat/fw)
     lpsb_adc_result = pyqtSignal(bool, object, object)  # ok, regs[9] or None, err
+    # 문서 기반 Modbus 테스트 탭 결과 (worker thread 경유)
+    doc_fc01_result = pyqtSignal(bool, object, object)  # ok, bits or None, err
+    doc_fc02_result = pyqtSignal(bool, object, object)  # ok, bits or None, err
+    doc_fc04_result = pyqtSignal(bool, object, object)  # ok, regs or None, err
+    doc_fc05_result = pyqtSignal(bool, object)          # ok, err
+    doc_fc15_result = pyqtSignal(bool, object)          # ok, err
 
     def __init__(self, client):
         super().__init__()
@@ -191,6 +197,47 @@ class MainboardWorker(QObject):
             self.write_result.emit(ok, err if not ok else None)
             time.sleep(delay_on_s if value else delay_off_s)
         self.write_result.emit(True, "Diagnostic sequence done")
+
+    # ---- Doc Modbus tab (Mainboard only) ----
+    def on_request_doc_fc01(self, unit: int, start: int, count: int):
+        if not self._client.connected:
+            self.doc_fc01_result.emit(False, None, "Not connected")
+            return
+        ok, bits, err = self._client.read_coils(start, count, unit=unit)
+        self.doc_fc01_result.emit(ok, bits, err)
+
+    def on_request_doc_fc02(self, unit: int, start: int, count: int):
+        if not self._client.connected:
+            self.doc_fc02_result.emit(False, None, "Not connected")
+            return
+        ok, bits, err = self._client.read_discrete_inputs(start, count, unit=unit)
+        self.doc_fc02_result.emit(ok, bits, err)
+
+    def on_request_doc_fc04(self, unit: int, start: int, count: int):
+        if not self._client.connected:
+            self.doc_fc04_result.emit(False, None, "Not connected")
+            return
+        ok, regs, err = self._client.read_input_registers(start, count, unit=unit)
+        self.doc_fc04_result.emit(ok, regs, err)
+
+    def on_request_doc_fc05(self, unit: int, addr: int, value: bool):
+        if not self._client.connected:
+            self.doc_fc05_result.emit(False, "Not connected")
+            return
+        ok, err = self._client.write_single_coil(addr, value, unit=unit)
+        self.doc_fc05_result.emit(ok, err)
+
+    def on_request_doc_fc15(self, unit: int, start: int, values: object):
+        if not self._client.connected:
+            self.doc_fc15_result.emit(False, "Not connected")
+            return
+        try:
+            vals = [bool(v) for v in list(values)]
+        except Exception:
+            self.doc_fc15_result.emit(False, "Invalid values")
+            return
+        ok, err = self._client.write_multiple_coils(start, vals, unit=unit)
+        self.doc_fc15_result.emit(ok, err)
 
 
 def create_worker_and_thread(client):

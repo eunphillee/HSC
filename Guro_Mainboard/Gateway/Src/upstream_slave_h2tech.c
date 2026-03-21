@@ -14,6 +14,7 @@
 #include "bsp_gpio.h"
 #include "system_config.h"
 #include "app_config.h"
+#include "modbus_table.h"
 
 #define EX_ILLEGAL_FUNCTION  0x01
 #define EX_ILLEGAL_DATA_ADDR 0x02
@@ -46,6 +47,9 @@
 
 /* System config (EEPROM): 4x3000=slave_id, 4x3001=baudrate code, 4x3002=factory reset command */
 #define UPSTREAM_SYSCFG_REG_COUNT  3u
+/* FC04 input register diagnostics (service extension) */
+#define UPSTREAM_DIAG_IR_START      4000u
+#define UPSTREAM_DIAG_IR_COUNT      12u
 
 static uint32_t baudrate_from_code(uint16_t code)
 {
@@ -69,6 +73,56 @@ static uint16_t baudrate_to_code(uint32_t baud)
 	case SYSTEM_CONFIG_BAUDRATE_115200: return 4;
 	default: return 0xFFu;
 	}
+}
+
+static int h2_dec_to_sub_coil(uint16_t h2_dec, uint8_t *out_slave_id, uint16_t *out_coil_index)
+{
+    if (!out_slave_id || !out_coil_index) return -1;
+    if (h2_dec < 899u || h2_dec > 910u) return -1;
+    {
+        uint16_t offset = (uint16_t)(h2_dec - 899u);
+        uint8_t board = (uint8_t)(offset / 3u);
+        uint8_t coil = (uint8_t)(offset % 3u);
+        static const uint8_t sid[] = {1u, 2u, 4u, 8u};
+        *out_slave_id = sid[board];
+        *out_coil_index = coil;
+    }
+    return 0;
+}
+
+/* FC01 Read Coils: writable 1x 영역(0892~0910)을 coil 상태로 제공 */
+static int handle_fc01(uint16_t start_addr, uint16_t count, uint8_t *response, uint16_t resp_max)
+{
+    uint16_t byte_count = (uint16_t)((count + 7u) / 8u);
+    if (resp_max < (uint16_t)(2u + byte_count)) return -1;
+    response[0] = 0x01;
+    response[1] = (uint8_t)byte_count;
+    for (uint16_t i = 0; i < byte_count; i++) response[2u + i] = 0u;
+
+    for (uint16_t i = 0; i < count; i++) {
+        uint16_t h2_dec = (uint16_t)(H2Map_ModbusAddrToH2Dec(start_addr) + i);
+        const H2_MapEntry_t *e = H2Map_FindByDec(H2_AREA_1X, h2_dec);
+        if (!e || e->rw != H2_RW_WRITE) {
+            response[0] = 0x81;
+            response[1] = EX_ILLEGAL_DATA_ADDR;
+            return 2;
+        }
+
+        bool bit = false;
+        if (h2_dec >= 899u && h2_dec <= 910u) {
+            uint8_t sid = 0u;
+            uint16_t coil = 0u;
+            if (h2_dec_to_sub_coil(h2_dec, &sid, &coil) == 0)
+                bit = ModbusTable_GetCoil((SlaveId_t)sid, coil) ? true : false;
+        } else if (e->src == H2_SRC_AGG_BIT) {
+            bit = H2Map_ReadAggBit(e->agg_bit_index);
+        } else {
+            /* pulse coil(0892~0898)은 래치하지 않으므로 read는 0 유지 */
+            bit = false;
+        }
+        if (bit) response[2u + (i / 8u)] |= (uint8_t)(1u << (i % 8u));
+    }
+    return (int)(2u + byte_count);
 }
 
 /* FC02 Read Discrete Inputs: H2TECH 1x, h2_dec = start_addr + 1 + i */
@@ -274,6 +328,46 @@ static int handle_fc03(uint16_t start_addr, uint16_t count, const void *p_agg,
     return (int)(2 + byte_count);
 }
 
+/* FC04 Read Input Registers: 진단/상태 snapshot 제공 (service extension) */
+static int handle_fc04(uint16_t start_addr, uint16_t count, const void *p_agg,
+                       uint8_t *response, uint16_t resp_max)
+{
+    if (start_addr != UPSTREAM_DIAG_IR_START) {
+        response[0] = 0x84;
+        response[1] = EX_ILLEGAL_DATA_ADDR;
+        return 2;
+    }
+    if (count == 0u || count > UPSTREAM_DIAG_IR_COUNT) {
+        response[0] = 0x84;
+        response[1] = EX_ILLEGAL_DATA_VAL;
+        return 2;
+    }
+    if (resp_max < (uint16_t)(2u + count * 2u)) return -1;
+
+    const aggregated_status_t *agg = (const aggregated_status_t *)p_agg;
+    uint16_t regs[UPSTREAM_DIAG_IR_COUNT] = {0};
+    regs[0] = (agg && agg->error_flags == 0u) ? 0u : 1u; /* main status code */
+    regs[1] = (agg && !(agg->error_flags & AGG_ERR_COMM_HPSB)) ? 1u : 0u; /* hpsb online */
+    regs[2] = (agg && !(agg->error_flags & AGG_ERR_COMM_LPSB)) ? 1u : 0u; /* lpsb online(any) */
+    regs[3] = agg ? agg->hpsb_status_reg : 0u;    /* hpsb response/status counter substitute */
+    regs[4] = agg ? agg->lpsb1_alarm_reg : 0u;    /* lpsb response/status counter substitute */
+    regs[5] = agg ? agg->lpsb1_sense_raw[0] : 0u; /* ADC1 */
+    regs[6] = agg ? agg->lpsb1_sense_raw[1] : 0u; /* ADC2 */
+    regs[7] = agg ? agg->lpsb1_sense_raw[2] : 0u; /* ADC3 */
+    regs[8] = agg ? agg->error_flags : 0u;        /* alarm bitmask */
+    regs[9] = 0x0003u;                            /* fw version */
+    regs[10] = IO_Main_ReadDI_Bitmap();
+    regs[11] = IO_Main_ReadDO_Bitmap();
+
+    response[0] = 0x04;
+    response[1] = (uint8_t)(count * 2u);
+    for (uint16_t i = 0; i < count; i++) {
+        response[2u + i * 2u] = (uint8_t)(regs[i] >> 8);
+        response[2u + i * 2u + 1u] = (uint8_t)(regs[i] & 0xFFu);
+    }
+    return (int)(2u + count * 2u);
+}
+
 /* FC06 Write Single Register: 2101 (DO bitmap); 2120 (PC_ON_EN); 2121 (PC_RESET_EN). 2122 read-only. */
 static int handle_fc06(uint16_t start_addr, const uint8_t *write_data,
                        uint8_t *response, uint16_t resp_max)
@@ -434,23 +528,102 @@ static int handle_fc06(uint16_t start_addr, const uint8_t *write_data,
     return 6;
 }
 
+/* FC16 Write Multiple Holding Registers: 4x2101(1개), 4x3000~3002(1~3개) */
+static int handle_fc16(uint16_t start_addr, uint16_t count, const uint8_t *write_data,
+                       uint8_t *response, uint16_t resp_max)
+{
+    if (resp_max < 5u || !write_data || count == 0u) return -1;
+
+    if (start_addr == UPSTREAM_MAIN_IO_DO_REG && count == 1u) {
+        uint16_t value = (uint16_t)((write_data[0] << 8) | write_data[1]);
+        value &= 0x0Fu;
+        IO_Main_WriteDO_Bitmap(value);
+        response[0] = 0x10;
+        response[1] = (uint8_t)(start_addr >> 8);
+        response[2] = (uint8_t)(start_addr & 0xFF);
+        response[3] = 0x00;
+        response[4] = 0x01;
+        return 5;
+    }
+
+    if (start_addr == SYSCFG_MODBUS_SLAVE_ID_REG && count <= 3u) {
+        const system_config_t *cur = SystemConfig_Get();
+        if (!cur) {
+            response[0] = 0x90;
+            response[1] = EX_SLAVE_DEVICE_FAIL;
+            return 2;
+        }
+        system_config_t cfg = *cur;
+        if (count >= 1u) {
+            uint16_t v0 = (uint16_t)((write_data[0] << 8) | write_data[1]);
+            if (v0 < SYSTEM_CONFIG_SLAVE_ID_MIN || v0 > SYSTEM_CONFIG_SLAVE_ID_MAX) {
+                response[0] = 0x90;
+                response[1] = EX_ILLEGAL_DATA_VAL;
+                return 2;
+            }
+            cfg.slave_id = (uint8_t)(v0 & 0xFFu);
+        }
+        if (count >= 2u) {
+            uint16_t v1 = (uint16_t)((write_data[2] << 8) | write_data[3]);
+            uint32_t baud = baudrate_from_code(v1);
+            if (baud == 0u) {
+                response[0] = 0x90;
+                response[1] = EX_ILLEGAL_DATA_VAL;
+                return 2;
+            }
+            cfg.baudrate = baud;
+        }
+        if (count >= 3u) {
+            uint16_t v2 = (uint16_t)((write_data[4] << 8) | write_data[5]);
+            if (v2 == 1u) {
+                if (SystemConfig_FactoryReset() != 0) {
+                    response[0] = 0x90;
+                    response[1] = EX_SLAVE_DEVICE_FAIL;
+                    return 2;
+                }
+            } else {
+                response[0] = 0x90;
+                response[1] = EX_ILLEGAL_DATA_VAL;
+                return 2;
+            }
+        } else {
+            if (SystemConfig_Save(&cfg) != 0) {
+                response[0] = 0x90;
+                response[1] = EX_SLAVE_DEVICE_FAIL;
+                return 2;
+            }
+        }
+
+        response[0] = 0x10;
+        response[1] = (uint8_t)(start_addr >> 8);
+        response[2] = (uint8_t)(start_addr & 0xFF);
+        response[3] = (uint8_t)(count >> 8);
+        response[4] = (uint8_t)(count & 0xFF);
+        return 5;
+    }
+
+    response[0] = 0x90;
+    response[1] = EX_ILLEGAL_DATA_ADDR;
+    return 2;
+}
+
 /* FC05 Write Single Coil */
 static int handle_fc05(uint16_t start_addr, const uint8_t *write_data,
                       uint8_t *response, uint16_t resp_max)
 {
     if (resp_max < 5u || !write_data) return -1;
 
-    uint8_t value_u8 = (write_data[0] != 0) ? 1u : 0u;
+    bool value = (write_data[0] != 0);
 #if FC05_GW_STEP_LOG
     Gateway_LogFc05StepRecvFromPc();
-    Gateway_LogFc05StepRawCoilValue(start_addr, value_u8);
+    Gateway_LogFc05StepRawCoilValue(start_addr, value ? 1u : 0u);
 #endif
 #if GATEWAY_WRITE_DEBUG_LOG
-    Gateway_LogFc05RecvAddr(start_addr, value_u8);
+    Gateway_LogFc05RecvAddr(start_addr, value ? 1u : 0u);
     Gateway_LogFc05Range(892, 910);
 #endif
 #if FC05_COIL_DIAG_LOG
-    Gateway_LogFc05DiagRecv(start_addr, value_u8);
+    Gateway_LogFc05DiagRecv(start_addr, value ? 1u : 0u);
     Gateway_LogFc05DiagRange(892, 910);
 #endif
 
@@ -480,7 +653,6 @@ static int handle_fc05(uint16_t start_addr, const uint8_t *write_data,
         response[1] = EX_ILLEGAL_DATA_VAL;
         return 2;
     }
-    bool value = (write_data[0] != 0);
     if (e->action == H2_ACT_WRITE_SUB_COIL) {
 #if FC05_GW_STEP_LOG
         if (e->h2_dec >= 899u && e->h2_dec <= 910u) {
@@ -581,19 +753,22 @@ int UpstreamSlave_HandleRequest(uint8_t fc, uint16_t start_addr, uint16_t count,
     if (!response || resp_max < 2u) return -1;
 
     switch (fc) {
+    case 0x01:
+        return handle_fc01(start_addr, count, response, resp_max);
     case 0x02:
         return handle_fc02(start_addr, count, response, resp_max);
     case 0x03:
         return handle_fc03(start_addr, count, p_agg, response, resp_max);
+    case 0x04:
+        return handle_fc04(start_addr, count, p_agg, response, resp_max);
     case 0x05:
         return handle_fc05(start_addr, write_data, response, resp_max);
     case 0x06:
         return handle_fc06(start_addr, write_data, response, resp_max);
     case 0x0F:
         return handle_fc15(start_addr, count, write_data, response, resp_max);
-    case 0x01:
-    case 0x04:
     case 0x10:
+        return handle_fc16(start_addr, count, write_data, response, resp_max);
     default:
         response[0] = (uint8_t)(fc | 0x80);
         response[1] = EX_ILLEGAL_FUNCTION;

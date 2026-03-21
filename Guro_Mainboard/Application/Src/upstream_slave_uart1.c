@@ -1,6 +1,6 @@
 /**
  * @file upstream_slave_uart1.c
- * @brief Modbus RTU Slave on USART1 (PA9/PA10), DE/RE=PB1. ReceiveToIdle_IT, 4ms frame end, FC02/03/05/06/15.
+ * @brief Modbus RTU Slave on USART1 (PA9/PA10), DE/RE=PB1. ReceiveToIdle_IT, 4ms frame end, FC01/02/03/04/05/06/15/16.
  *        RS485 polarity: RS485_DE_ACTIVE_HIGH (app_config.h) 1=Mode A, 0=Mode B.
  */
 #include "upstream_slave_uart1.h"
@@ -12,13 +12,16 @@
 #include "gateway_write_log.h"
 #include "system_config.h"
 #include <string.h>
+#include <stdio.h>
 
 #define UART1_TX_TC_TIMEOUT_MS  50
 
-#define SLAVE_ID_DEFAULT   9
-static inline uint8_t get_slave_id(void) {
-  const system_config_t *c = SystemConfig_Get();
-  return c ? (uint8_t)c->slave_id : SLAVE_ID_DEFAULT;
+/* 현장 요구: USART1(PC↔Mainboard) 상위통신용 Slave ID는 반드시 9로 고정 */
+#define UPSTREAM_UART1_FIXED_SLAVE_ID  9u
+static inline uint8_t get_slave_id(void)
+{
+  (void)SystemConfig_Get(); /* USART1 슬레이브 ID는 EEPROM에 영향받지 않음 */
+  return UPSTREAM_UART1_FIXED_SLAVE_ID;
 }
 #define RX_BUF_SIZE        64
 #define RING_SIZE          256
@@ -30,6 +33,78 @@ static inline uint8_t get_slave_id(void) {
 #define TX_RESP_GUARD_MS   150u   /* Modbus 응답 송신 후 이 시간(ms) 동안 0xAA 송신 금지 */
 
 extern UART_HandleTypeDef huart1;
+
+/* 디버그 출력:
+ * 이 프로젝트는 USART1 RS485 버스를 PC↔Mainboard로 사용하므로,
+ * Modbus 응답 프레임과 로그 문자열이 섞이면 "No response"나 CRC 오류가 날 수 있습니다.
+ * 따라서 로그는 printf(디버그 콘솔/세미호스트/RTT 등) 기반으로 출력한다고 가정합니다.
+ */
+#ifndef UPSTREAM_UART1_DEBUG_LOG_ENABLE
+#define UPSTREAM_UART1_DEBUG_LOG_ENABLE  1
+#endif
+
+#if UPSTREAM_UART1_DEBUG_LOG_ENABLE
+static void uart1_debug_log_rx_raw(const uint8_t *frame, size_t len)
+{
+	/* raw 바이트가 길어질 수 있으므로 앞부분만 출력 */
+	size_t max_show = (len > 32u) ? 32u : len;
+	char buf[180];
+	int n = snprintf(buf, sizeof(buf), "[UART1] rx raw len=%u data=", (unsigned)len);
+	if (n < 0) return;
+	for (size_t i = 0; i < max_show; i++) {
+		if ((size_t)n >= sizeof(buf) - 4u) break;
+		n += snprintf(buf + n, sizeof(buf) - (size_t)n, "%02X ", frame[i]);
+	}
+	(void)printf("%s\r\n", buf);
+}
+
+static void uart1_debug_log_drop_slave_mismatch(uint8_t req_slave, uint8_t my_slave)
+{
+	(void)printf("[UART1] drop: slave mismatch req=%u my=%u\r\n",
+	              (unsigned)req_slave, (unsigned)my_slave);
+}
+
+static void uart1_debug_log_drop_crc_fail(size_t len)
+{
+	(void)printf("[UART1] drop: crc fail len=%u\r\n", (unsigned)len);
+}
+
+static void uart1_debug_log_drop_len_mismatch(uint8_t fc, size_t got_len, size_t exp_len)
+{
+	(void)printf("[UART1] drop: len mismatch fc=%02X got=%u exp=%u\r\n",
+	              (unsigned)fc, (unsigned)got_len, (unsigned)exp_len);
+}
+
+static void uart1_debug_log_parsed(uint8_t fc, uint16_t addr, uint16_t count)
+{
+	(void)printf("[UART1] parsed fc=%02X addr=%u count=%u\r\n",
+	              (unsigned)fc, (unsigned)addr, (unsigned)count);
+}
+
+static void uart1_debug_log_tx_resp_len(uint16_t tx_len)
+{
+	(void)printf("[UART1] tx resp len=%u\r\n", (unsigned)tx_len);
+}
+
+static void uart1_debug_log_de_tx(void)
+{
+	(void)printf("[UART1] DE=TX\r\n");
+}
+
+static void uart1_debug_log_de_rx(void)
+{
+	(void)printf("[UART1] DE=RX\r\n");
+}
+#else
+#define uart1_debug_log_rx_raw(frame,len) ((void)0)
+#define uart1_debug_log_drop_slave_mismatch(a,b) ((void)0)
+#define uart1_debug_log_drop_crc_fail(len) ((void)0)
+#define uart1_debug_log_drop_len_mismatch(fc,got,exp) ((void)0)
+#define uart1_debug_log_parsed(fc,addr,count) ((void)0)
+#define uart1_debug_log_tx_resp_len(tx_len) ((void)0)
+#define uart1_debug_log_de_tx() ((void)0)
+#define uart1_debug_log_de_rx() ((void)0)
+#endif
 
 /* Actual pin level: Mode A (RS485_DE_ACTIVE_HIGH=1) TX=SET/RX=RESET. main.h: RS485_DE_* = PC_RS485_DE_RE (PB1). */
 #if RS485_DE_ACTIVE_HIGH
@@ -99,14 +174,11 @@ static void process_modbus_frame(const uint8_t *frame, size_t frame_len, const a
 	int resp_len = -1;
 
 	switch (fc) {
+	case 0x01:
 	case 0x02:
-		if (frame_len >= 8) {
-			count = (uint16_t)((frame[4] << 8) | frame[5]);
-			resp_len = UpstreamSlave_HandleRequest(fc, start_addr, count, NULL, agg, resp_pdu, (uint16_t)sizeof(resp_pdu));
-		}
-		break;
 	case 0x03:
-		if (frame_len >= 8 && agg) {
+	case 0x04:
+		if (frame_len >= 8) {
 			count = (uint16_t)((frame[4] << 8) | frame[5]);
 			resp_len = UpstreamSlave_HandleRequest(fc, start_addr, count, NULL, agg, resp_pdu, (uint16_t)sizeof(resp_pdu));
 		}
@@ -124,6 +196,7 @@ static void process_modbus_frame(const uint8_t *frame, size_t frame_len, const a
 		}
 		break;
 	case 0x0F:
+	case 0x10:
 		if (frame_len >= 7) {
 			count = (uint16_t)((frame[4] << 8) | frame[5]);
 			uint8_t byte_count = frame[6];
@@ -138,7 +211,7 @@ static void process_modbus_frame(const uint8_t *frame, size_t frame_len, const a
 	}
 
 	/* FC06 등 실패 시 무응답 방지: 예외 응답(0x86 0x04) 전송 */
-	if (resp_len <= 0 && (fc == 0x02 || fc == 0x03 || fc == 0x05 || fc == 0x06 || fc == 0x0F)) {
+	if (resp_len <= 0 && (fc == 0x01 || fc == 0x02 || fc == 0x03 || fc == 0x04 || fc == 0x05 || fc == 0x06 || fc == 0x0F || fc == 0x10)) {
 		resp_pdu[0] = (uint8_t)(fc | 0x80);
 		resp_pdu[1] = 0x04;  /* Slave device failure */
 		resp_len = 2;
@@ -160,6 +233,8 @@ static void process_modbus_frame(const uint8_t *frame, size_t frame_len, const a
 #endif
 		last_tx_resp_tick = HAL_GetTick();
 		LED_Status_OnUart1TxRespBefore();
+		uart1_debug_log_tx_resp_len(tx_len);
+		uart1_debug_log_de_tx();
 		set_de_tx();
 		(void)HAL_UART_Transmit(&huart1, tx_frame, tx_len, 100);
 		/* 마지막 바이트가 나갈 때까지 대기 후 DE → RX (응답 잘림/No Response 방지) */
@@ -170,6 +245,7 @@ static void process_modbus_frame(const uint8_t *frame, size_t frame_len, const a
 					break;
 			}
 		}
+		uart1_debug_log_de_rx();
 		set_de_rx();
 		if (TX_GUARD_MS > 0)
 			HAL_Delay(TX_GUARD_MS);
@@ -242,41 +318,70 @@ void UpstreamSlaveUart1_Poll(const aggregated_status_t *agg)
 
 		/* FC03 addr=2100 cnt=2 요청: 8바이트 (SlaveId=9 + FC=03 + Addr 0x0834 + Cnt 2 + CRC2).
 		 * ModbusRTU_GetExpectedRequestLength(FC03) = 8. CRC = Modbus RTU (poly 0xA001), LSB first. */
-		if (frame_len >= 4 && frame_buf[0] == get_slave_id()) {
+		uart1_debug_log_rx_raw(frame_buf, frame_len);
+
+		if (frame_len >= 4u) {
+			uint8_t req_slave = frame_buf[0];
+			uint8_t my_slave  = get_slave_id();
+			uint8_t fc        = frame_buf[1];
+
+			/* Slave ID mismatch: 조용히 drop하지 말고 원인을 로그로 남김 */
+			if (req_slave != my_slave) {
+				uart1_debug_log_drop_slave_mismatch(req_slave, my_slave);
+				return;
+			}
+
 			size_t expected = ModbusRTU_GetExpectedRequestLength(frame_buf, (size_t)frame_len);
-			if (expected != 0 && (size_t)frame_len >= expected) {
-				if (ModbusRTU_CRC16Check(frame_buf, expected) == 0) {
-					rx_frame_ok_count++;
-#if UPSTREAM_DEBUG_LOG
-					{
-						uint16_t log_len = (expected > 16u) ? 16u : (uint16_t)expected;
-						uint16_t addr = (uint16_t)((frame_buf[2] << 8) | frame_buf[3]);
-						UpstreamSlaveUart1_LogFrame(frame_buf, log_len, 1, frame_buf[1], addr);
-					}
-#endif
-					LED_Status_OnUart1CrcOk();   /* LED3 50ms: CRC OK (3단계 디버그) */
-					LED_Status_OnRS485Activity();
-					process_modbus_frame(frame_buf, expected, agg);
-					return;
-				}
-				rx_crc_fail_count++;
-#if UPSTREAM_DEBUG_LOG
-				{
-					uint16_t log_len = (expected > 16u) ? 16u : (uint16_t)expected;
-					uint16_t addr = (uint16_t)((frame_buf[2] << 8) | frame_buf[3]);
-					UpstreamSlaveUart1_LogFrame(frame_buf, log_len, 0, frame_buf[1], addr);
-				}
-#endif
-			} else {
+			/* Expected length mismatch (FC에 따라 8/7+byte_count 등):
+			 * 유효한 프레임이 아니므로 처리하지 않고 drop. */
+			if (!(expected != 0u && (size_t)frame_len >= expected)) {
 				rx_len_fail_count++;
+				uart1_debug_log_drop_len_mismatch(fc, frame_len, expected);
 #if UPSTREAM_DEBUG_LOG
 				{
 					uint16_t log_len = (frame_len > 16u) ? 16u : frame_len;
 					uint16_t addr = (frame_len >= 4u) ? (uint16_t)((frame_buf[2] << 8) | frame_buf[3]) : 0u;
-					UpstreamSlaveUart1_LogFrame(frame_buf, log_len, 0, frame_len >= 2u ? frame_buf[1] : 0u, addr);
+					UpstreamSlaveUart1_LogFrame(frame_buf, log_len, 0,
+					                            frame_len >= 2u ? frame_buf[1] : 0u, addr);
 				}
 #endif
+				return;
 			}
+
+			/* CRC check */
+			if (ModbusRTU_CRC16Check(frame_buf, expected) == 0) {
+				rx_frame_ok_count++;
+#if UPSTREAM_DEBUG_LOG
+				{
+					uint16_t log_len = (expected > 16u) ? 16u : (uint16_t)expected;
+					uint16_t addr = (uint16_t)((frame_buf[2] << 8) | frame_buf[3]);
+					UpstreamSlaveUart1_LogFrame(frame_buf, log_len, 1, frame_buf[1], addr);
+				}
+#endif
+
+				/* 정상 parse 로그 (요구 포맷) */
+				{
+					uint16_t addr = (uint16_t)((frame_buf[2] << 8) | frame_buf[3]);
+					uint16_t count = (uint16_t)((frame_buf[4] << 8) | frame_buf[5]);
+					uart1_debug_log_parsed(fc, addr, count);
+				}
+
+				LED_Status_OnUart1CrcOk();   /* LED3 50ms: CRC OK (3단계 디버그) */
+				LED_Status_OnRS485Activity();
+				process_modbus_frame(frame_buf, expected, agg);
+				return;
+			}
+
+			/* CRC fail */
+			rx_crc_fail_count++;
+			uart1_debug_log_drop_crc_fail(expected);
+#if UPSTREAM_DEBUG_LOG
+			{
+				uint16_t log_len = (expected > 16u) ? 16u : (uint16_t)expected;
+				uint16_t addr = (uint16_t)((frame_buf[2] << 8) | frame_buf[3]);
+				UpstreamSlaveUart1_LogFrame(frame_buf, log_len, 0, frame_buf[1], addr);
+			}
+#endif
 		}
 		return;
 	}
