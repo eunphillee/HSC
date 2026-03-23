@@ -16,9 +16,17 @@ extern "C" {
 void ModbusMaster_Init(void);
 void ModbusMaster_Poll(void);
 
+typedef enum {
+    MODBUS_MASTER_FC05_ERR_NONE = 0,
+    MODBUS_MASTER_FC05_ERR_TIMEOUT = 1,
+    MODBUS_MASTER_FC05_ERR_EXCEPTION = 2,
+    MODBUS_MASTER_FC05_ERR_INVALID_RESP = 3
+} ModbusMasterFc05Err_t;
+
 /* Optional: request write (queued or immediate). Use enum addresses. */
 int ModbusMaster_WriteCoil(SlaveId_t slave, uint16_t coil_addr, uint8_t value);
 int ModbusMaster_WriteHoldingReg(SlaveId_t slave, uint16_t reg_addr, uint16_t value);
+ModbusMasterFc05Err_t ModbusMaster_GetLastFc05Error(void);
 
 /* Communication status for application */
 uint8_t ModbusMaster_GetLastSlaveResponded(void);

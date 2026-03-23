@@ -34,6 +34,7 @@ static uint8_t      comm_ok[SLAVE_ID_COUNT]; /* 0 = HPSB, 1 = LPSB */
 /* While a gateway write (FC05) is in progress, stop poll from consuming UART2 RX bytes. */
 static volatile uint8_t s_write_in_progress;
 static volatile uint8_t s_uart2_locked_for_txn;
+static volatile ModbusMasterFc05Err_t s_last_fc05_err = MODBUS_MASTER_FC05_ERR_NONE;
 
 #define SLAVE_TO_INDEX(s)  ((uint8_t)SLAVE_ID_TO_TABLE_INDEX(s))
 
@@ -382,6 +383,7 @@ void ModbusMaster_Poll(void)
 
 int ModbusMaster_WriteCoil(SlaveId_t slave, uint16_t coil_addr, uint8_t value)
 {
+    s_last_fc05_err = MODBUS_MASTER_FC05_ERR_NONE;
     s_write_in_progress = 1;
     state = MST_IDLE; /* cancel any in-flight poll transaction */
     uint8_t pdu[8];
@@ -461,10 +463,12 @@ int ModbusMaster_WriteCoil(SlaveId_t slave, uint16_t coil_addr, uint8_t value)
         uart2_mb_log("[UART2-MB] timeout waiting response\r\n");
 
     if (rx != HAL_OK) {
+        s_last_fc05_err = MODBUS_MASTER_FC05_ERR_TIMEOUT;
 #if FC05_GW_STEP_LOG
         Gateway_LogFc05StepUart2RxTimeout();
 #endif
     } else if (rx_buf_fc05[1] & 0x80) {
+        s_last_fc05_err = MODBUS_MASTER_FC05_ERR_EXCEPTION;
 #if FC05_GW_STEP_LOG
         Gateway_LogFc05StepUart2RxException(rx_buf_fc05[1]);
         Gateway_LogFc05StepSubboardException(rx_buf_fc05, MODBUS_FC05_RESPONSE_LEN);
@@ -478,6 +482,7 @@ int ModbusMaster_WriteCoil(SlaveId_t slave, uint16_t coil_addr, uint8_t value)
     int rx_ok = 0;
     if (!is_exception && rx == HAL_OK) {
         rx_ok = (ModbusRTU_ValidateFC05Response(rx_buf_fc05, MODBUS_FC05_RESPONSE_LEN, target_slave) == 0);
+        if (!rx_ok) s_last_fc05_err = MODBUS_MASTER_FC05_ERR_INVALID_RESP;
     }
     if (rx_ok) {
         char b[96];
@@ -499,6 +504,7 @@ int ModbusMaster_WriteCoil(SlaveId_t slave, uint16_t coil_addr, uint8_t value)
 #if FC05_GW_STEP_LOG
     Gateway_LogFc05StepCleanupDone();
 #endif
+    if (rx_ok) s_last_fc05_err = MODBUS_MASTER_FC05_ERR_NONE;
     return rx_ok ? 0 : -1;
 }
 
@@ -511,6 +517,11 @@ int ModbusMaster_WriteHoldingReg(SlaveId_t slave, uint16_t reg_addr, uint16_t va
     uart2_tx(pdu, (uint16_t)(len + 2));
     LED_Status_OnSubRS485Activity();
     return 0;
+}
+
+ModbusMasterFc05Err_t ModbusMaster_GetLastFc05Error(void)
+{
+    return s_last_fc05_err;
 }
 
 uint8_t ModbusMaster_GetLastSlaveResponded(void) { return last_slave_responded; }

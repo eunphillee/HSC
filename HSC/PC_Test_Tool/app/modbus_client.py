@@ -481,7 +481,7 @@ class ModbusClient:
         return self._write_pc_reg(PC_RESET_EN_REG, 1 if onoff else 0)
 
     def read_sub_sense(self) -> tuple[bool, list[int] | None, str | None]:
-        """FC03 read SUB_SENSE_REG count=14 → HPSB raw[3], LPSB1[3], LPSB2[3], LPSB3[3], reserved[2]. Returns (ok, list of 14 u16 or None, err)."""
+        """FC03 read SUB_SENSE_REG count=40 → HPSB/LPSB×3 각 AVG[3],PKPK[3],CUR[3] + reserved[4]."""
         with self._lock:
             ok, err = self._ensure_socket_open()
             if not ok:
@@ -780,7 +780,10 @@ class ModbusClient:
                 return False, format_modbus_error(exc=e)
 
     def write_sub_coil(self, addr: int, value: bool) -> tuple[bool, str | None]:
-        """FC05 write single coil to Mainboard; Mainboard forwards to HPSB/LPSB. addr 898..909 (HPSB 898-900, LPSB 901-909)."""
+        """FC05 write single coil to Mainboard.
+        Returns: (True, None) on success, (False, error_message) on timeout/exception/invalid response.
+        addr 898..909 (HPSB 898-900, LPSB 901-909).
+        """
         if addr < SUB_HPSB_COIL_BASE or addr >= SUB_HPSB_COIL_BASE + SUB_HPSB_COIL_COUNT + SUB_LPSB_COIL_COUNT:
             return False, f"Addr {addr} out of range 898..909"
         with self._lock:

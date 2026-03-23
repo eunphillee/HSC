@@ -168,6 +168,24 @@ void Gateway_LogUart2TxResult(int ok)
     gw_uart_send(ok ? "[GW] final gateway result OK\r\n" : "[GW] final gateway result FAIL\r\n");
 }
 
+void Gateway_LogFc05RetryTry1Fail(uint8_t slave_id, uint16_t coil, const char *reason)
+{
+    char buf[112];
+    int n = snprintf(buf, sizeof(buf), "[MB] FC05 try1 fail (slave=%u coil=%u reason=%s)\r\n",
+                     (unsigned)slave_id, (unsigned)coil, reason ? reason : "?");
+    if (n > 0) gw_uart_send(buf);
+}
+
+void Gateway_LogFc05RetryStart(void)
+{
+    gw_uart_send("[MB] FC05 retry...\r\n");
+}
+
+void Gateway_LogFc05RetryTry2Result(int ok)
+{
+    gw_uart_send(ok ? "[MB] FC05 try2 success\r\n" : "[MB] FC05 try2 fail\r\n");
+}
+
 void Gateway_LogFc05RecvAddr(uint16_t coil_addr, uint8_t value)
 {
     char buf[80];

@@ -1,16 +1,14 @@
 # Current Register Map — HSC Gateway
 
-Per-port current (CT/ACS) is sent from HPSB/LPSB to MAIN via Modbus, then MAIN exposes it to PC on request. No change to existing 1x (discrete) addressing.
+Per-port **AVG (ADC 평균)**, **PKPK (피크투피크)**, **CURRENT (0/1)** 는 HPSB/LPSB에서 FC04 Input Reg로 제공되고, MAIN이 폴링 후 PC에 FC03 4x2000 블록으로 노출한다.
 
 ---
 
-## 1. RAW value definition
+## 1. 값 정의
 
-- **Format:** `uint16_t` (0 .. 65535).
-- **v1 meaning:** **ADC raw** (e.g. 0 .. 4095 for 12-bit). Unscaled; no conversion on the board.
-- **HPSB (CT):** One raw value per port (ch1..ch3). Resolution and scaling (e.g. mA per LSB) are application-specific; document in hardware notes.
-- **LPSB (ACS712):** One raw value per port (ch1..ch3). Typically 12-bit ADC; mid-scale (e.g. 2048) = 0 A. MAIN may apply offset/scale for alarm (see aggregator).
-- **Future:** Scaled or RMS values (e.g. RMS_x100) can use additional registers; v1 uses raw only.
+- **AVG:** 채널당 N회 샘플 산술평균 (12비트 ADC 스케일 0..4095).
+- **PKPK:** 같은 버스트에서 max−min.
+- **CURRENT:** 보드에서 `PKPK >= 임계값` 이면 1, 아니면 0 (임계값: `HPSB_CT_PKPK_ON_THRESHOLD` / `LPSB_CT_PKPK_ON_THRESHOLD`, 기본 64).
 
 ---
 
@@ -18,96 +16,62 @@ Per-port current (CT/ACS) is sent from HPSB/LPSB to MAIN via Modbus, then MAIN e
 
 ### 2.1 HPSB (Slave ID = 1)
 
-| Area        | Type   | FC  | Start | Count | Content |
-|-------------|--------|-----|-------|-------|---------|
-| Coils       | 0x     | 01/05/15 | 0 | 8  | 0..2 = relay enable Port1~3 (existing) |
-| Holding     | 4x     | 03/06/16 | 0 | 4  | Reg0=Status, Reg1=Alarm (existing) |
-| Input Regs  | 3x     | 04  | 0 | 7  | See below |
+| Input Reg (3x) | 이름 | 설명 |
+|----------------|------|------|
+| 0 | DI image | 8비트 discrete 이미지 |
+| 1..3 | CT_CHx_AVG | 포트 1..3 AVG |
+| 4..6 | CT_CHx_PKPK | 포트 1..3 PKPK |
+| 7..9 | CT_CHx_CURRENT | 포트 1..3 전류 감지 0/1 |
 
-**Input Registers (3x):**
+**FC04** start=0, count=**10**.
 
-| Reg | Name             | Description |
-|-----|------------------|-------------|
-| 0   | DI image         | Optional; 8-bit discrete image |
-| 1   | CT_CH1_RAW       | Port1 current raw (ADC raw) |
-| 2   | CT_CH2_RAW       | Port2 current raw |
-| 3   | CT_CH3_RAW       | Port3 current raw |
-| 4   | CT_CH1_RMS_x100  | Optional; 0 for v1 |
-| 5   | CT_CH2_RMS_x100  | Optional; 0 for v1 |
-| 6   | CT_CH3_RMS_x100  | Optional; 0 for v1 |
+### 2.2 LPSB (Slave ID = 2, 4, 8)
 
-**Minimum:** InputReg 1..3 must exist and be readable by FC04.
+동일 레이아웃 (ACS712 등 동일 ADC 핀).
 
-### 2.2 LPSB (Slave IDs = 2, 3, 4; expandable)
-
-| Area        | Type   | FC  | Start | Count | Content |
-|-------------|--------|-----|-------|-------|---------|
-| Coils       | 0x     | 01/05/15 | 0 | 8  | 0..2 = SSR enable Port1~3 (existing) |
-| Holding     | 4x     | 03/06/16 | 0 | 4  | Reg0=Status, Reg1=Alarm (optional/legacy) |
-| Input Regs  | 3x     | 04  | 0 | 4  | See below |
-
-**Input Registers (3x):**
-
-| Reg | Name          | Description |
-|-----|---------------|-------------|
-| 0   | DI image      | Optional; 8-bit discrete image |
-| 1   | ACS_CH1_RAW   | Port1 current raw (ADC raw) |
-| 2   | ACS_CH2_RAW   | Port2 current raw |
-| 3   | ACS_CH3_RAW   | Port3 current raw |
-
-**Minimum:** InputReg 1..3 must exist and be readable by FC04.
+**FC04** start=0, count=**10**.
 
 ### 2.3 MAIN polling
 
-- **HPSB:** FC04, start 0, count 7 (every 100 ms–500 ms in poll loop).
-- **LPSB1/2/3:** FC04, start 0, count 4 each.
-- **Storage:** `out->hpsb_sense_raw[3]`, `out->lpsb1_sense_raw[3]`, `out->lpsb2_sense_raw[3]`, `out->lpsb3_sense_raw[3]`.
+- HPSB / LPSB1 / LPSB2 / LPSB3: 각각 **FC04 start=0, count=10**.
+- 집계: `hpsb_sense_raw[]` = AVG, `hpsb_pkpk[]`, `hpsb_current_st[]` (LPSB 동일).
 
 ---
 
 ## 3. Upstream (MAIN → PC)
 
-PC reads per-port current via **Holding Registers (4x)**. Address range is fixed and stable.
+**블록:** 4x**2000** .. 4x**2027** — Modbus start **2000**, count **40**, **FC03**, 읽기 전용.
 
-**Block:** 4x**2000** .. 4x**200D** (Modbus register start address **2000**, count **14**). Read with **FC03**. **Read-only**; write (FC06/FC16) returns exception **0x03**.
+요청은 **start=2000, count=40** 만 허용 (그 외는 exception).
 
-**FC03 current read must be requested only as start=2000, count=14.** Any other start or count is rejected (0x02 Illegal Data Address if start≠2000, 0x03 Illegal Data Value if count≠14). This simplifies the PC test tool and avoids partial-range ambiguity.
+레이아웃 (워드 오프셋 0 기준):
 
-| Reg (4x) | Modbus start + offset | Content |
-|----------|------------------------|---------|
-| 2000     | 0                      | HPSB Port1 current raw |
-| 2001     | 1                      | HPSB Port2 current raw |
-| 2002     | 2                      | HPSB Port3 current raw |
-| 2003     | 3                      | LPSB1 Port1 current raw |
-| 2004     | 4                      | LPSB1 Port2 current raw |
-| 2005     | 5                      | LPSB1 Port3 current raw |
-| 2006     | 6                      | LPSB2 Port1 current raw |
-| 2007     | 7                      | LPSB2 Port2 current raw |
-| 2008     | 8                      | LPSB2 Port3 current raw |
-| 2009     | 9                      | LPSB3 Port1 current raw |
-| 200A     | 10                     | LPSB3 Port2 current raw |
-| 200B     | 11                     | LPSB3 Port3 current raw |
-| 200C     | 12                     | MAIN DOOR1 current (0 if none) |
-| 200D     | 13                     | MAIN DOOR2 current (0 if none) |
-
-**Extend later:** LPSB4..9 can use 4x200E.. (3 regs per unit) as needed.
+| 오프셋 | 내용 |
+|--------|------|
+| 0..2 | HPSB AVG ch1..3 |
+| 3..5 | HPSB PKPK ch1..3 |
+| 6..8 | HPSB CURRENT ch1..3 |
+| 9..17 | LPSB1 AVG/PKPK/CURRENT (각 3워드씩) |
+| 18..26 | LPSB2 |
+| 27..35 | LPSB3 |
+| 36..39 | 예약 (0) |
 
 ---
 
-## 4. ADC / resolution assumptions (v1)
+## 4. 테스트 (부하 ON/OFF)
 
-- **HPSB CT:** 12-bit ADC assumed; raw 0..4095. Adjust threshold and scaling in MAIN if different.
-- **LPSB ACS712:** 12-bit ADC assumed; mid-scale 2048 = 0 A. MAIN uses `LPSB_SENSE_MIDSCALE` and `LPSB_OC_THRESHOLD_RAW` for overcurrent (both polarities).
-- **Byte order:** Modbus high-byte-first per register.
+1. 부하 없음: 각 채널 **CURRENT=0**, PKPK 낮음.
+2. 부하 연결: PKPK 상승 → **CURRENT=1** (임계값은 노이즈에 맞게 펌웨어 매크로 조정).
+3. PC 툴: Mainboard 경로에서 FC03 2000/40 또는 HPSB/LPSB UI의 `AVG/PKPK/I` 표시 확인.
+4. Direct LPSB: **FC04** slave=2, start=0, count=10.
 
 ---
 
-## 5. Implementation summary
+## 5. 구현 파일
 
-| Board  | File / change |
-|--------|----------------|
-| HPSB   | InputReg 1..3 = CT raw; 4..6 = RMS optional (0). `ModbusTable_RefreshInputRegs()` fills from ADC (or stub). |
-| LPSB   | InputReg 1..3 = ACS raw. Same pattern. |
-| MAIN   | Poll FC04 HPSB 7 regs, LPSB 4 regs; fill `*_sense_raw[3]`. FC03 4x2000 count 14 from aggregated status. |
-
-Existing 1x (discrete) mapping is unchanged. This document defines only the current-related registers.
+| 보드 | 변경 |
+|------|------|
+| HPSB | `hpsb_ct_adc.c`, `io_map.h` INPUT 10개, `modbus_table.c`, `main.c` |
+| LPSB | `lpsb_ct_adc.c`, 동일 패턴 |
+| MAIN | `io_map.h` MODBUS_INPUT_REG_COUNT=10, `modbus_table.c` 폴링, `aggregator.c`, `upstream_slave_h2tech.c`, `aggregated_status.h` |
+| PC | `address_map.py` SUB_SENSE_COUNT=40, `ui_main.py`, `modbus_client.py` |

@@ -31,6 +31,8 @@ typedef struct {
 	uint16_t  hpsb_status_reg;
 	uint16_t  hpsb_alarm_reg;
 	uint16_t  hpsb_sense_raw[3];
+	uint16_t  hpsb_pkpk[3];
+	uint16_t  hpsb_current_st[3];
 	uint8_t   lpsb1_coils[3];
 	uint8_t   lpsb2_coils[3];
 	uint8_t   lpsb3_coils[3];
@@ -38,8 +40,14 @@ typedef struct {
 	uint16_t  lpsb2_alarm_reg;
 	uint16_t  lpsb3_alarm_reg;
 	uint16_t  lpsb1_sense_raw[3];
+	uint16_t  lpsb1_pkpk[3];
+	uint16_t  lpsb1_current_st[3];
 	uint16_t  lpsb2_sense_raw[3];
+	uint16_t  lpsb2_pkpk[3];
+	uint16_t  lpsb2_current_st[3];
 	uint16_t  lpsb3_sense_raw[3];
+	uint16_t  lpsb3_pkpk[3];
+	uint16_t  lpsb3_current_st[3];
 	uint16_t  error_flags;
 } aggregated_status_t;
 

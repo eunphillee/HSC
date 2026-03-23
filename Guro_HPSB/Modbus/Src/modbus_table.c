@@ -4,6 +4,7 @@
  */
 #include "modbus_table.h"
 #include "io_map.h"
+#include "hpsb_ct_adc.h"
 #include <string.h>
 
 static uint8_t  discrete_image[DISCRETE_COUNT];
@@ -75,12 +76,17 @@ void ModbusTable_RefreshInputRegs(void)
     for (uint16_t i = 0; i < 8 && i < DISCRETE_COUNT; i++)
         byte |= (discrete_image[i] ? (1u << i) : 0);
     input_regs[HPSB_INPUT_REG_DISCRETE_IMAGE] = (uint16_t)byte;
-    /* CT ch1..3 raw: ADC raw (e.g. 0..4095); fill from IO_HPSB_ReadCTRaw(0..2) when wired */
-    input_regs[HPSB_INPUT_REG_CT_CH1_RAW] = 0;
-    input_regs[HPSB_INPUT_REG_CT_CH2_RAW] = 0;
-    input_regs[HPSB_INPUT_REG_CT_CH3_RAW] = 0;
-    /* RMS x100 optional; 0 for v1 */
-    input_regs[HPSB_INPUT_REG_CT_CH1_RMS_X100] = 0;
-    input_regs[HPSB_INPUT_REG_CT_CH2_RMS_X100] = 0;
-    input_regs[HPSB_INPUT_REG_CT_CH3_RMS_X100] = 0;
+    {
+        uint16_t a[3], p[3], c[3];
+        HpsbCtAdc_GetSnapshot(a, p, c);
+        input_regs[HPSB_INPUT_REG_CT_CH1_AVG] = a[0];
+        input_regs[HPSB_INPUT_REG_CT_CH2_AVG] = a[1];
+        input_regs[HPSB_INPUT_REG_CT_CH3_AVG] = a[2];
+        input_regs[HPSB_INPUT_REG_CT_CH1_PKPK] = p[0];
+        input_regs[HPSB_INPUT_REG_CT_CH2_PKPK] = p[1];
+        input_regs[HPSB_INPUT_REG_CT_CH3_PKPK] = p[2];
+        input_regs[HPSB_INPUT_REG_CT_CH1_CURRENT] = c[0];
+        input_regs[HPSB_INPUT_REG_CT_CH2_CURRENT] = c[1];
+        input_regs[HPSB_INPUT_REG_CT_CH3_CURRENT] = c[2];
+    }
 }

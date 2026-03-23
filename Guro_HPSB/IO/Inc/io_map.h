@@ -16,7 +16,7 @@ extern "C" {
 #define COIL_COUNT           8
 #define DISCRETE_COUNT       8
 #define HOLDING_REG_COUNT    4
-#define INPUT_REG_COUNT     7
+#define INPUT_REG_COUNT     10
 
 #define COIL_START           0
 #define DISCRETE_START       0
@@ -55,15 +55,18 @@ typedef enum {
     HPSB_HOLDING_RESERVED_3 = 3
 } HpsbHoldingRegIdx_t;
 
-/* Input register indices (3x): Reg0=DI image, Reg1..3=CT raw ch1..3, Reg4..6=CT RMS x100 (optional, 0 for v1) */
+/* Input register indices (3x): Reg0=DI image; 1..3=AVG; 4..6=PKPK; 7..9=CURRENT 0/1 */
 typedef enum {
     HPSB_INPUT_REG_DISCRETE_IMAGE = 0,
-    HPSB_INPUT_REG_CT_CH1_RAW = 1,
-    HPSB_INPUT_REG_CT_CH2_RAW = 2,
-    HPSB_INPUT_REG_CT_CH3_RAW = 3,
-    HPSB_INPUT_REG_CT_CH1_RMS_X100 = 4,
-    HPSB_INPUT_REG_CT_CH2_RMS_X100 = 5,
-    HPSB_INPUT_REG_CT_CH3_RMS_X100 = 6
+    HPSB_INPUT_REG_CT_CH1_AVG = 1,
+    HPSB_INPUT_REG_CT_CH2_AVG = 2,
+    HPSB_INPUT_REG_CT_CH3_AVG = 3,
+    HPSB_INPUT_REG_CT_CH1_PKPK = 4,
+    HPSB_INPUT_REG_CT_CH2_PKPK = 5,
+    HPSB_INPUT_REG_CT_CH3_PKPK = 6,
+    HPSB_INPUT_REG_CT_CH1_CURRENT = 7,
+    HPSB_INPUT_REG_CT_CH2_CURRENT = 8,
+    HPSB_INPUT_REG_CT_CH3_CURRENT = 9
 } HpsbInputRegIdx_t;
 
 uint8_t IO_HPSB_ReadDiscrete(uint16_t idx);

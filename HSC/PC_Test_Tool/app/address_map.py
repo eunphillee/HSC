@@ -30,9 +30,11 @@ MAIN_ENV_REG = 2110
 MAIN_ENV_COUNT = 3  # + error_flags
 
 # ---- HPSB/LPSB (via Mainboard FC03/FC02/FC05) ----
-# FC03 start=2000 count=14: HPSB sense [0,1,2], LPSB1 [0,1,2], LPSB2 [0,1,2], LPSB3 [0,1,2], reserved [12,13]
+# FC03 start=2000 count=40: 각 보드당 9워드 × 4(HPSB+LPSB1+2+3) + 예약 4
+# 보드 오프셋 0,9,18,27: [0..2]=AVG, [3..5]=PKPK, [6..8]=CURRENT(0/1)
 SUB_SENSE_REG = 2000
-SUB_SENSE_COUNT = 14
+SUB_SENSE_COUNT = 40
+SUB_SENSE_BOARD_STRIDE = 9
 # FC02 discrete (1x): H2 dec 823..836 = start 822, count 14 (ONOFF_3..14 = HPSB CH1~3, LPSB1~3 CH1~3)
 SUB_COIL_STATUS_START = 822
 SUB_COIL_STATUS_COUNT = 14

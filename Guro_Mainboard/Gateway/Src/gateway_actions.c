@@ -14,6 +14,7 @@
 
 #define PULSE_MS_DOOR  300u
 #define PULSE_MS_PC_IO 500u
+#define FC05_RETRY_DELAY_MS 5u
 
 static uint8_t door1_active;
 static uint32_t door1_tick;
@@ -120,11 +121,22 @@ void Gateway_Action_ClearDownstreamWriteFailAlarm(void)
 int Gateway_Action_WriteSubCoil(uint8_t slave_id, uint16_t coil_index, uint8_t value)
 {
     SlaveId_t s = (SlaveId_t)slave_id;
+    ModbusMasterFc05Err_t err;
     if (slave_id != 1 && slave_id != 2 && slave_id != 4 && slave_id != 8) return -1;
     if (coil_index >= MODBUS_COIL_COUNT) return -1;
     Gateway_LogWriteMapped(slave_id, coil_index, value);
     Gateway_LogUart2TxStart(slave_id, coil_index, value ? 1 : 0);
     int ret = ModbusMaster_WriteCoil(s, coil_index, value ? 1 : 0);
+    err = ModbusMaster_GetLastFc05Error();
+    if (ret != 0 &&
+        (err == MODBUS_MASTER_FC05_ERR_TIMEOUT || err == MODBUS_MASTER_FC05_ERR_INVALID_RESP)) {
+        const char *reason = (err == MODBUS_MASTER_FC05_ERR_TIMEOUT) ? "timeout" : "invalid/crc";
+        Gateway_LogFc05RetryTry1Fail(slave_id, coil_index, reason);
+        Gateway_LogFc05RetryStart();
+        HAL_Delay(FC05_RETRY_DELAY_MS);
+        ret = ModbusMaster_WriteCoil(s, coil_index, value ? 1 : 0);
+        Gateway_LogFc05RetryTry2Result(ret == 0);
+    }
     if (ret == 0)
         ModbusTable_SetCoil(s, coil_index, value ? 1 : 0);
     else

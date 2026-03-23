@@ -22,9 +22,10 @@
 #define EX_SLAVE_DEVICE_FAIL 0x04  /* Address valid but gateway/downstream write failed */
 #define PULSE_MS_DEFAULT     300u
 
-/* Upstream current block: 4x2000..4x200D (read-only). Modbus start_addr 2000, 14 registers. */
+/* Upstream current block: 4x2000..4x2027 (read-only). start=2000, 40 registers.
+ * Per board (HPSB, LPSB1..3): 9 words = AVG[3], PKPK[3], CURRENT[3]; then 4 reserved = 40 total. */
 #define UPSTREAM_CURRENT_START  2000u
-#define UPSTREAM_CURRENT_COUNT  14u
+#define UPSTREAM_CURRENT_COUNT  40u
 
 /* MAIN I/O: 4x2100 = DI bitmap (8 bits), 4x2101 = DO bitmap (bits 0..3). */
 #define UPSTREAM_MAIN_IO_DI_REG  2100u
@@ -159,9 +160,9 @@ static int handle_fc02(uint16_t start_addr, uint16_t count, uint8_t *response, u
     return (int)(2 + byte_count);
 }
 
-/* FC03 Read Holding Registers: 4x2000..4x200D = per-port current raw (read-only).
+/* FC03 Read Holding Registers: 4x2000..4x2027 = HPSB/LPSB AVG+PKPK+CURRENT (read-only).
  * Also 4x2100 count=2: MAIN DI bitmap (reg 2100), DO bitmap (reg 2101).
- * Policy: only start=2000 count=14 or start=2100 count=2 accepted; else 0x02 (bad address) or 0x03 (bad value). */
+ * Policy: start=2000 count=40 or start=2100 count=2 ... */
 static int handle_fc03(uint16_t start_addr, uint16_t count, const void *p_agg,
                        uint8_t *response, uint16_t resp_max)
 {
@@ -307,20 +308,50 @@ static int handle_fc03(uint16_t start_addr, uint16_t count, const void *p_agg,
     response[1] = (uint8_t)byte_count;
 
     uint16_t regs[UPSTREAM_CURRENT_COUNT];
+    /* HPSB */
     regs[0] = agg->hpsb_sense_raw[0];
     regs[1] = agg->hpsb_sense_raw[1];
     regs[2] = agg->hpsb_sense_raw[2];
-    regs[3] = agg->lpsb1_sense_raw[0];
-    regs[4] = agg->lpsb1_sense_raw[1];
-    regs[5] = agg->lpsb1_sense_raw[2];
-    regs[6] = agg->lpsb2_sense_raw[0];
-    regs[7] = agg->lpsb2_sense_raw[1];
-    regs[8] = agg->lpsb2_sense_raw[2];
-    regs[9] = agg->lpsb3_sense_raw[0];
-    regs[10] = agg->lpsb3_sense_raw[1];
-    regs[11] = agg->lpsb3_sense_raw[2];
-    regs[12] = 0;  /* MAIN DOOR1 current (none) */
-    regs[13] = 0;  /* MAIN DOOR2 current (none) */
+    regs[3] = agg->hpsb_pkpk[0];
+    regs[4] = agg->hpsb_pkpk[1];
+    regs[5] = agg->hpsb_pkpk[2];
+    regs[6] = agg->hpsb_current_st[0];
+    regs[7] = agg->hpsb_current_st[1];
+    regs[8] = agg->hpsb_current_st[2];
+    /* LPSB1 */
+    regs[9] = agg->lpsb1_sense_raw[0];
+    regs[10] = agg->lpsb1_sense_raw[1];
+    regs[11] = agg->lpsb1_sense_raw[2];
+    regs[12] = agg->lpsb1_pkpk[0];
+    regs[13] = agg->lpsb1_pkpk[1];
+    regs[14] = agg->lpsb1_pkpk[2];
+    regs[15] = agg->lpsb1_current_st[0];
+    regs[16] = agg->lpsb1_current_st[1];
+    regs[17] = agg->lpsb1_current_st[2];
+    /* LPSB2 */
+    regs[18] = agg->lpsb2_sense_raw[0];
+    regs[19] = agg->lpsb2_sense_raw[1];
+    regs[20] = agg->lpsb2_sense_raw[2];
+    regs[21] = agg->lpsb2_pkpk[0];
+    regs[22] = agg->lpsb2_pkpk[1];
+    regs[23] = agg->lpsb2_pkpk[2];
+    regs[24] = agg->lpsb2_current_st[0];
+    regs[25] = agg->lpsb2_current_st[1];
+    regs[26] = agg->lpsb2_current_st[2];
+    /* LPSB3 */
+    regs[27] = agg->lpsb3_sense_raw[0];
+    regs[28] = agg->lpsb3_sense_raw[1];
+    regs[29] = agg->lpsb3_sense_raw[2];
+    regs[30] = agg->lpsb3_pkpk[0];
+    regs[31] = agg->lpsb3_pkpk[1];
+    regs[32] = agg->lpsb3_pkpk[2];
+    regs[33] = agg->lpsb3_current_st[0];
+    regs[34] = agg->lpsb3_current_st[1];
+    regs[35] = agg->lpsb3_current_st[2];
+    regs[36] = 0;
+    regs[37] = 0;
+    regs[38] = 0;
+    regs[39] = 0;
     for (uint16_t i = 0; i < count; i++) {
         response[2 + i * 2]     = (uint8_t)(regs[i] >> 8);
         response[2 + i * 2 + 1] = (uint8_t)(regs[i] & 0xFF);

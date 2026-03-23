@@ -25,6 +25,7 @@
 #include "modbus_slave.h"
 #include "modbus_cfg.h"
 #include "modbus_table.h"
+#include "hpsb_ct_adc.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -151,6 +152,7 @@ int main(void)
 #if HPSB_PA9_TEST_MODE == 0 && !HPSB_MAX3485_TX_AA_TEST
   ModbusSlave_Init();
   LED_Status_Init();
+  HpsbCtAdc_Init();
 #if HPSB_TX_TEST_ENABLE
   s_tx_test_last_tick = HAL_GetTick();
 #endif
@@ -213,6 +215,7 @@ int main(void)
     __WFI();
 #else
     LED_Status_Tick_1ms();
+    HpsbCtAdc_Poll();
 #if HPSB_TX_TEST_ENABLE
     if ((HAL_GetTick() - s_tx_test_last_tick) >= 2000u) {
         ModbusSlave_SendTestFrame();

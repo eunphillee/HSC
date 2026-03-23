@@ -69,7 +69,7 @@ If any panel is clipped on 1440×900: the window has minimum size 880×700 and t
 
 - H2TECH “1xNNNN” uses Modbus starting address = **NNNN - 1** (e.g. 1x0821 → start 820).
 - FC02 responses: LSB-first bit packing.
-- Current block: **FC03 only** with **start=2000, count=14**. Any other start/count returns exception 0x02/0x03.
+- Current block: **FC03** **start=2000, count=40** (HPSB+LPSB×3 각 AVG/PKPK/CURRENT + reserved). Other start/count → exception 0x02/0x03.
 
 ## RS485 adapter
 

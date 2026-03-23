@@ -22,9 +22,9 @@ ALARMS_COUNT = 12
 CMD_ONOFF_START = 884
 CMD_ONOFF_COUNT = 7
 
-# FC03 current block: ONLY start=2000, count=14
+# FC03 current block: start=2000, count=40 (AVG/PKPK/CURRENT per HPSB + LPSB×3 + reserved×4)
 CURRENT_START = 2000
-CURRENT_COUNT = 14
+CURRENT_COUNT = 40
 
 # FC05 write (coil): 1xNNNN -> Modbus coil address = NNNN - 1
 # Door open: 1x0897 -> 896, 1x0898 -> 897

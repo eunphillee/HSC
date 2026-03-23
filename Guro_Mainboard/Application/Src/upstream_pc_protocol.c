@@ -18,7 +18,7 @@ static inline uint8_t get_upstream_slave_id(void) {
   const system_config_t *c = SystemConfig_Get();
   return c ? (uint8_t)c->slave_id : UPSTREAM_MODBUS_SLAVE_ID_DEFAULT;
 }
-#define MODBUS_RESP_BUF_SIZE     (1 + 64 + 2)   /* slave_id + PDU + CRC */
+#define MODBUS_RESP_BUF_SIZE     (1 + 128 + 2)   /* slave_id + PDU + CRC (FC03×40 regs) */
 #define RX_RING_SIZE             256
 #define FRAME_END_MS              4             /* 3.5 char time at 9600 bps */
 #define TX_GUARD_MS               2
@@ -147,7 +147,7 @@ static void log_frame(const uint8_t *frame, size_t len, int crc_ok, uint8_t fc, 
 /* PC tool sends 0-based coil/register addresses; H2Map_ModbusAddrToH2Dec(start_addr) = start_addr+1. */
 static void process_modbus_frame(const uint8_t *frame, size_t frame_len, const aggregated_status_t *agg)
 {
-	static uint8_t resp_pdu[64];
+	static uint8_t resp_pdu[128]; /* FC03 block 2000 count=40 → PDU up to 82 B */
 	static uint8_t modbus_resp_buf[MODBUS_RESP_BUF_SIZE];
 	uint8_t fc = frame[1];
 	uint16_t start_addr = (uint16_t)((frame[2] << 8) | frame[3]);

@@ -8,13 +8,14 @@ from PyQt6.QtWidgets import (
     QPlainTextEdit, QGroupBox, QCheckBox, QApplication, QSizePolicy,
 )
 from PyQt6.QtCore import pyqtSignal, Qt, QTimer
-from PyQt6.QtGui import QFont, QShowEvent, QPixmap
+from PyQt6.QtGui import QFont, QPixmap, QShowEvent
 from pathlib import Path
 from collections import deque
 
 import pymodbus
 from pymodbus.client.sync import ModbusSerialClient
 
+from .app_icon import load_app_icon
 from .modbus_client import ModbusClient, build_fc05_rtu_frame
 from .worker import MainboardWorker, create_worker_and_thread
 from .logger import LogHandler
@@ -27,6 +28,8 @@ from .address_map import (
     PC_RESET_EN_REG,
     PC_LED_IN_REG,
     SUB_SENSE_REG,
+    SUB_SENSE_COUNT,
+    SUB_SENSE_BOARD_STRIDE,
     SUB_COIL_STATUS_START,
     SUB_VB_COIL_BASE,
     SUB_VB_COIL_COUNT,
@@ -36,6 +39,21 @@ from .address_map import (
 )
 
 from PyQt6.QtWidgets import QTabWidget
+
+
+def _lpsb_sense_base_from_selection(sel_idx: int) -> int:
+    """Mainboard FC03 2000 레이아웃: LPSB1=9, LPSB2=18, LPSB3=27 (각 9워드 블록)."""
+    return 9 + sel_idx * SUB_SENSE_BOARD_STRIDE
+
+
+def _format_sense_channel(sense: list, base: int, ch: int) -> str:
+    if len(sense) < base + 9 or ch < 0 or ch > 2:
+        return "AVG:— PKPK:— I:—"
+    avg = sense[base + ch]
+    pk = sense[base + 3 + ch]
+    cur = sense[base + 6 + ch]
+    ion = "ON" if cur else "OFF"
+    return f"AVG:{avg} PKPK:{pk} I:{ion}"
 
 
 DARK_QSS = """
@@ -152,6 +170,9 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Mainboard 최소 테스트 툴 — Modbus RTU")
+        _icon = load_app_icon()
+        if not _icon.isNull():
+            self.setWindowIcon(_icon)
         self.setStyleSheet(DARK_QSS)
         self._client = ModbusClient()
         self._log = LogHandler()
@@ -163,6 +184,7 @@ class MainWindow(QMainWindow):
             self._log.log_info(f"Startup: {type(e).__name__}: {e}")
         self._last_log_tag = "[MAIN]"
         self._pending_hpsb_write: tuple[int, bool] | None = None
+        self._pending_hpsb_ui_write: dict | None = None
         self._last_req_route: str = "mainboard-routing"
         self._simple_hpsb_mode: bool = True
         self._hpsb_probe_inflight: bool = False
@@ -310,7 +332,7 @@ class MainWindow(QMainWindow):
         # Tab 1) 기존 테스트 UI (그대로 유지)
         # =========================
         tab_existing = QWidget()
-        tabs.addTab(tab_existing, "기존 보드 테스트")
+        tabs.addTab(tab_existing, "보드 기능 테스트")
         tab_existing_lay = QVBoxLayout(tab_existing)
         tab_existing_lay.setContentsMargins(0, 0, 0, 0)
         tab_existing_lay.setSpacing(0)
@@ -322,7 +344,7 @@ class MainWindow(QMainWindow):
         # ----- Left: Mainboard 테스트 (기존 구조 유지) -----
         left_w = QWidget()
         left_layout = QVBoxLayout(left_w)
-        # 맥북 13인치(실질 세로 ~900)에서 첫 번째 컬럼 카드들이 균형 있게 보이도록
+        # 13인치(실질 세로 ~900)에서 첫 번째 컬럼 카드들이 균형 있게 보이도록
         # 세로 간격을 조금 줄여서 상/하 여백을 최적화한다.
         left_layout.setSpacing(8)
         left_layout.setContentsMargins(0, 0, 0, 0)
@@ -659,7 +681,7 @@ class MainWindow(QMainWindow):
             self._doc_panel.on_fc15_result(ok, err)
 
     def showEvent(self, event: QShowEvent):
-        """첫 표시 시 880×640으로 열리도록 함 (저장된 창 크기 무시)."""
+        """첫 표시 시 기본 너비·높이로 열림 (저장된 창 크기 무시)."""
         super().showEvent(event)
         if self._first_show:
             self._first_show = False
@@ -813,17 +835,51 @@ class MainWindow(QMainWindow):
     def _on_response_log(self, ok: bool, exception_code: int | None):
         if self._last_req_route == "mainboard-routing":
             if ok:
-                self._log.log_info("[MB->HPSB] rx raw ... (response received)")
+                self._log.log_info("[PC<-MB] response received")
             else:
                 if exception_code is not None:
-                    self._log.log_info(f"[MB->HPSB] rx exception 0x{exception_code:02X}")
+                    self._log.log_info(f"[PC<-MB] exception 0x{exception_code:02X}")
                 else:
-                    self._log.log_info("[MB->HPSB] timeout waiting response")
+                    self._log.log_info("[PC<-MB] timeout waiting response")
         self._log.log_response(self._last_log_tag, ok, exception_code)
 
     def _on_tx_frame_hex(self, msg: str):
         """Direct HPSB FC05 시 실제 전송 프레임 hex 로그 (01 05 00 00 FF 00 CRC_L CRC_H 형식)."""
         self._log.log_info(msg)
+
+    def _set_hpsb_write_pending_ui(self, idx: int, desired_value: bool):
+        if idx < 0 or idx >= len(self._hpsb_btns):
+            return
+        btn = self._hpsb_btns[idx]
+        prev = bool(not desired_value)
+        self._pending_hpsb_ui_write = {
+            "idx": idx,
+            "prev": prev,
+            "target": bool(desired_value),
+        }
+        btn.setEnabled(False)
+        btn.setStyleSheet("background-color: #616161; color: #eeeeee;")
+        self._hpsb_strips[idx].set_state(False)
+        self._hpsb_current_labels[idx].setText("pending...")
+
+    def _apply_hpsb_write_ui(self, idx: int, value: bool):
+        if idx < 0 or idx >= len(self._hpsb_btns):
+            return
+        btn = self._hpsb_btns[idx]
+        btn.blockSignals(True)
+        btn.setChecked(bool(value))
+        btn.blockSignals(False)
+        btn.setEnabled(True)
+        btn.setStyleSheet("")
+        self._hpsb_strips[idx].set_state(bool(value))
+
+    def _rollback_hpsb_write_ui(self):
+        if not self._pending_hpsb_ui_write:
+            return
+        idx = int(self._pending_hpsb_ui_write.get("idx", -1))
+        prev = bool(self._pending_hpsb_ui_write.get("prev", False))
+        self._apply_hpsb_write_ui(idx, prev)
+        self._pending_hpsb_ui_write = None
 
     def _allow_log_line(self, line: str) -> bool:
         if "[PC-TOOL]" in line:
@@ -1027,6 +1083,8 @@ class MainWindow(QMainWindow):
             self._client.disconnect()
         except Exception:
             pass
+        if self._pending_hpsb_ui_write is not None:
+            self._rollback_hpsb_write_ui()
         self._hpsb_probe_inflight = False
         self._pending_hpsb_write = None
         self._set_connected_ui(False)
@@ -1164,13 +1222,26 @@ class MainWindow(QMainWindow):
     def _on_write_result(self, ok: bool, err: str | None):
         tag = self._last_log_tag
         if ok:
+            if self._pending_hpsb_ui_write is not None:
+                idx = int(self._pending_hpsb_ui_write.get("idx", -1))
+                target = bool(self._pending_hpsb_ui_write.get("target", False))
+                self._apply_hpsb_write_ui(idx, target)
+                self._pending_hpsb_ui_write = None
+                self._log.log_info(f"[UI] HPSB RELAY{idx + 1} write success -> UI confirmed {'ON' if target else 'OFF'}")
             self._log.log_tagged(tag, "Write", "FC05/06", "-", "Response: OK")
         else:
+            was_hpsb_pending = self._pending_hpsb_ui_write is not None
+            if self._pending_hpsb_ui_write is not None:
+                idx = int(self._pending_hpsb_ui_write.get("idx", -1))
+                self._rollback_hpsb_write_ui()
+                self._log.log_info(f"[UI] HPSB RELAY{idx + 1} write fail -> UI rollback")
             msg = err or "No response/timeout"
             self._log.log_tagged(tag, "Write", "FC05/06", "-", "Response: Fail", msg)
+            if was_hpsb_pending:
+                QMessageBox.warning(self, "통신 실패", f"HPSB 릴레이 제어 실패: {msg}")
             self._show_0xaa_mode_hint_if_needed(msg)
             if msg and ("No response" in msg or "0 received" in msg):
-                if self._chk_direct_hpsb.isChecked() or tag in ("[HPSB]", "[DIRECT]"):
+                if self._direct_mode == "hpsb":
                     self._log.log_info(
                         "힌트: Direct HPSB — PC가 HPSB와 연결된 직렬 포트인지 확인하세요. "
                         "HPSB 전원, RS485(DE/배선), 보드 펌웨어(Modbus 슬레이브)를 점검하세요."
@@ -1188,7 +1259,7 @@ class MainWindow(QMainWindow):
             return
         if self._direct_mode == "lpsb":
             self._log.log_info("[PC-TOOL] route=direct-lpsb slave=2")
-            self._log.log_info("[LPSB] Direct FC03 (start=0,count=12) read 요청")
+            self._log.log_info("[LPSB] Direct FC04 (start=0,count=10) read 요청")
             self.request_read_direct_lpsb_adc.emit()
         elif self._direct_mode == "hpsb":
             self._log.log_info("[PC-TOOL] route=direct-hpsb slave=1")
@@ -1206,7 +1277,13 @@ class MainWindow(QMainWindow):
         """HPSB RELAY 버튼: Direct HPSB면 FC05 slave=1 coil=idx(0,1,2). 아니면 FC05 addr 898+idx → Mainboard 경유."""
         btn = self._hpsb_btns[idx]
         value = btn.isChecked()
-        self._hpsb_strips[idx].set_state(value)
+        if self._pending_hpsb_ui_write is not None:
+            self._log.log_info("[HPSB] write pending... wait response")
+            btn.blockSignals(True)
+            btn.setChecked(bool(self._pending_hpsb_ui_write.get("target", False)))
+            btn.blockSignals(False)
+            return
+        self._set_hpsb_write_pending_ui(idx, value)
         if self._direct_mode == "hpsb":
             self._log.log_info("[PC-TOOL] route=direct-hpsb slave=1")
             self._log.log_info(f"[DEBUG] Button: HPSB RELAY{idx + 1} EN (Direct HPSB) -> FC05 slave=1 coil={idx} val={1 if value else 0}")
@@ -1234,15 +1311,14 @@ class MainWindow(QMainWindow):
             b.setStyleSheet("background-color: #1976D2; color: white;" if i == idx else "")
         sense = getattr(self, "_last_sense", None)
         coils = getattr(self, "_last_coils", None)
-        if sense and coils and len(sense) >= 12 and len(coils) >= 12:
-            base_s = 3 + idx * 3
+        if sense and coils and len(sense) >= SUB_SENSE_COUNT and len(coils) >= 12:
+            base_s = _lpsb_sense_base_from_selection(idx)
             base_c = 3 + idx * 3
             for i in range(3):
                 on = base_c + i < len(coils) and coils[base_c + i]
                 self._lpsb_strips[i].set_state(on)
                 self._lpsb_ssr_btns[i].setChecked(on)
-                v = sense[base_s + i] if base_s + i < len(sense) else 0
-                self._lpsb_current_labels[i].setText(f"current: {v}")
+                self._lpsb_current_labels[i].setText(_format_sense_channel(sense, base_s, i))
         # LPSB 선택에 따라 SSR 버튼 활성/비활성도 갱신
         self._update_lpsb_ssr_button_state()
         self._log_lpsb_selection_state("lpsb_select")
@@ -1296,70 +1372,42 @@ class MainWindow(QMainWindow):
         self.request_write_direct_lpsb_coil.emit(ssr_idx, new_state)
         # 디버깅: SSR1/2/3 ON 직후 ADC raw를 바로 읽어 Log에 출력 (전류 흐름/채널 매핑 확인용)
         if new_state and ssr_idx in (0, 1, 2):
-            self._log.log_info(f"[LPSB] SSR{ssr_idx + 1} ON -> read ADC AVG/PKPK (FC03 start=0,count=12)")
+            self._log.log_info(f"[LPSB] SSR{ssr_idx + 1} ON -> read ADC (FC04 start=0,count=10)")
             QTimer.singleShot(200, lambda: self.request_read_direct_lpsb_adc.emit())
         # SSR ON/OFF 상태에 따라 자동 ADC 폴링 시작/중지
         self._update_lpsb_auto_adc_poll("lpsb_ssr_click")
 
     def _on_lpsb_adc_result(self, ok: bool, regs: list | None, err: str | None):
-        """Direct LPSB 모드에서 FC03(0,12) 결과 처리: ADC AVG + PKPK를 Log에 출력하고 current 라벨에 표시."""
-        # inflight 해제 (성공/실패 모두)
+        """Direct LPSB: FC04(0,10) Input reg — reg1..3 AVG, 4..6 PKPK, 7..9 CURRENT."""
         self._lpsb_adc_poll_inflight = False
-        if not ok or regs is None or len(regs) < 12:
-            msg = err or "FC03 read fail"
-            self._log.log_info(f"[LPSB] ADC raw read fail: {msg}")
+        if not ok or regs is None or len(regs) < 10:
+            msg = err or "FC04 read fail"
+            self._log.log_info(f"[LPSB] ADC read fail: {msg}")
             self._lpsb_comm_label.setText("Comm: (read fail)")
             for lbl in self._lpsb_current_labels:
                 lbl.setText("current")
             self._update_lpsb_auto_adc_poll("lpsb_adc_result_fail")
             return
-        try:
-            adc1, adc2, adc3 = regs[3], regs[4], regs[5]
-            pk1, pk2, pk3 = regs[9], regs[10], regs[11]
-        except Exception:
-            self._log.log_info("[LPSB] ADC raw read fail: invalid regs")
-            self._lpsb_comm_label.setText("Comm: (read fail)")
-            return
-        self._log.log_info("[LPSB] ADC RAW READ")
+        adc1, adc2, adc3 = regs[1], regs[2], regs[3]
+        pk1, pk2, pk3 = regs[4], regs[5], regs[6]
+        c1, c2, c3 = regs[7], regs[8], regs[9]
+        self._log.log_info("[LPSB] FC04 Input regs")
         self._log.log_info(f"[LPSB] ADC_AVG  ADC1={adc1} ADC2={adc2} ADC3={adc3}")
         self._log.log_info(f"[LPSB] ADC_PKPK ADC1={pk1} ADC2={pk2} ADC3={pk3}")
-        # ADC1/ADC2 전류 유무 (PKPK 단순 기준): pk<=9 OFF, pk>=10 ON
-        state1 = "ON" if pk1 >= 10 else "OFF"
-        state2 = "ON" if pk2 >= 10 else "OFF"
+        self._log.log_info(
+            f"[LPSB] CURRENT  CH1={'ON' if c1 else 'OFF'} CH2={'ON' if c2 else 'OFF'} CH3={'ON' if c3 else 'OFF'}"
+        )
+        state1 = "ON" if c1 else "OFF"
+        state2 = "ON" if c2 else "OFF"
+        state3 = "ON" if c3 else "OFF"
         self._lpsb_current_state_ch1 = state1
         self._lpsb_current_state_ch2 = state2
-        # ADC3 전류 유무 히스테리시스 (ON/OFF만): OFF→ON pk3>=50, ON→OFF pk3<=37, 그 외 현재 상태 유지
-        prev = self._lpsb_current_state
-        if prev == "OFF" and pk3 >= 50:
-            state = "ON"
-        elif prev == "ON" and pk3 <= 37:
-            state = "OFF"
-        else:
-            state = prev if prev in ("ON", "OFF") else "OFF"
-        self._lpsb_current_state = state
-        self._log.log_info(f"[LPSB] CURRENT ADC1={state1} ADC2={state2} ADC3={state}")
-        # 추가 메타: slave id / heartbeat / fw version (새 펌웨어 반영 여부 확인용)
-        if len(regs) >= 9:
-            try:
-                sid = regs[6]
-                hb = regs[7]
-                fw = regs[8]
-                self._log.log_info(f"[LPSB] META slave={sid} heartbeat={hb} fw=0x{fw:04X}")
-            except Exception:
-                pass
-        # LPSB current 칸에 ADC raw 표시
-        self._lpsb_current_labels[0].setText(f"ADC1: {adc1} (pkpk {pk1})")
-        self._lpsb_current_labels[1].setText(f"ADC2: {adc2} (pkpk {pk2})")
-        self._lpsb_current_labels[2].setText(f"ADC3: {adc3} (pkpk {pk3})")
+        self._lpsb_current_state = state3
+        # FC04: reg0=DI image; AVG/PKPK/CUR at 1..3 / 4..6 / 7..9 (Mainboard 경로 레이아웃과 인덱스만 다름)
+        self._lpsb_current_labels[0].setText(f"AVG:{adc1} PKPK:{pk1} I:{state1}")
+        self._lpsb_current_labels[1].setText(f"AVG:{adc2} PKPK:{pk2} I:{state2}")
+        self._lpsb_current_labels[2].setText(f"AVG:{adc3} PKPK:{pk3} I:{state3}")
         self._lpsb_comm_label.setText("Comm: OK")
-        # reg0~2 = SSR1~3 상태 → 스트립/버튼/내부 상태 동기화
-        for i in range(3):
-            on = (regs[i] & 1) != 0 if i < len(regs) else False
-            self._lpsb_ssr_state[i] = on
-            self._lpsb_strips[i].set_state(on)
-            self._lpsb_ssr_btns[i].blockSignals(True)
-            self._lpsb_ssr_btns[i].setChecked(on)
-            self._lpsb_ssr_btns[i].blockSignals(False)
         self._update_lpsb_auto_adc_poll("lpsb_adc_result_ok")
 
     def _any_lpsb_ssr_on(self) -> bool:
@@ -1436,32 +1484,35 @@ class MainWindow(QMainWindow):
             if self._pending_hpsb_write is not None:
                 self._log.log_info(f"[MB->HPSB] read-first probe fail -> write skipped ({err or 'sub read fail'})")
                 self._pending_hpsb_write = None
+                self._rollback_hpsb_write_ui()
             self._hpsb_comm_label.setText("Comm: (read fail)")
             self._lpsb_comm_label.setText("Comm: (read fail)")
             if err:
                 self._log.log_tagged("[HPSB][LPSB1][LPSB2][LPSB3]", "FC03/FC02", SUB_SENSE_REG, "sub", "Fail", err)
             return
-        sense = sense or [0] * 14
+        sense = sense or [0] * SUB_SENSE_COUNT
         coils = coils or [False] * 14
         flags = flags if flags is not None else 0
-        # HPSB: RELAY1~3 상태 → 왼쪽 색상(빨강/파랑), 버튼 체크, current 표시
+        # HPSB: RELAY1~3 상태 → 왼쪽 색상(빨강/파랑), 버튼 체크, AVG/PKPK/CURRENT 표시
+        pending_idx = -1
+        if self._pending_hpsb_ui_write is not None:
+            pending_idx = int(self._pending_hpsb_ui_write.get("idx", -1))
         for i in range(3):
             on = i < len(coils) and coils[i]
-            self._hpsb_strips[i].set_state(on)
-            self._hpsb_btns[i].setChecked(on)
-            v = sense[i] if i < len(sense) else 0
-            self._hpsb_current_labels[i].setText(f"current: {v}")
+            if i != pending_idx:
+                self._hpsb_strips[i].set_state(on)
+                self._hpsb_btns[i].setChecked(on)
+            self._hpsb_current_labels[i].setText(_format_sense_channel(sense, 0, i))
         self._hpsb_comm_label.setText("Comm: OK" if not (flags & AGG_ERR_COMM_HPSB) else "Comm: Timeout/CRC")
-        # LPSB: 선택된 보드(LPSB2/3/4)에 대해 SSR1~3 상태·current 표시
+        # LPSB: 선택된 보드(LPSB2/3/4)에 대해 SSR1~3 상태·전류 블록 표시
         sel = getattr(self, "_selected_lpsb_index", 0)
-        base_s = 3 + sel * 3
+        base_s = _lpsb_sense_base_from_selection(sel)
         base_c = 3 + sel * 3
         for i in range(3):
             on = base_c + i < len(coils) and coils[base_c + i]
             self._lpsb_strips[i].set_state(on)
             self._lpsb_ssr_btns[i].setChecked(on)
-            v = sense[base_s + i] if base_s + i < len(sense) else 0
-            self._lpsb_current_labels[i].setText(f"current: {v}")
+            self._lpsb_current_labels[i].setText(_format_sense_channel(sense, base_s, i))
         self._lpsb_comm_label.setText("Comm: OK" if not (flags & AGG_ERR_COMM_LPSB) else "Comm: Timeout/CRC")
         self._last_sense = sense
         self._last_coils = coils

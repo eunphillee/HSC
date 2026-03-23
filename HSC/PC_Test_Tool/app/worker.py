@@ -156,19 +156,17 @@ class MainboardWorker(QObject):
         self.write_result.emit(ok, err)
 
     def on_request_read_direct_lpsb_adc(self):
-        """LPSB 다이렉트: FC03 slave_id=2, start=0, count=12 → regs[0..11].
-        regs[3..5]=ADC1~3 AVG(raw), regs[9..11]=ADC1~3 PKPK.
-        """
+        """LPSB 다이렉트: FC04 slave_id=2, start=0, count=10 (Input reg: DI바이트+AVG×3+PKPK×3+CUR×3)."""
         if not self._client.connected:
             self.lpsb_adc_result.emit(False, None, "Not connected")
             return
         try:
-            ok, result = self._client.read_holding_registers_direct(2, 0, 12)
+            ok, result, err = self._client.read_input_registers(0, 10, unit=2)
         except Exception as e:
             self.lpsb_adc_result.emit(False, None, f"{type(e).__name__}: {e}")
             return
         if not ok:
-            self.lpsb_adc_result.emit(False, None, result)
+            self.lpsb_adc_result.emit(False, None, err or "FC04 fail")
             return
         self.lpsb_adc_result.emit(True, result, None)
 

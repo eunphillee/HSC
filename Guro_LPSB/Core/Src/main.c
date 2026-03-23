@@ -23,6 +23,7 @@
 /* USER CODE BEGIN Includes */
 #include "led_status.h"
 #include "modbus_slave.h"
+#include "lpsb_ct_adc.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -97,6 +98,7 @@ int main(void)
   /* USER CODE BEGIN 2 */
   ModbusSlave_Init();
   LED_Status_Init();
+  LpsbCtAdc_Init();
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -107,6 +109,7 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
     LED_Status_Tick_1ms();
+    LpsbCtAdc_Poll();
     ModbusSlave_Poll();
   }
   /* USER CODE END 3 */

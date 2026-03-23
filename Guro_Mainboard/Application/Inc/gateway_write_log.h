@@ -86,6 +86,9 @@ void Gateway_LogUart2DeHigh(void);
 void Gateway_LogUart2DeLow(void);
 void Gateway_LogUart2RxResult(int ok);
 void Gateway_LogUart2TxResult(int ok);
+void Gateway_LogFc05RetryTry1Fail(uint8_t slave_id, uint16_t coil, const char *reason);
+void Gateway_LogFc05RetryStart(void);
+void Gateway_LogFc05RetryTry2Result(int ok);
 #else
 static inline void Gateway_LogWriteUpstream(uint16_t addr, uint8_t value) { (void)addr; (void)value; }
 static inline void Gateway_LogWriteMapped(uint8_t slave_id, uint16_t coil, uint8_t value) { (void)slave_id; (void)coil; (void)value; }
@@ -100,6 +103,9 @@ static inline void Gateway_LogUart2DeHigh(void) {}
 static inline void Gateway_LogUart2DeLow(void) {}
 static inline void Gateway_LogUart2RxResult(int ok) { (void)ok; }
 static inline void Gateway_LogUart2TxResult(int ok) { (void)ok; }
+static inline void Gateway_LogFc05RetryTry1Fail(uint8_t slave_id, uint16_t coil, const char *reason) { (void)slave_id; (void)coil; (void)reason; }
+static inline void Gateway_LogFc05RetryStart(void) {}
+static inline void Gateway_LogFc05RetryTry2Result(int ok) { (void)ok; }
 #endif
 
 #ifdef __cplusplus
