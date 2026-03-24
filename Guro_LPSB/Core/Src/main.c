@@ -21,9 +21,12 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "led_status.h"
+#include <stdio.h>
+#include "rs485_drv.h"
+#include "lpsb_app.h"
+#include "adc_app.h"
 #include "modbus_slave.h"
-#include "lpsb_ct_adc.h"
+#include "acs712_rms.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -47,7 +50,11 @@ ADC_HandleTypeDef hadc;
 UART_HandleTypeDef huart1;
 
 /* USER CODE BEGIN PV */
-
+static uint8_t uart_rx_byte;
+static uint32_t s_adc_tick;
+static ACS712_RmsState s_rms;
+static uint32_t s_rms_print_tick;
+static uint32_t s_led4_hb_tick;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -55,6 +62,7 @@ void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_USART1_UART_Init(void);
 static void MX_ADC_Init(void);
+static void MX_TIM3_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -63,6 +71,24 @@ static void MX_ADC_Init(void);
 /* USER CODE BEGIN 0 */
 
 /* USER CODE END 0 */
+
+/* USER CODE BEGIN 4 */
+void HAL_ADC_ConvHalfCpltCallback(ADC_HandleTypeDef *hadc_)
+{
+  if (hadc_ == &hadc)
+  {
+    ACS712_RMS_OnDmaBlockReady(0);
+  }
+}
+
+void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc_)
+{
+  if (hadc_ == &hadc)
+  {
+    ACS712_RMS_OnDmaBlockReady(1);
+  }
+}
+/* USER CODE END 4 */
 
 /**
   * @brief  The application entry point.
@@ -95,10 +121,27 @@ int main(void)
   MX_GPIO_Init();
   MX_USART1_UART_Init();
   MX_ADC_Init();
+  MX_TIM3_Init();
   /* USER CODE BEGIN 2 */
-  ModbusSlave_Init();
-  LED_Status_Init();
-  LpsbCtAdc_Init();
+  if (HAL_ADCEx_Calibration_Start(&hadc) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  RS485_SetRxMode();
+  LPSB_App_Init();
+  LPSB_LED_Sequence();
+  s_adc_tick = HAL_GetTick();
+  s_rms_print_tick = HAL_GetTick();
+  s_led4_hb_tick = HAL_GetTick();
+  HAL_UART_Receive_IT(&huart1, &uart_rx_byte, 1);
+
+  /* Start RMS measurement on ADC3 channel (ADC_CH5 = PA5 = ACS_ADC03).
+   * NOTE: While RMS DMA sampling is active, do not use adc_app polling reads concurrently.
+   */
+  if (ACS712_RMS_Start(&hadc, ADC_CHANNEL_5) != HAL_OK)
+  {
+    Error_Handler();
+  }
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -108,11 +151,63 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    LED_Status_Tick_1ms();
-    LpsbCtAdc_Poll();
-    ModbusSlave_Poll();
+    Modbus_Poll();
+    /* Keep existing ADC update disabled while DMA RMS sampling is active to avoid ADC conflicts. */
+    LPSB_Heartbeat();
+    /* RS485 활동 LED4 타임아웃 처리 (TX/RX 후 약 50ms 뒤 OFF) */
+    RS485_ActivityTick();
+    /* 전원/루프 동작 확인용: LED4를 5초마다 1회 짧게 점멸 (RS485 activity LED 로직 재사용) */
+    {
+      uint32_t now = HAL_GetTick();
+      if ((now - s_led4_hb_tick) >= 5000u)
+      {
+        s_led4_hb_tick = now;
+        RS485_NotifyRxActivity(); /* LED4 ON + timestamp; RS485_ActivityTick()이 50ms 후 OFF */
+      }
+    }
+
+    /* RMS poll + periodic debug print */
+    if (ACS712_RMS_Poll(&s_rms))
+    {
+      /* Feed Modbus register map (adc_app storage).
+       * RMS DMA samples 3 channels in scan+DMA interleaved buffer:
+       * ADC1=CH3(PA3), ADC2=CH4(PA4), ADC3=CH5(PA5).
+       */
+      LPSB_ADC_SetStoredAvg(0, s_rms.last_avg_adc_ch[0]);
+      LPSB_ADC_SetStoredAvg(1, s_rms.last_avg_adc_ch[1]);
+      LPSB_ADC_SetStoredAvg(2, s_rms.last_avg_adc_ch[2]);
+      LPSB_ADC_SetStoredPkpk(0, s_rms.last_pkpk_adc_ch[0]);
+      LPSB_ADC_SetStoredPkpk(1, s_rms.last_pkpk_adc_ch[1]);
+      LPSB_ADC_SetStoredPkpk(2, s_rms.last_pkpk_adc_ch[2]);
+    }
+    {
+      uint32_t now = HAL_GetTick();
+      if ((now - s_rms_print_tick) >= 500u)
+      {
+        s_rms_print_tick = now;
+        char line[80];
+        int n = snprintf(line, sizeof(line), "I_RMS=%.3fA, offset=%.3fV\r\n",
+                         (double)s_rms.last_irms_a, (double)s_rms.offset_v);
+        (void)HAL_UART_Transmit(&huart1, (uint8_t *)line, (uint16_t)n, 50u);
+      }
+    }
   }
   /* USER CODE END 3 */
+}
+
+static void MX_TIM3_Init(void)
+{
+  /* TIM3 TRGO @ ~4kHz (register-level init; HAL TIM driver not included in this project)
+   * 48MHz/(PSC+1)=1MHz with PSC=47, then ARR=249 → 4000Hz update.
+   * TRGO = update event (MMS=010).
+   */
+  __HAL_RCC_TIM3_CLK_ENABLE();
+  TIM3->PSC = 47u;
+  TIM3->ARR = 249u;
+  TIM3->CR1 = 0u;
+  TIM3->EGR = TIM_EGR_UG;
+  TIM3->CR2 = (TIM3->CR2 & ~TIM_CR2_MMS) | TIM_CR2_MMS_1; /* MMS=010: update */
+  TIM3->CR1 |= TIM_CR1_CEN;
 }
 
 /**
@@ -128,14 +223,13 @@ void SystemClock_Config(void)
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI|RCC_OSCILLATORTYPE_HSI14;
-  RCC_OscInitStruct.HSIState = RCC_HSI_ON;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI14|RCC_OSCILLATORTYPE_HSE;
+  RCC_OscInitStruct.HSEState = RCC_HSE_ON;
   RCC_OscInitStruct.HSI14State = RCC_HSI14_ON;
-  RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
   RCC_OscInitStruct.HSI14CalibrationValue = 16;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
-  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
-  RCC_OscInitStruct.PLL.PLLMUL = RCC_PLL_MUL12;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
+  RCC_OscInitStruct.PLL.PLLMUL = RCC_PLL_MUL6;
   RCC_OscInitStruct.PLL.PREDIV = RCC_PREDIV_DIV1;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
@@ -192,9 +286,10 @@ static void MX_ADC_Init(void)
   hadc.Init.LowPowerAutoPowerOff = DISABLE;
   hadc.Init.ContinuousConvMode = DISABLE;
   hadc.Init.DiscontinuousConvMode = DISABLE;
-  hadc.Init.ExternalTrigConv = ADC_SOFTWARE_START;
-  hadc.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
-  hadc.Init.DMAContinuousRequests = DISABLE;
+  /* RMS current measurement uses timer-triggered ADC + DMA */
+  hadc.Init.ExternalTrigConv = ADC_EXTERNALTRIGCONV_T3_TRGO;
+  hadc.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_RISING;
+  hadc.Init.DMAContinuousRequests = ENABLE;
   hadc.Init.Overrun = ADC_OVR_DATA_PRESERVED;
   if (HAL_ADC_Init(&hadc) != HAL_OK)
   {
@@ -205,7 +300,8 @@ static void MX_ADC_Init(void)
   */
   sConfig.Channel = ADC_CHANNEL_3;
   sConfig.Rank = ADC_RANK_CHANNEL_NUMBER;
-  sConfig.SamplingTime = ADC_SAMPLETIME_1CYCLE_5;
+  /* ACS712 출력은 소스 임피던스/RC 영향이 있어 충분한 sampling time 권장 */
+  sConfig.SamplingTime = ADC_SAMPLETIME_71CYCLES_5;
   if (HAL_ADC_ConfigChannel(&hadc, &sConfig) != HAL_OK)
   {
     Error_Handler();
@@ -284,14 +380,12 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
-  /*Configure GPIO pin Output Level
-   * LED01~04 are LOW-active (LOW=ON, HIGH=OFF).
-   * Power-on policy for debug: LED01=ON, LED02/03/04=OFF.
-   */
-  HAL_GPIO_WritePin(GPIOA, SSR1_EN_Pin|SSR2_EN_Pin|SSR3_EN_Pin|RS485_DE_Pin, GPIO_PIN_RESET);
-  HAL_GPIO_WritePin(GPIOA, LED04_Pin, GPIO_PIN_SET);
-  HAL_GPIO_WritePin(GPIOB, LED01_Pin, GPIO_PIN_RESET);
-  HAL_GPIO_WritePin(GPIOB, LED02_Pin|LED03_Pin, GPIO_PIN_SET);
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOA, SSR1_EN_Pin|SSR2_EN_Pin|SSR3_EN_Pin|RS485_DE_Pin
+                          |LED04_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOB, LED01_Pin|LED02_Pin|LED03_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pins : SSR1_EN_Pin SSR2_EN_Pin SSR3_EN_Pin LED04_Pin */
   GPIO_InitStruct.Pin = SSR1_EN_Pin|SSR2_EN_Pin|SSR3_EN_Pin|LED04_Pin;
@@ -309,7 +403,7 @@ static void MX_GPIO_Init(void)
   /*Configure GPIO pin : RS485_DE_Pin */
   GPIO_InitStruct.Pin = RS485_DE_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Pull = GPIO_PULLDOWN;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
   HAL_GPIO_Init(RS485_DE_GPIO_Port, &GPIO_InitStruct);
 
@@ -321,12 +415,25 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
+  /* ADC 입력 핀(ACS712 출력): PA3/PA4/PA5는 반드시 Analog 모드로 설정해야 한다. */
+  GPIO_InitStruct.Pin = GPIO_PIN_3 | GPIO_PIN_4 | GPIO_PIN_5;
+  GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
   /* USER CODE END MX_GPIO_Init_2 */
 }
 
 /* USER CODE BEGIN 4 */
-
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+  if (huart == &huart1)
+  {
+    RS485_NotifyRxActivity();
+    Modbus_PushByte(uart_rx_byte);
+    (void)HAL_UART_Receive_IT(&huart1, &uart_rx_byte, 1);
+  }
+}
 /* USER CODE END 4 */
 
 /**

@@ -11,6 +11,7 @@ from PyQt6.QtCore import pyqtSignal, Qt, QTimer
 from PyQt6.QtGui import QFont, QPixmap, QShowEvent
 from pathlib import Path
 from collections import deque
+import time
 
 import pymodbus
 from pymodbus.client.sync import ModbusSerialClient
@@ -185,6 +186,7 @@ class MainWindow(QMainWindow):
         self._last_log_tag = "[MAIN]"
         self._pending_hpsb_write: tuple[int, bool] | None = None
         self._pending_hpsb_ui_write: dict | None = None
+        self._pending_lpsb_ui_write: dict | None = None
         self._last_req_route: str = "mainboard-routing"
         self._simple_hpsb_mode: bool = True
         self._hpsb_probe_inflight: bool = False
@@ -212,9 +214,9 @@ class MainWindow(QMainWindow):
         self._sub_poll_timer.setInterval(5000)  # 기본은 느리게(5초) 유지; 기본 auto poll OFF
         self._sub_poll_timer.timeout.connect(self._on_sub_poll_tick)
         self._sub_auto_poll = False
-        # Direct LPSB: SSR ON 동안 ADC 자동 폴링 (500ms)
+        # Direct LPSB: 상태값 로그용 ADC 자동 폴링 (1초)
         self._lpsb_adc_poll_timer = QTimer(self)
-        self._lpsb_adc_poll_timer.setInterval(500)
+        self._lpsb_adc_poll_timer.setInterval(1000)
         self._lpsb_adc_poll_timer.timeout.connect(self._on_lpsb_adc_poll_tick)
         self._lpsb_adc_poll_inflight = False
         self._lpsb_adc_poll_running = False
@@ -222,6 +224,13 @@ class MainWindow(QMainWindow):
         self._modbus_fail_0xaa_hint_shown = False
         self._direct_hpsb_rx_total = 0  # 직접 HPSB 연결 후 수신 누적 바이트 (진단용)
         self._pc_rx_byte_count = 0      # USART raw RX 누적(필터 무관)
+        # UI 버벅임 완화: Direct LPSB FC04 자동 폴링 로그를 시간 기반으로 스로틀링
+        self._last_direct_lpsb_fc04_req_log_ts = 0.0
+        self._last_direct_lpsb_fc04_rsp_log_ts = 0.0
+        self._last_lpsb_fc04_payload_log_ts = 0.0
+        self._last_lpsb_fc04_error_log_ts = 0.0
+        self._last_lpsb_fc04_payload_sig: tuple[int, ...] | None = None
+        self._last_lpsb_fc04_ok: bool | None = None
         self._direct_diag_timer = QTimer(self)
         self._direct_diag_timer.setInterval(3000)  # 3초마다 수신 0이면 안내
         self._direct_diag_timer.timeout.connect(self._on_direct_diag_tick)
@@ -568,6 +577,13 @@ class MainWindow(QMainWindow):
         # ADC1/ADC2 전류 유무 히스테리시스 상태 (ADC3와 동일 기준 확장)
         self._lpsb_current_state_ch1 = "OFF"
         self._lpsb_current_state_ch2 = "OFF"
+        # PKPK 기반 CURRENT 판정 임계값
+        # - ADC1/ADC2: 단일 임계값(>=30 ON, <30 OFF)
+        # - ADC3: 히스테리시스(OFF->ON:50, ON->OFF:37)
+        self._lpsb_pkpk_on_threshold = 30
+        self._lpsb_pkpk_off_threshold = 30
+        self._lpsb_pkpk_on_threshold_ch3 = 50
+        self._lpsb_pkpk_off_threshold_ch3 = 37
         # HPSB와 동일 크기 느낌을 위해 LPSB는 확장 대신 기본 Preferred 사용
         gb_lpsb.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
         right_layout.addWidget(gb_lpsb)
@@ -749,7 +765,8 @@ class MainWindow(QMainWindow):
         self._set_connected_ui(self._client.connected)
         self._update_lpsb_ssr_button_state()
         self._log_lpsb_selection_state("direct_hpsb_changed")
-        self._update_lpsb_auto_adc_poll("direct_hpsb_changed")
+        if self._direct_mode != "lpsb":
+            self._stop_lpsb_auto_adc_poll("direct_hpsb_changed")
 
     def _on_direct_lpsb_changed(self, state: int):
         checked = state == Qt.CheckState.Checked.value
@@ -769,7 +786,8 @@ class MainWindow(QMainWindow):
         self._set_connected_ui(self._client.connected)
         self._update_lpsb_ssr_button_state()
         self._log_lpsb_selection_state("direct_lpsb_changed")
-        self._update_lpsb_auto_adc_poll("direct_lpsb_changed")
+        if self._direct_mode != "lpsb":
+            self._stop_lpsb_auto_adc_poll("direct_lpsb_changed")
 
     def _tag_for_request(self, func: str, addr: int | str, count_or_value: int | str) -> str:
         """보드 태그: [MAIN], [HPSB], [LPSB1], [LPSB2], [LPSB3]. PC는 메인보드와만 통신하며, 메인보드가 UART2로 HPSB/LPSB 폴링한 결과를 보여줌."""
@@ -805,6 +823,18 @@ class MainWindow(QMainWindow):
 
     def _on_request_log(self, unit: int, func: str, addr: int | str, count_or_value: int | str):
         self._last_log_tag = self._tag_for_request(func, addr, count_or_value)
+        now = time.monotonic()
+        is_direct_lpsb_fc04_poll = bool(
+            self._direct_mode == "lpsb"
+            and unit == 2
+            and func == "FC04"
+            and self._lpsb_adc_poll_running
+        )
+        emit_detailed_log = True
+        if is_direct_lpsb_fc04_poll:
+            emit_detailed_log = (now - self._last_direct_lpsb_fc04_req_log_ts) >= 2.0
+            if emit_detailed_log:
+                self._last_direct_lpsb_fc04_req_log_ts = now
         try:
             a = int(addr)
         except Exception:
@@ -812,14 +842,17 @@ class MainWindow(QMainWindow):
 
         if self._direct_mode == "hpsb" and unit == 1:
             self._last_req_route = "direct-hpsb"
-            self._log.log_info(f"[PC->HPSB] tx unit=1 fc={func.replace('FC', '')} addr={a} val/count={count_or_value}")
+            if emit_detailed_log:
+                self._log.log_info(f"[PC->HPSB] tx unit=1 fc={func.replace('FC', '')} addr={a} val/count={count_or_value}")
         elif self._direct_mode == "lpsb" and unit == 2:
             self._last_req_route = "direct-lpsb"
-            self._log.log_info(f"[PC->LPSB] tx unit=2 fc={func.replace('FC', '')} addr={a} val/count={count_or_value}")
+            if emit_detailed_log:
+                self._log.log_info(f"[PC->LPSB] tx unit=2 fc={func.replace('FC', '')} addr={a} val/count={count_or_value}")
         else:
             self._last_req_route = "mainboard-routing"
-            self._log.log_info(f"[PC->MB] tx unit={unit} fc={func.replace('FC', '')} addr={a} val/count={count_or_value}")
-            if func == "FC05" and SUB_HPSB_COIL_BASE <= a < SUB_HPSB_COIL_BASE + 3:
+            if emit_detailed_log:
+                self._log.log_info(f"[PC->MB] tx unit={unit} fc={func.replace('FC', '')} addr={a} val/count={count_or_value}")
+            if emit_detailed_log and func == "FC05" and SUB_HPSB_COIL_BASE <= a < SUB_HPSB_COIL_BASE + 3:
                 coil = a - SUB_HPSB_COIL_BASE
                 try:
                     v_bool = bool(int(count_or_value))
@@ -830,10 +863,20 @@ class MainWindow(QMainWindow):
                 self._log.log_info(f"[MB] parsed request target=HPSB slave=1 coil={coil}")
                 self._log.log_info(f"[MB->HPSB] tx raw len={len(raw)} data={raw_hex}")
                 self._log.log_info(f"[MB->HPSB] tx slave=1 fc=05 coil={coil}")
-        self._log.log_request(self._last_log_tag, unit, func, addr, count_or_value)
+        if emit_detailed_log:
+            self._log.log_request(self._last_log_tag, unit, func, addr, count_or_value)
 
     def _on_response_log(self, ok: bool, exception_code: int | None):
-        if self._last_req_route == "mainboard-routing":
+        now = time.monotonic()
+        throttle_direct_lpsb_fc04 = bool(
+            self._last_req_route == "direct-lpsb" and self._lpsb_adc_poll_running
+        )
+        emit_detailed_log = True
+        if throttle_direct_lpsb_fc04:
+            emit_detailed_log = (now - self._last_direct_lpsb_fc04_rsp_log_ts) >= 2.0
+            if emit_detailed_log:
+                self._last_direct_lpsb_fc04_rsp_log_ts = now
+        if self._last_req_route == "mainboard-routing" and emit_detailed_log:
             if ok:
                 self._log.log_info("[PC<-MB] response received")
             else:
@@ -841,7 +884,8 @@ class MainWindow(QMainWindow):
                     self._log.log_info(f"[PC<-MB] exception 0x{exception_code:02X}")
                 else:
                     self._log.log_info("[PC<-MB] timeout waiting response")
-        self._log.log_response(self._last_log_tag, ok, exception_code)
+        if emit_detailed_log:
+            self._log.log_response(self._last_log_tag, ok, exception_code)
 
     def _on_tx_frame_hex(self, msg: str):
         """Direct HPSB FC05 시 실제 전송 프레임 hex 로그 (01 05 00 00 FF 00 CRC_L CRC_H 형식)."""
@@ -994,7 +1038,7 @@ class MainWindow(QMainWindow):
         self._update_mode_label()
         self._update_lpsb_ssr_button_state()
         self._log_lpsb_selection_state("set_connected_ui")
-        self._update_lpsb_auto_adc_poll("set_connected_ui")
+        self._stop_lpsb_auto_adc_poll("set_connected_ui")
         if connected:
             self._pc_rx_byte_count = 0
             self._status_badge.setText("Connected | RX count: 0")
@@ -1037,6 +1081,7 @@ class MainWindow(QMainWindow):
             self._status_badge.setText("Disconnected")
             self._status_badge.setStyleSheet("color: #555555; font-weight: bold; padding: 4px 8px;")
             self._stop_lpsb_auto_adc_poll("disconnect")
+            self._pending_lpsb_ui_write = None
 
     def _refresh_ports(self):
         try:
@@ -1151,9 +1196,7 @@ class MainWindow(QMainWindow):
         """보드에서 보낸 raw 바이트를 로그에 표시."""
         if not bytes_list:
             return
-        for b in bytes_list:
-            self._pc_rx_byte_count += 1
-            self._log.log_info(f"[PC-TOOL] rx byte=0x{b:02X}")
+        self._pc_rx_byte_count += len(bytes_list)
         self._status_badge.setText(f"Connected | RX count: {self._pc_rx_byte_count}")
         if bytes_list and 0xAA in bytes_list:
             self._seen_0xaa_since_connect = True
@@ -1228,6 +1271,17 @@ class MainWindow(QMainWindow):
                 self._apply_hpsb_write_ui(idx, target)
                 self._pending_hpsb_ui_write = None
                 self._log.log_info(f"[UI] HPSB RELAY{idx + 1} write success -> UI confirmed {'ON' if target else 'OFF'}")
+            if self._pending_lpsb_ui_write is not None:
+                # Direct LPSB SSR write 성공 직후 FC04 1회 읽어 CURRENT 라벨을 즉시 갱신
+                target = bool(self._pending_lpsb_ui_write.get("target", False))
+                self._pending_lpsb_ui_write = None
+                self._log.log_info("[LPSB] FC05 OK -> read ADC (FC04 start=0,count=10)")
+                self.request_read_direct_lpsb_adc.emit()
+                # 1초 주기 상태 로그: SSR ON 시 시작, 모두 OFF 시 중지
+                if self._direct_mode == "lpsb" and target:
+                    self._start_lpsb_auto_adc_poll("lpsb_write_ok")
+                elif self._direct_mode == "lpsb" and not self._any_lpsb_ssr_on():
+                    self._stop_lpsb_auto_adc_poll("lpsb_all_off")
             self._log.log_tagged(tag, "Write", "FC05/06", "-", "Response: OK")
         else:
             was_hpsb_pending = self._pending_hpsb_ui_write is not None
@@ -1235,6 +1289,18 @@ class MainWindow(QMainWindow):
                 idx = int(self._pending_hpsb_ui_write.get("idx", -1))
                 self._rollback_hpsb_write_ui()
                 self._log.log_info(f"[UI] HPSB RELAY{idx + 1} write fail -> UI rollback")
+            if self._pending_lpsb_ui_write is not None:
+                idx = int(self._pending_lpsb_ui_write.get("idx", -1))
+                prev = bool(self._pending_lpsb_ui_write.get("prev", False))
+                if 0 <= idx < len(self._lpsb_ssr_btns):
+                    self._lpsb_ssr_state[idx] = prev
+                    btn = self._lpsb_ssr_btns[idx]
+                    btn.blockSignals(True)
+                    btn.setChecked(prev)
+                    btn.blockSignals(False)
+                    self._lpsb_strips[idx].set_state(prev)
+                    self._log.log_info(f"[UI] LPSB SSR{idx + 1} write fail -> UI rollback")
+                self._pending_lpsb_ui_write = None
             msg = err or "No response/timeout"
             self._log.log_tagged(tag, "Write", "FC05/06", "-", "Response: Fail", msg)
             if was_hpsb_pending:
@@ -1252,14 +1318,14 @@ class MainWindow(QMainWindow):
     def _on_read_once_clicked(self):
         """Read once 버튼:
         - Mainboard routing: 기존 HPSB/LPSB sub read
-        - Direct LPSB 모드: LPSB 보드 FC03(0,9)로 ADC raw 포함 상태를 1회 읽기
+        - Direct LPSB 모드: LPSB 보드 FC04(0,10) Input Register를 1회 읽기
         """
         if not self._client.connected:
             self._log.log_info("[MAIN] Not connected")
             return
         if self._direct_mode == "lpsb":
             self._log.log_info("[PC-TOOL] route=direct-lpsb slave=2")
-            self._log.log_info("[LPSB] Direct FC04 (start=0,count=10) read 요청")
+            self._log.log_info("[Direct LPSB][FC04] Read addr=0 count=10")
             self.request_read_direct_lpsb_adc.emit()
         elif self._direct_mode == "hpsb":
             self._log.log_info("[PC-TOOL] route=direct-hpsb slave=1")
@@ -1357,49 +1423,54 @@ class MainWindow(QMainWindow):
             return
 
         # 내부 상태 토글
-        new_state = not self._lpsb_ssr_state[ssr_idx]
+        prev_state = bool(self._lpsb_ssr_state[ssr_idx])
+        new_state = not prev_state
         self._lpsb_ssr_state[ssr_idx] = new_state
         btn.blockSignals(True)
         btn.setChecked(new_state)
         btn.blockSignals(False)
         self._lpsb_strips[ssr_idx].set_state(new_state)
 
-        # Modbus FC05: Slave 2, coil = ssr_idx, value = ON/OFF
-        self._log.log_info("[PC-TOOL] route=direct-lpsb slave=2")
+        # Modbus FC05: 클릭당 write 1회만 수행 (ADC read / auto poll 시작 없음)
+        self._pending_lpsb_ui_write = {"idx": ssr_idx, "prev": prev_state, "target": new_state}
         onoff_str = "ON" if new_state else "OFF"
-        self._log.log_info(f"[LPSB] Write Coil {ssr_idx} \u2192 {onoff_str}")
-        self._log.log_info(f"[LPSB] SSR{ssr_idx + 1} {onoff_str}")
+        self._log.log_info(f"[LPSB] FC05 write SSR{ssr_idx + 1} -> {onoff_str}")
         self.request_write_direct_lpsb_coil.emit(ssr_idx, new_state)
-        # 디버깅: SSR1/2/3 ON 직후 ADC raw를 바로 읽어 Log에 출력 (전류 흐름/채널 매핑 확인용)
-        if new_state and ssr_idx in (0, 1, 2):
-            self._log.log_info(f"[LPSB] SSR{ssr_idx + 1} ON -> read ADC (FC04 start=0,count=10)")
-            QTimer.singleShot(200, lambda: self.request_read_direct_lpsb_adc.emit())
-        # SSR ON/OFF 상태에 따라 자동 ADC 폴링 시작/중지
-        self._update_lpsb_auto_adc_poll("lpsb_ssr_click")
 
     def _on_lpsb_adc_result(self, ok: bool, regs: list | None, err: str | None):
         """Direct LPSB: FC04(0,10) Input reg — reg1..3 AVG, 4..6 PKPK, 7..9 CURRENT."""
         self._lpsb_adc_poll_inflight = False
         if not ok or regs is None or len(regs) < 10:
             msg = err or "FC04 read fail"
+            self._log.log_info(f"[Direct LPSB][FC04] ERROR: {msg}")
             self._log.log_info(f"[LPSB] ADC read fail: {msg}")
+            self._last_lpsb_fc04_ok = False
             self._lpsb_comm_label.setText("Comm: (read fail)")
             for lbl in self._lpsb_current_labels:
                 lbl.setText("current")
-            self._update_lpsb_auto_adc_poll("lpsb_adc_result_fail")
             return
+        sig = tuple(int(x) for x in regs[:10])
+        self._log.log_info(f"[Direct LPSB][FC04] RX: {regs}")
         adc1, adc2, adc3 = regs[1], regs[2], regs[3]
         pk1, pk2, pk3 = regs[4], regs[5], regs[6]
-        c1, c2, c3 = regs[7], regs[8], regs[9]
+        # 이전에 합의한 방식: CURRENT는 PKPK 값 기반으로 ON/OFF 판단
+        # ADC1/2: 단일 임계값
+        state1 = "ON" if int(pk1) >= self._lpsb_pkpk_on_threshold else "OFF"
+        state2 = "ON" if int(pk2) >= self._lpsb_pkpk_on_threshold else "OFF"
+        # ADC3: 히스테리시스
+        prev3 = self._lpsb_current_state
+        if prev3 == "OFF" and int(pk3) >= self._lpsb_pkpk_on_threshold_ch3:
+            state3 = "ON"
+        elif prev3 == "ON" and int(pk3) <= self._lpsb_pkpk_off_threshold_ch3:
+            state3 = "OFF"
+        else:
+            state3 = prev3
         self._log.log_info("[LPSB] FC04 Input regs")
         self._log.log_info(f"[LPSB] ADC_AVG  ADC1={adc1} ADC2={adc2} ADC3={adc3}")
         self._log.log_info(f"[LPSB] ADC_PKPK ADC1={pk1} ADC2={pk2} ADC3={pk3}")
         self._log.log_info(
-            f"[LPSB] CURRENT  CH1={'ON' if c1 else 'OFF'} CH2={'ON' if c2 else 'OFF'} CH3={'ON' if c3 else 'OFF'}"
+            f"[LPSB] CURRENT(PKPK)  CH1={state1} CH2={state2} CH3={state3}"
         )
-        state1 = "ON" if c1 else "OFF"
-        state2 = "ON" if c2 else "OFF"
-        state3 = "ON" if c3 else "OFF"
         self._lpsb_current_state_ch1 = state1
         self._lpsb_current_state_ch2 = state2
         self._lpsb_current_state = state3
@@ -1408,7 +1479,8 @@ class MainWindow(QMainWindow):
         self._lpsb_current_labels[1].setText(f"AVG:{adc2} PKPK:{pk2} I:{state2}")
         self._lpsb_current_labels[2].setText(f"AVG:{adc3} PKPK:{pk3} I:{state3}")
         self._lpsb_comm_label.setText("Comm: OK")
-        self._update_lpsb_auto_adc_poll("lpsb_adc_result_ok")
+        self._last_lpsb_fc04_payload_sig = sig
+        self._last_lpsb_fc04_ok = True
 
     def _any_lpsb_ssr_on(self) -> bool:
         try:
@@ -1422,7 +1494,7 @@ class MainWindow(QMainWindow):
         self._lpsb_adc_poll_running = True
         self._lpsb_adc_poll_inflight = False
         self._lpsb_adc_poll_timer.start()
-        self._log.log_info("[LPSB] Auto ADC poll started (500ms)")
+        self._log.log_info("[LPSB] Auto ADC poll started (1000ms)")
         self._on_lpsb_adc_poll_tick()
 
     def _stop_lpsb_auto_adc_poll(self, context: str):
@@ -1444,7 +1516,7 @@ class MainWindow(QMainWindow):
             self._stop_lpsb_auto_adc_poll(context)
 
     def _on_lpsb_adc_poll_tick(self):
-        """500ms 주기 자동 ADC 폴링. 이전 요청 응답 전에는 중복 요청 금지."""
+        """1초 주기 자동 ADC 폴링. 이전 요청 응답 전에는 중복 요청 금지."""
         if (not self._client.connected) or (self._direct_mode != "lpsb"):
             self._stop_lpsb_auto_adc_poll("adc_poll_tick_not_ready")
             return

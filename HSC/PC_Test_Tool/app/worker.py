@@ -163,10 +163,10 @@ class MainboardWorker(QObject):
         try:
             ok, result, err = self._client.read_input_registers(0, 10, unit=2)
         except Exception as e:
-            self.lpsb_adc_result.emit(False, None, f"{type(e).__name__}: {e}")
+            self.lpsb_adc_result.emit(False, None, f"[FC04] {type(e).__name__}: {e}")
             return
         if not ok:
-            self.lpsb_adc_result.emit(False, None, err or "FC04 fail")
+            self.lpsb_adc_result.emit(False, None, f"[FC04] {err or 'read fail'}")
             return
         self.lpsb_adc_result.emit(True, result, None)
 
