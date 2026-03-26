@@ -6,33 +6,36 @@ All addresses for a single slave (Mainboard only).
 # Slave ID for Mainboard (default, H2Tech 문서 기준)
 MAINBOARD_SLAVE_ID_DEFAULT = 9
 
-# ---- Mainboard I/O (FC03/FC06) ----
-# FC03 read start=MAIN_DI_REG count=1 → low 8 bits = DI_01..DI_08
+# ---- Mainboard I/O (FC04/FC05) ----
+# FC04 read start=MAIN_DI_REG count=1 → low 8 bits = DI_01..DI_08
 MAIN_DI_REG = 2100
 MAIN_DI_COUNT = 8
 
-# FC06 write single register MAIN_DO_REG → bits 0..3 = RELAY1_EN..RELAY4_EN
+# FC05 write single coil MAIN_DO_REG → bits 0..3 = RELAY1_EN..RELAY4_EN
 MAIN_DO_REG = 2101
 MAIN_DO_COUNT = 4
 
 # ---- PC control GPIO (4x2120..2122) ----
-# FC06 write: value=1 → 100ms HIGH pulse, value=0 → LOW
+# FC05 write coil: value=1 → 100ms HIGH pulse, value=0 → LOW
 PC_ON_EN_REG = 2120
 PC_RESET_EN_REG = 2121
-# FC03 read 1 register: 0=OFF, 1=ON
+# FC04 read 1 register: 0=OFF, 1=ON
 PC_LED_IN_REG = 2122
 
 # ---- MAIN Env (SHTC3) ----
-# FC03 read start=MAIN_ENV_REG count=2
+# FC04 read start=MAIN_ENV_REG count=2
 # Reg0: temp_c_x10 (signed)
 # Reg1: rh_x10 (unsigned)
 MAIN_ENV_REG = 2110
 MAIN_ENV_COUNT = 3  # + error_flags
 
-# ---- HPSB/LPSB (via Mainboard FC03/FC02/FC05) ----
-# FC03 start=2000 count=40: 각 보드당 9워드 × 4(HPSB+LPSB1+2+3) + 예약 4
-# 보드 오프셋 0,9,18,27: [0..2]=AVG, [3..5]=PKPK, [6..8]=CURRENT(0/1)
-SUB_SENSE_REG = 2000
+# ---- HPSB/LPSB (via Mainboard FC04) ----
+# UI sense 레이아웃(길이=40: 각 보드당 AVG[3],PKPK[3],CUR[3])은 유지하지만,
+# 통신은 FC04로만 수행됩니다.
+# Mainboard routing 복사영역 시작값:
+# - HPSB copy: 100..115 (count=16, Unified Rule v1.1)
+# - LPSB copies: 200..213, 300..313, 400..413 (각 count=14)
+SUB_SENSE_REG = 100
 SUB_SENSE_COUNT = 40
 SUB_SENSE_BOARD_STRIDE = 9
 # FC02 discrete (1x): H2 dec 823..836 = start 822, count 14 (ONOFF_3..14 = HPSB CH1~3, LPSB1~3 CH1~3)
@@ -44,13 +47,15 @@ SUB_ALARM_COUNT = 12
 # FC05 write single coil: H2 892..896 = Modbus addr 891..895 (VB_ONOFF_8..12 → LPSB pulse). 897,898=DOOR.
 SUB_VB_COIL_BASE = 891   # FC05 addr 891 = H2 892 = VB_ONOFF_8 (LPSB1_CH3 pulse), ... 895=VB_ONOFF_12
 SUB_VB_COIL_COUNT = 5    # 891..895
-# FC05 write sub-board coil (value 0 or 1). Mainboard forwards to HPSB(slave 1)/LPSB(2,4,8).
-# Mainboard: h2_dec = start_addr+1. 897=Door1, 898=Door2, 899..901=HPSB coil 0..2, 902..910=LPSB.
-# So start_addr 896=Door1, 897=Door2, 898..900=HPSB RELAY1..3, 901..909=LPSB (9 coils).
-SUB_HPSB_COIL_BASE = 898   # FC05 addr 898,899,900 = HPSB coil 0,1,2 (RELAY1,2,3) — matches Mainboard h2_dec 899..901
+# Unified Rule:
+# - Mainboard local relay control: FC05 coil0..3 (0-based)
+# - Downstream(HPSB/LPSB) relay/SSR control via Mainboard routing: use H2Tech mapped coil addresses.
+#   HPSB: 898..901 (RELAY1..4), LPSB: 902..910 (SSR1..3 * 3 boards)
+# UI는 HPSB 채널을 3개만 표시(0..2)하므로 SUB_HPSB_COIL_COUNT는 3으로 둡니다.
+SUB_HPSB_COIL_BASE = 898
 SUB_HPSB_COIL_COUNT = 3
-SUB_LPSB_COIL_BASE = 901   # FC05 addr 901..909 = LPSB1/2/3 coil 0,1,2 each (h2_dec 902..910)
-SUB_LPSB_COIL_COUNT = 9    # 901..903=LPSB1, 904..906=LPSB2, 907..909=LPSB3
+SUB_LPSB_COIL_BASE = 902   # FC05 addr 902..910 = LPSB2/3/4(=slave 2/4/8) SSR1..3
+SUB_LPSB_COIL_COUNT = 9    # 902..904=slave2, 905..907=slave4, 908..910=slave8
 # error_flags (FC03 2112): bit0=AGG_ERR_COMM_HPSB, bit1=AGG_ERR_COMM_LPSB
 ERROR_FLAGS_REG = 2112
 

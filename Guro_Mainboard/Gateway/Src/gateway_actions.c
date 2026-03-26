@@ -15,6 +15,7 @@
 #define PULSE_MS_DOOR  300u
 #define PULSE_MS_PC_IO 500u
 #define FC05_RETRY_DELAY_MS 5u
+#define FC05_READBACK_VERIFY_TIMEOUT_MS 220u
 
 static uint8_t door1_active;
 static uint32_t door1_tick;
@@ -26,6 +27,17 @@ static uint8_t pc_reset_en_pulse_active;
 static uint32_t pc_reset_en_pulse_tick;
 /* Set when downstream WriteCoil fails; sticky until cleared. Cleared by ClearDownstreamWriteFailAlarm (e.g. on PC read of 1x0880 or auto after N s). */
 static volatile uint8_t s_downstream_write_fail;
+
+typedef struct {
+    uint8_t valid;
+    uint8_t slave_id;
+    uint16_t coil_index;
+    uint8_t value;
+    uint8_t retries_left;
+    uint32_t next_try_tick;
+} PendingSubCoilWrite_t;
+
+static volatile PendingSubCoilWrite_t s_pending_subcoil_write;
 
 void Gateway_Action_PulseMainDoor1(uint16_t pulse_ms)
 {
@@ -105,6 +117,29 @@ void Gateway_Action_Update(void)
         BSP_WritePC_RESET_EN(0);
         pc_reset_en_pulse_active = 0;
     }
+
+    /* Async sub-board coil write (non-blocking FC05 response path) */
+    if (s_pending_subcoil_write.valid) {
+        if ((int32_t)(now - s_pending_subcoil_write.next_try_tick) >= 0) {
+            uint8_t sid = s_pending_subcoil_write.slave_id;
+            uint16_t coil = s_pending_subcoil_write.coil_index;
+            uint8_t val = s_pending_subcoil_write.value;
+            int ret = Gateway_Action_WriteSubCoil(sid, coil, val);
+            if (ret == 0) {
+                s_pending_subcoil_write.valid = 0u;
+            } else {
+                if (s_pending_subcoil_write.retries_left > 0u)
+                    s_pending_subcoil_write.retries_left--;
+                if (s_pending_subcoil_write.retries_left == 0u) {
+                    s_pending_subcoil_write.valid = 0u;
+                    /* sticky fail flag is set inside Gateway_Action_WriteSubCoil() */
+                } else {
+                    /* small backoff to avoid bus collision / allow subboard settle */
+                    s_pending_subcoil_write.next_try_tick = now + 30u;
+                }
+            }
+        }
+    }
 }
 
 uint8_t Gateway_Action_PollDownstreamWriteFail(void)
@@ -139,7 +174,43 @@ int Gateway_Action_WriteSubCoil(uint8_t slave_id, uint16_t coil_index, uint8_t v
     }
     if (ret == 0)
         ModbusTable_SetCoil(s, coil_index, value ? 1 : 0);
+    else {
+        /* Field observation:
+         * Downstream coil state can be applied even when FC05 response is missed/invalid,
+         * causing false 0x04 to PC. For timeout/invalid response, verify by short read-back.
+         */
+        err = ModbusMaster_GetLastFc05Error();
+        if (err == MODBUS_MASTER_FC05_ERR_TIMEOUT || err == MODBUS_MASTER_FC05_ERR_INVALID_RESP) {
+            uint32_t deadline = HAL_GetTick() + FC05_READBACK_VERIFY_TIMEOUT_MS;
+            ModbusMaster_RequestOnDemandPoll((uint16_t)slave_id);
+            while ((int32_t)(HAL_GetTick() - deadline) < 0) {
+                ModbusMaster_Poll();
+                if ((uint8_t)ModbusTable_GetCoil(s, coil_index) == (value ? 1u : 0u)) {
+                    ret = 0;
+                    break;
+                }
+                HAL_Delay(1);
+            }
+        }
+    }
+    if (ret == 0)
+        ModbusTable_SetCoil(s, coil_index, value ? 1 : 0);
     else
         s_downstream_write_fail = 1;
     return ret;
+}
+
+int Gateway_Action_RequestSubCoilWrite(uint8_t slave_id, uint16_t coil_index, uint8_t value)
+{
+    /* Single-slot queue but overwrite allowed: 최신 목표 상태를 우선 적용 */
+    if (slave_id != 1 && slave_id != 2 && slave_id != 4 && slave_id != 8) return -1;
+    if (coil_index >= MODBUS_COIL_COUNT) return -1;
+
+    s_pending_subcoil_write.slave_id = slave_id;
+    s_pending_subcoil_write.coil_index = coil_index;
+    s_pending_subcoil_write.value = value ? 1u : 0u;
+    s_pending_subcoil_write.retries_left = 5u;
+    s_pending_subcoil_write.next_try_tick = HAL_GetTick();
+    s_pending_subcoil_write.valid = 1u;
+    return 0;
 }

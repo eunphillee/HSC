@@ -68,6 +68,7 @@ void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_ADC_Init(void);
 static void MX_USART1_UART_Init(void);
+static void MX_TIM3_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -106,15 +107,9 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
-  /* 부팅 직후 LED2 한 번 깜빡임(300ms) — 여기 보이면 코드는 돌아가는 것. 다운로드 후 리셋 필요할 수 있음. */
-  HAL_GPIO_WritePin(LED02_GPIO_Port, LED02_Pin, GPIO_PIN_RESET);
-  HAL_Delay(300);
-  HAL_GPIO_WritePin(LED02_GPIO_Port, LED02_Pin, GPIO_PIN_SET);
-
-#if HPSB_PA9_TEST_MODE != 1
+  MX_TIM3_Init();
   MX_ADC_Init();
   MX_USART1_UART_Init();
-#endif
   /* USER CODE BEGIN 2 */
 #if HPSB_PA9_TEST_MODE == 1
   /* PA9 GPIO 토글 테스트: PA9를 GPIO 출력으로 설정, 500ms마다 토글. 핀 자체/클럭 검증. */
@@ -152,7 +147,7 @@ int main(void)
 #if HPSB_PA9_TEST_MODE == 0 && !HPSB_MAX3485_TX_AA_TEST
   ModbusSlave_Init();
   LED_Status_Init();
-  HpsbCtAdc_Init();
+  HpsbCtAdc_Start(&hadc);
 #if HPSB_TX_TEST_ENABLE
   s_tx_test_last_tick = HAL_GetTick();
 #endif
@@ -215,7 +210,7 @@ int main(void)
     __WFI();
 #else
     LED_Status_Tick_1ms();
-    HpsbCtAdc_Poll();
+    HpsbCtAdc_Update();
 #if HPSB_TX_TEST_ENABLE
     if ((HAL_GetTick() - s_tx_test_last_tick) >= 2000u) {
         ModbusSlave_SendTestFrame();
@@ -232,8 +227,8 @@ int main(void)
 }
 
 /**
-  * @brief System Clock Configuration — 내부 클럭(HSI 8MHz)만 사용, PLL/HSE 미사용
-  *        SYSCLK = HSI 8MHz, HCLK = PCLK1 = 8MHz. Modbus 9600 동작.
+  * @brief System Clock Configuration
+  * @retval None
   */
 void SystemClock_Config(void)
 {
@@ -241,32 +236,34 @@ void SystemClock_Config(void)
   RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
   RCC_PeriphCLKInitTypeDef PeriphClkInit = {0};
 
-  /** HSI 8MHz ON, HSI14 ON(ADC용). PLL 사용 안 함.
+  /** Initializes the RCC Oscillators according to the specified parameters
+  * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI | RCC_OSCILLATORTYPE_HSI14;
-  RCC_OscInitStruct.HSIState = RCC_HSI_ON;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI14|RCC_OSCILLATORTYPE_HSE;
+  RCC_OscInitStruct.HSEState = RCC_HSE_ON;
   RCC_OscInitStruct.HSI14State = RCC_HSI14_ON;
-  RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
   RCC_OscInitStruct.HSI14CalibrationValue = 16;
-  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_NONE;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
+  RCC_OscInitStruct.PLL.PLLMUL = RCC_PLL_MUL6;
+  RCC_OscInitStruct.PLL.PREDIV = RCC_PREDIV_DIV1;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
     Error_Handler();
   }
 
-  /** SYSCLK = HSI(8MHz), AHB/APB1 = /1 → HCLK = PCLK1 = 8MHz
+  /** Initializes the CPU, AHB and APB buses clocks
   */
-  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK
-                              | RCC_CLOCKTYPE_PCLK1;
-  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_HSI;
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
+                              |RCC_CLOCKTYPE_PCLK1;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
   RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
 
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_0) != HAL_OK)
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_1) != HAL_OK)
   {
     Error_Handler();
   }
-
   PeriphClkInit.PeriphClockSelection = RCC_PERIPHCLK_USART1;
   PeriphClkInit.Usart1ClockSelection = RCC_USART1CLKSOURCE_PCLK1;
   if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInit) != HAL_OK)
@@ -296,49 +293,35 @@ static void MX_ADC_Init(void)
   /** Configure the global features of the ADC (Clock, Resolution, Data Alignment and number of conversion)
   */
   hadc.Instance = ADC1;
-  hadc.Init.ClockPrescaler = ADC_CLOCK_ASYNC_DIV1;
-  hadc.Init.Resolution = ADC_RESOLUTION_12B;
-  hadc.Init.DataAlign = ADC_DATAALIGN_RIGHT;
-  hadc.Init.ScanConvMode = ADC_SCAN_DIRECTION_FORWARD;
-  hadc.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
-  hadc.Init.LowPowerAutoWait = DISABLE;
-  hadc.Init.LowPowerAutoPowerOff = DISABLE;
-  hadc.Init.ContinuousConvMode = DISABLE;
+  hadc.Init.ClockPrescaler        = ADC_CLOCK_ASYNC_DIV1;
+  hadc.Init.Resolution            = ADC_RESOLUTION_12B;
+  hadc.Init.DataAlign             = ADC_DATAALIGN_RIGHT;
+  hadc.Init.ScanConvMode          = ADC_SCAN_DIRECTION_FORWARD;
+  hadc.Init.EOCSelection          = ADC_EOC_SINGLE_CONV;
+  hadc.Init.LowPowerAutoWait      = DISABLE;
+  hadc.Init.LowPowerAutoPowerOff  = DISABLE;
+  hadc.Init.ContinuousConvMode    = DISABLE;
   hadc.Init.DiscontinuousConvMode = DISABLE;
-  hadc.Init.ExternalTrigConv = ADC_SOFTWARE_START;
-  hadc.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
-  hadc.Init.DMAContinuousRequests = DISABLE;
-  hadc.Init.Overrun = ADC_OVR_DATA_PRESERVED;
+  hadc.Init.ExternalTrigConv      = ADC_EXTERNALTRIGCONV_T3_TRGO;
+  hadc.Init.ExternalTrigConvEdge  = ADC_EXTERNALTRIGCONVEDGE_RISING;
+  hadc.Init.DMAContinuousRequests = ENABLE;
+  hadc.Init.Overrun               = ADC_OVR_DATA_PRESERVED;
   if (HAL_ADC_Init(&hadc) != HAL_OK)
   {
     Error_Handler();
   }
 
-  /** Configure for the selected ADC regular channel to be converted.
-  */
+  sConfig.Rank         = ADC_RANK_CHANNEL_NUMBER;
+  sConfig.SamplingTime = ADC_SAMPLETIME_71CYCLES_5;
+
   sConfig.Channel = ADC_CHANNEL_3;
-  sConfig.Rank = ADC_RANK_CHANNEL_NUMBER;
-  sConfig.SamplingTime = ADC_SAMPLETIME_1CYCLE_5;
-  if (HAL_ADC_ConfigChannel(&hadc, &sConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
+  if (HAL_ADC_ConfigChannel(&hadc, &sConfig) != HAL_OK) { Error_Handler(); }
 
-  /** Configure for the selected ADC regular channel to be converted.
-  */
   sConfig.Channel = ADC_CHANNEL_4;
-  if (HAL_ADC_ConfigChannel(&hadc, &sConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
+  if (HAL_ADC_ConfigChannel(&hadc, &sConfig) != HAL_OK) { Error_Handler(); }
 
-  /** Configure for the selected ADC regular channel to be converted.
-  */
   sConfig.Channel = ADC_CHANNEL_5;
-  if (HAL_ADC_ConfigChannel(&hadc, &sConfig) != HAL_OK)
-  {
-    Error_Handler();
-  }
+  if (HAL_ADC_ConfigChannel(&hadc, &sConfig) != HAL_OK) { Error_Handler(); }
   /* USER CODE BEGIN ADC_Init 2 */
 
   /* USER CODE END ADC_Init 2 */
@@ -398,10 +381,8 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  /* Set initial relay outputs to LOW (GPIO_PIN_RESET). */
-  HAL_GPIO_WritePin(GPIOA, RLY_EN01_Pin|RLY_EN02_Pin|RLY_EN03_Pin, GPIO_PIN_RESET);
-  /* RS485 DE idle = RX (LOW) */
-  HAL_GPIO_WritePin(GPIOA, RS485_DE_Pin|LED04_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOA, RLY_EN01_Pin|RLY_EN02_Pin|RLY_EN03_Pin|RS485_DE_Pin
+                          |LED04_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOB, LED01_Pin|LED02_Pin|LED03_Pin, GPIO_PIN_RESET);
@@ -440,8 +421,31 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+void HAL_ADC_ConvHalfCpltCallback(ADC_HandleTypeDef *hadc_)
+{
+  if (hadc_ == &hadc) HpsbCtAdc_OnDmaBlockReady(0);
+}
 
+void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc_)
+{
+  if (hadc_ == &hadc) HpsbCtAdc_OnDmaBlockReady(1);
+}
 /* USER CODE END 4 */
+
+/**
+  * @brief TIM3 @ 4kHz TRGO — register-level (HAL TIM driver not required).
+  *        48MHz / (PSC+1=48) = 1MHz; ARR+1=250 → 4kHz update → TRGO.
+  */
+static void MX_TIM3_Init(void)
+{
+  __HAL_RCC_TIM3_CLK_ENABLE();
+  TIM3->PSC = 47u;
+  TIM3->ARR = 249u;
+  TIM3->CR1 = 0u;
+  TIM3->EGR = TIM_EGR_UG;
+  TIM3->CR2 = (TIM3->CR2 & ~TIM_CR2_MMS) | TIM_CR2_MMS_1; /* MMS=010: update event */
+  TIM3->CR1 |= TIM_CR1_CEN;
+}
 
 /**
   * @brief  This function is executed in case of error occurrence.

@@ -1,101 +1,111 @@
 /**
  * @file hpsb_ct_adc.c
- * @brief Per-channel ADC: N samples → AVG, PKPK; CURRENT=1 if PKPK >= threshold (AC/burden).
+ * @brief HPSB CT ADC — DMA + TIM3 4kHz 3ch scan (CH3/PA3, CH4/PA4, CH5/PA5).
+ *
+ * DMA buffer layout (interleaved, SCAN_DIRECTION_FORWARD):
+ *   [CH3, CH4, CH5, CH3, CH4, CH5, ...]  (total = DMA_BUF_LEN * 3 entries)
+ *
+ * Half-complete callback → process first half (DMA_BUF_LEN/2 samples/ch).
+ * Full-complete callback → process second half.
+ * No float / RMS — only integer AVG and PKPK.
+ * Current state: PKPK >= threshold → I=ON.
  */
 #include "hpsb_ct_adc.h"
-#include "main.h"
-#include "stm32f0xx_hal_adc_ex.h"
+#include <string.h>
+#include <stddef.h>
 
-extern ADC_HandleTypeDef hadc;
+/* 256 samples per channel per half-block (= 128 per half-complete event). */
+#define HPSB_DMA_BUF_LEN      256u
+#define HPSB_DMA_TOTAL_LEN    (HPSB_DMA_BUF_LEN * 3u)
 
-#ifndef HPSB_CT_ADC_SAMPLES
-#define HPSB_CT_ADC_SAMPLES  48u
-#endif
-#ifndef HPSB_CT_ADC_UPDATE_MS
-#define HPSB_CT_ADC_UPDATE_MS  100u
-#endif
-/** Peak-peak above this → CURRENT ON (12-bit scale; tune on hardware). */
+/** PKPK (ADC counts, 12-bit) above this → current ON. Tune to hardware. */
 #ifndef HPSB_CT_PKPK_ON_THRESHOLD
 #define HPSB_CT_PKPK_ON_THRESHOLD  64u
 #endif
 
-static const uint32_t s_adc_ch[3] = {
-    ADC_CHANNEL_3,
-    ADC_CHANNEL_4,
-    ADC_CHANNEL_5
-};
+static ADC_HandleTypeDef *s_hadc     = NULL;
+static uint16_t  s_dma_buf[HPSB_DMA_TOTAL_LEN];
+static volatile uint8_t s_half_ready = 0u;
+static volatile uint8_t s_full_ready = 0u;
+static uint8_t   s_started           = 0u;
 
 static uint16_t s_avg[3];
 static uint16_t s_pkpk[3];
 static uint16_t s_cur[3];
-static uint32_t s_last_ms;
-static uint8_t s_inited;
 
-static void sample_channel(unsigned idx)
+/* ---- private helpers ---- */
+
+static uint16_t calc_avg(const uint16_t *buf, size_t n, size_t ch)
 {
-    if (idx >= 3u) return;
-
-    ADC_ChannelConfTypeDef sConfig = {0};
-    sConfig.Channel = s_adc_ch[idx];
-    sConfig.Rank = ADC_RANK_CHANNEL_NUMBER;
-    sConfig.SamplingTime = ADC_SAMPLETIME_55CYCLES_5;
-
-    if (HAL_ADC_ConfigChannel(&hadc, &sConfig) != HAL_OK)
-        return;
-
     uint32_t sum = 0u;
-    uint16_t vmin = 4095u;
-    uint16_t vmax = 0u;
+    for (size_t i = 0u; i < n; i++) sum += buf[i * 3u + ch];
+    return (uint16_t)(sum / (uint32_t)n);
+}
 
-    for (unsigned n = 0u; n < HPSB_CT_ADC_SAMPLES; n++) {
-        if (HAL_ADC_Start(&hadc) != HAL_OK)
-            break;
-        if (HAL_ADC_PollForConversion(&hadc, 100u) != HAL_OK) {
-            (void)HAL_ADC_Stop(&hadc);
-            continue;
-        }
-        uint16_t v = (uint16_t)HAL_ADC_GetValue(&hadc);
-        (void)HAL_ADC_Stop(&hadc);
-        sum += v;
+static uint16_t calc_pkpk(const uint16_t *buf, size_t n, size_t ch)
+{
+    uint16_t vmin = 0xFFFFu, vmax = 0u;
+    for (size_t i = 0u; i < n; i++) {
+        uint16_t v = buf[i * 3u + ch];
         if (v < vmin) vmin = v;
         if (v > vmax) vmax = v;
     }
-
-    s_avg[idx] = (uint16_t)(sum / HPSB_CT_ADC_SAMPLES);
-    s_pkpk[idx] = (vmax > vmin) ? (uint16_t)(vmax - vmin) : 0u;
-    s_cur[idx] = (s_pkpk[idx] >= HPSB_CT_PKPK_ON_THRESHOLD) ? 1u : 0u;
+    return (vmax >= vmin) ? (uint16_t)(vmax - vmin) : 0u;
 }
 
-void HpsbCtAdc_Init(void)
+static void process_block(const uint16_t *blk, size_t n)
 {
-    s_last_ms = 0u;
-    s_inited = 0u;
-    for (unsigned i = 0u; i < 3u; i++) {
-        s_avg[i] = 0u;
-        s_pkpk[i] = 0u;
-        s_cur[i] = 0u;
+    for (size_t ch = 0u; ch < 3u; ch++) {
+        s_avg[ch]  = calc_avg(blk, n, ch);
+        s_pkpk[ch] = calc_pkpk(blk, n, ch);
+        s_cur[ch]  = (s_pkpk[ch] >= HPSB_CT_PKPK_ON_THRESHOLD) ? 1u : 0u;
     }
-    (void)HAL_ADCEx_Calibration_Start(&hadc);
-    s_inited = 1u;
 }
 
-void HpsbCtAdc_Poll(void)
-{
-    if (!s_inited) return;
-    uint32_t now = HAL_GetTick();
-    if ((now - s_last_ms) < HPSB_CT_ADC_UPDATE_MS)
-        return;
-    s_last_ms = now;
+/* ---- public API ---- */
 
-    for (unsigned i = 0u; i < 3u; i++)
-        sample_channel(i);
+void HpsbCtAdc_Start(ADC_HandleTypeDef *hadc)
+{
+    s_hadc = hadc;
+    memset(s_dma_buf, 0, sizeof(s_dma_buf));
+    s_half_ready = 0u;
+    s_full_ready = 0u;
+    s_started    = 0u;
+    for (size_t i = 0u; i < 3u; i++) { s_avg[i] = 0u; s_pkpk[i] = 0u; s_cur[i] = 0u; }
+
+    (void)HAL_ADCEx_Calibration_Start(hadc);
+    if (HAL_ADC_Start_DMA(hadc, (uint32_t *)s_dma_buf, HPSB_DMA_TOTAL_LEN) == HAL_OK) {
+        s_started = 1u;
+    }
+}
+
+void HpsbCtAdc_OnDmaBlockReady(uint8_t half_index)
+{
+    if (half_index == 0u) s_half_ready = 1u;
+    else                  s_full_ready = 1u;
+}
+
+void HpsbCtAdc_Update(void)
+{
+    if (!s_started) return;
+
+    /* samples per channel per half-block */
+    const size_t n = HPSB_DMA_BUF_LEN / 2u;
+
+    if (s_half_ready) {
+        s_half_ready = 0u;
+        process_block(&s_dma_buf[0], n);
+    } else if (s_full_ready) {
+        s_full_ready = 0u;
+        process_block(&s_dma_buf[HPSB_DMA_TOTAL_LEN / 2u], n);
+    }
 }
 
 void HpsbCtAdc_GetSnapshot(uint16_t avg[3], uint16_t pkpk[3], uint16_t cur_on[3])
 {
     for (unsigned i = 0u; i < 3u; i++) {
-        if (avg) avg[i] = s_avg[i];
-        if (pkpk) pkpk[i] = s_pkpk[i];
+        if (avg)    avg[i]    = s_avg[i];
+        if (pkpk)   pkpk[i]   = s_pkpk[i];
         if (cur_on) cur_on[i] = s_cur[i];
     }
 }

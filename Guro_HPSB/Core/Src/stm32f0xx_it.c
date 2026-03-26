@@ -56,6 +56,7 @@
 
 /* External variables --------------------------------------------------------*/
 extern UART_HandleTypeDef huart1;
+extern DMA_HandleTypeDef hdma_adc;
 /* USER CODE BEGIN EV */
 
 /* USER CODE END EV */
@@ -155,5 +156,8 @@ void USART1_IRQHandler(void)
 }
 
 /* USER CODE BEGIN 1 */
-
+void DMA1_Channel1_IRQHandler(void)
+{
+  HAL_DMA_IRQHandler(&hdma_adc);
+}
 /* USER CODE END 1 */
