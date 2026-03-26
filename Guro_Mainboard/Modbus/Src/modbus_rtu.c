@@ -216,7 +216,7 @@ int ModbusRTU_ParseFC02Response(const uint8_t *frame, size_t frame_len, uint8_t 
 
 int ModbusRTU_ParseFC03Response(const uint8_t *frame, size_t frame_len, uint16_t *regs, uint16_t num_regs)
 {
-    if (frame_len < 5 + num_regs * 2 + 2) return -1;
+    if (frame_len < (size_t)(5 + num_regs * 2)) return -1;
     if (frame[1] != 0x03 || frame[2] != (uint8_t)(num_regs * 2)) return -1;
     if (ModbusRTU_CRC16Check(frame, frame_len) != 0) return -1;
     for (uint16_t i = 0; i < num_regs; i++)
@@ -226,7 +226,7 @@ int ModbusRTU_ParseFC03Response(const uint8_t *frame, size_t frame_len, uint16_t
 
 int ModbusRTU_ParseFC04Response(const uint8_t *frame, size_t frame_len, uint16_t *regs, uint16_t num_regs)
 {
-    if (frame_len < 5 + num_regs * 2 + 2) return -1;
+    if (frame_len < (size_t)(5 + num_regs * 2)) return -1;
     if (frame[1] != 0x04 || frame[2] != (uint8_t)(num_regs * 2)) return -1;
     if (ModbusRTU_CRC16Check(frame, frame_len) != 0) return -1;
     for (uint16_t i = 0; i < num_regs; i++)

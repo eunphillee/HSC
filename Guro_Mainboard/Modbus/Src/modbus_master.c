@@ -25,6 +25,12 @@ typedef enum {
 
 static MasterState_t state = MST_IDLE;
 static uint8_t      poll_index;
+static volatile uint16_t s_poll_enable_mask;
+/* On-demand poll mask: bits = SLAVE_ID_xxx. Non-zero일 때만 downstream polling 실행.
+ * PC 요청이 없으면 0으로 유지 → 자동 polling 없음 (요청 기반 통신 정책). */
+static volatile uint16_t s_ondemand_poll_mask;
+/* 현재 polling 중인 slave ID (on-demand mask 해제용) */
+static uint8_t s_current_poll_slave_id;
 static uint32_t     response_deadline;
 static uint8_t      tx_buf[MODBUS_RTU_TX_BUF_SIZE];
 static uint8_t      rx_buf[MODBUS_RTU_RX_BUF_SIZE];
@@ -43,6 +49,54 @@ static void uart2_mb_log_hex(const char *prefix, const uint8_t *buf, uint16_t le
 static void uart2_mb_lock_rx_it(void);
 static void uart2_mb_unlock_rx_it(void);
 
+/* Last sub-poll failure snapshot (for PC diagnostics) */
+static volatile uint8_t s_last_sub_fail_slave;
+static volatile uint8_t s_last_sub_fail_fc;
+static volatile uint16_t s_last_sub_fail_rx_len;
+static volatile ModbusSubFailReason_t s_last_sub_fail_reason = MODBUS_SUB_FAIL_NONE;
+
+/* Per-slave sub-poll failure table (for PC diagnostics) */
+enum { SUB_FAIL_SID_COUNT = 4u };
+static volatile uint8_t s_sub_fail_fc_tbl[SUB_FAIL_SID_COUNT];
+static volatile uint16_t s_sub_fail_rx_len_tbl[SUB_FAIL_SID_COUNT];
+static volatile ModbusSubFailReason_t s_sub_fail_reason_tbl[SUB_FAIL_SID_COUNT];
+
+static int sub_fail_idx_from_slave(uint8_t sid)
+{
+    switch (sid) {
+    case (uint8_t)SLAVE_ID_HPSB:  return 0;
+    case (uint8_t)SLAVE_ID_LPSB1: return 1; /* 실제 슬레이브 ID=2 */
+    case (uint8_t)SLAVE_ID_LPSB2: return 2; /* 실제 슬레이브 ID=4 */
+    case (uint8_t)SLAVE_ID_LPSB3: return 3; /* 실제 슬레이브 ID=8 */
+    default: return -1;
+    }
+}
+
+static void set_last_sub_fail(uint8_t slave, uint8_t fc, ModbusSubFailReason_t reason, uint16_t len)
+{
+    s_last_sub_fail_slave = slave;
+    s_last_sub_fail_fc = fc;
+    s_last_sub_fail_reason = reason;
+    s_last_sub_fail_rx_len = len;
+
+    {
+        int idx = sub_fail_idx_from_slave(slave);
+        if (idx >= 0) {
+            s_sub_fail_fc_tbl[idx] = fc;
+            s_sub_fail_reason_tbl[idx] = reason;
+            s_sub_fail_rx_len_tbl[idx] = len;
+        }
+    }
+#if MODBUS_MASTER_DEBUG_LOG
+    {
+        char b[128];
+        int n = snprintf(b, sizeof(b), "[UART2-MB] subfail slave=%u fc=%02X reason=%u rx_len=%u\r\n",
+                         (unsigned)slave, (unsigned)fc, (unsigned)reason, (unsigned)len);
+        if (n > 0) uart2_mb_log(b);
+    }
+#endif
+}
+
 static void set_de_tx(void)
 {
 	/* DE는 반드시 TX 직전에 즉시 토글되어야 한다.
@@ -57,7 +111,7 @@ static void set_de_rx(void)
 	uart2_mb_log("[UART2-MB] DE=RX\r\n");
 }
 
-#define DE_RX_GUARD_MS  2  /* Delay after TX before DE->RX so last byte leaves driver (PB12) */
+#define DE_RX_GUARD_MS  1  /* Delay after TX before DE->RX so last byte leaves driver (PB12) */
 
 static void uart2_mb_log(const char *msg)
 {
@@ -96,11 +150,106 @@ static void uart2_mb_unlock_rx_it(void)
     uart2_mb_log("[UART2-MB] enable rx-it after transaction\r\n");
 }
 
-/** Flush USART2 RX FIFO (call only before TX to avoid discarding slave response). */
+static volatile uint32_t s_uart2_ore_count;
+static volatile uint32_t s_uart2_ore_count_snapshot;
+
+static void uart2_clear_ore_if_any(void)
+{
+	/* If Overrun occurs, RX may stall until ORE is cleared. */
+	if (__HAL_UART_GET_FLAG(&MODBUS_UART, UART_FLAG_ORE) != RESET) {
+		__HAL_UART_CLEAR_OREFLAG(&MODBUS_UART);
+		s_uart2_ore_count++;
+	}
+	s_uart2_ore_count_snapshot = s_uart2_ore_count;
+}
+
+uint32_t ModbusMaster_GetUart2OreCount(void)
+{
+	return (uint32_t)s_uart2_ore_count;
+}
+
+/* ---------- UART2 interrupt-driven RX ring buffer ---------- */
+enum { UART2_RB_SIZE = 256u };
+static volatile uint8_t s_rb[UART2_RB_SIZE];
+static volatile uint16_t s_rb_head;
+static volatile uint16_t s_rb_tail;
+static uint8_t s_uart2_rx_byte;
+static volatile uint8_t s_uart2_rx_it_suspended;
+
+static void rb_clear(void)
+{
+	s_rb_head = 0u;
+	s_rb_tail = 0u;
+}
+
+static uint16_t rb_count(void)
+{
+	uint16_t h = s_rb_head, t = s_rb_tail;
+	return (h >= t) ? (uint16_t)(h - t) : (uint16_t)(UART2_RB_SIZE - (t - h));
+}
+
+static void rb_push(uint8_t b)
+{
+	uint16_t next = (uint16_t)((s_rb_head + 1u) % UART2_RB_SIZE);
+	if (next == s_rb_tail) {
+		/* overflow: drop oldest */
+		s_rb_tail = (uint16_t)((s_rb_tail + 1u) % UART2_RB_SIZE);
+	}
+	s_rb[s_rb_head] = b;
+	s_rb_head = next;
+}
+
+static int rb_pop(uint8_t *out)
+{
+	if (s_rb_tail == s_rb_head) return 0;
+	*out = s_rb[s_rb_tail];
+	s_rb_tail = (uint16_t)((s_rb_tail + 1u) % UART2_RB_SIZE);
+	return 1;
+}
+
+void ModbusMaster_OnUart2Byte(uint8_t b)
+{
+	/* FC05 blocking RX path uses HAL_UART_Receive; don't steal bytes while write in progress. */
+	if (s_write_in_progress || s_uart2_rx_it_suspended) return;
+	rb_push(b);
+}
+
+static void uart2_rx_it_start(void)
+{
+	s_uart2_rx_it_suspended = 0;
+	(void)HAL_UART_Receive_IT(&huart2, &s_uart2_rx_byte, 1u);
+}
+
+static void uart2_rx_it_suspend(void)
+{
+	s_uart2_rx_it_suspended = 1;
+	(void)HAL_UART_AbortReceive_IT(&huart2);
+}
+
+static void uart2_rx_it_resume(void)
+{
+	if (!s_uart2_rx_it_suspended) return;
+	s_uart2_rx_it_suspended = 0;
+	(void)HAL_UART_Receive_IT(&huart2, &s_uart2_rx_byte, 1u);
+}
+
+/** Flush USART2 RX ring/HW before TX. Never flush after TX. */
 static void uart2_flush_rx(void)
 {
-	uint8_t discard;
-	while (HAL_UART_Receive(&MODBUS_UART, &discard, 1, 0) == HAL_OK) { (void)discard; }
+	rb_clear();
+	uart2_clear_ore_if_any();
+	__HAL_UART_FLUSH_DRREGISTER(&MODBUS_UART);
+}
+
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+	if (huart == &huart2) {
+		uint8_t b = s_uart2_rx_byte;
+		ModbusMaster_OnUart2Byte(b);
+		if (!s_uart2_rx_it_suspended) {
+			(void)HAL_UART_Receive_IT(&huart2, &s_uart2_rx_byte, 1u);
+		}
+	}
 }
 
 /**
@@ -139,9 +288,26 @@ static void uart2_transaction_tx(uint8_t *tx_buf, uint16_t tx_len)
 
 static void send_request(void)
 {
+    /* On-demand 정책: pending이 없으면 즉시 반환 (자동 polling 없음). */
+    if (s_ondemand_poll_mask == 0u) return;
+
     PollEntry_t e;
-    if (ModbusTable_GetPollEntry(poll_index, &e) != 0) return;
+    /* find next enabled entry: s_poll_enable_mask AND s_ondemand_poll_mask 모두 통과해야 함 */
+    uint8_t found = 0u;
+    for (uint16_t tries = 0u; tries < POLL_TABLE_SIZE; tries++) {
+        if (ModbusTable_GetPollEntry(poll_index, &e) != 0) return;
+        if (((uint16_t)e.slave_id & s_poll_enable_mask) != 0u &&
+            ((uint16_t)e.slave_id & s_ondemand_poll_mask) != 0u)
+        {
+            found = 1u;
+            break;
+        }
+        poll_index++;
+        if (poll_index >= POLL_TABLE_SIZE) poll_index = 0;
+    }
+    if (!found) return;
     uint8_t target_slave = (uint8_t)e.slave_id;
+    s_current_poll_slave_id = target_slave;
 
     size_t pdu_len = 0;
     switch (e.entry_type) {
@@ -187,17 +353,54 @@ static uint8_t expected_fc_for_entry(PollEntryType_t t)
     }
 }
 
+static uint16_t expected_resp_len_bytes(const PollEntry_t *e)
+{
+    if (!e) return 0u;
+    switch (e->entry_type) {
+    case POLL_ENTRY_READ_INPUT_REG:
+    case POLL_ENTRY_READ_HOLDING:
+        return (uint16_t)(5u + 2u * e->count);
+    case POLL_ENTRY_READ_COIL:
+    case POLL_ENTRY_READ_DISCRETE: {
+        uint16_t bc = (uint16_t)((e->count + 7u) / 8u);
+        return (uint16_t)(5u + bc);
+    }
+    default:
+        return 0u;
+    }
+}
+
+static void advance_poll_index(void)
+{
+    poll_index++;
+    if (poll_index >= POLL_TABLE_SIZE) poll_index = 0;
+}
+
+/* poll 1건 완료(성공/실패 무관) 시 on-demand 마스크에서 해당 slave 비트 해제 */
+static void ondemand_clear_slave(uint8_t slave_id)
+{
+    s_ondemand_poll_mask &= ~(uint16_t)slave_id;
+}
+
 static void parse_response(void)
 {
     PollEntry_t e;
     if (ModbusTable_GetPollEntry(poll_index, &e) != 0) {
         uart2_mb_unlock_rx_it();
         state = MST_IDLE;
+        ondemand_clear_slave(s_current_poll_slave_id);
+        advance_poll_index();
         return;
     }
     if (rx_len < 5) {
+        PollEntry_t te;
+        if (ModbusTable_GetPollEntry(poll_index, &te) == 0) {
+            set_last_sub_fail((uint8_t)te.slave_id, expected_fc_for_entry(te.entry_type), MODBUS_SUB_FAIL_RX_TOO_SHORT, rx_len);
+        }
         uart2_mb_unlock_rx_it();
         state = MST_IDLE;
+        ondemand_clear_slave(s_current_poll_slave_id);
+        advance_poll_index();
         return;
     }
 
@@ -205,24 +408,30 @@ static void parse_response(void)
 #if MODBUS_MASTER_DEBUG_LOG
     ModbusMaster_LogSubPollRxLen(slave, rx_len);
 #endif
+    uint8_t recv_fc = rx_buf[1];
     if (rx_buf[0] != slave) {
 #if MODBUS_MASTER_DEBUG_LOG
         ModbusMaster_LogSubPollFail(slave, "slave mismatch");
 #endif
         comm_ok[SLAVE_TO_INDEX(e.slave_id)] = 0;
+        set_last_sub_fail(slave, recv_fc, MODBUS_SUB_FAIL_SLAVE_MISMATCH, rx_len);
         uart2_mb_unlock_rx_it();
         state = MST_IDLE;
+        ondemand_clear_slave(slave);
+        advance_poll_index();
         return;
     }
     uint8_t exp_fc = expected_fc_for_entry(e.entry_type);
-    uint8_t recv_fc = rx_buf[1];
     if ((recv_fc & 0x7F) != exp_fc) {
 #if MODBUS_MASTER_DEBUG_LOG
         ModbusMaster_LogSubPollFail(slave, "FC mismatch");
 #endif
         comm_ok[SLAVE_TO_INDEX(e.slave_id)] = 0;
+        set_last_sub_fail(slave, recv_fc, MODBUS_SUB_FAIL_FC_MISMATCH, rx_len);
         uart2_mb_unlock_rx_it();
         state = MST_IDLE;
+        ondemand_clear_slave(slave);
+        advance_poll_index();
         return;
     }
     if (ModbusRTU_CRC16Check(rx_buf, rx_len) != 0) {
@@ -230,8 +439,25 @@ static void parse_response(void)
         ModbusMaster_LogSubPollFail(slave, "CRC fail");
 #endif
         comm_ok[SLAVE_TO_INDEX(e.slave_id)] = 0;
+        set_last_sub_fail(slave, recv_fc, MODBUS_SUB_FAIL_CRC_FAIL, rx_len);
+        {
+            uint16_t exp_len = expected_resp_len_bytes(&e);
+            char b[180];
+            int n = snprintf(b, sizeof(b),
+                             "[UART2-MB] crc_fail slave=%u fc=%02X exp_len=%u rx_len=%u rb=%u ore=%lu\r\n",
+                             (unsigned)slave,
+                             (unsigned)recv_fc,
+                             (unsigned)exp_len,
+                             (unsigned)rx_len,
+                             (unsigned)rb_count(),
+                             (unsigned long)s_uart2_ore_count_snapshot);
+            if (n > 0) uart2_mb_log(b);
+        }
+        if (rx_len > 0u) uart2_mb_log_hex("crc_fail rx partial", rx_buf, rx_len);
         uart2_mb_unlock_rx_it();
         state = MST_IDLE;
+        ondemand_clear_slave(slave);
+        advance_poll_index();
         return;
     }
     uart2_mb_log_hex("rx raw", rx_buf, rx_len);
@@ -257,7 +483,7 @@ static void parse_response(void)
             break;
         }
         case POLL_ENTRY_READ_INPUT_REG: {
-            uint16_t regs[MODBUS_INPUT_REG_COUNT];
+            uint16_t regs[MODBUS_INPUT_REG_IMG_MAX];
             ok = ModbusRTU_ParseFC04Response(rx_buf, rx_len, regs, e.count);
             if (ok == 0) ModbusTable_SetInputRegs(e.slave_id, e.start_addr, regs, e.count);
             break;
@@ -268,6 +494,15 @@ static void parse_response(void)
     if (ok == 0) {
         last_slave_responded = slave;
         comm_ok[SLAVE_TO_INDEX(e.slave_id)] = 1;
+        /* Success: clear per-slave fail table entry */
+        {
+            int idx = sub_fail_idx_from_slave(slave);
+            if (idx >= 0) {
+                s_sub_fail_fc_tbl[idx] = recv_fc;
+                s_sub_fail_reason_tbl[idx] = MODBUS_SUB_FAIL_NONE;
+                s_sub_fail_rx_len_tbl[idx] = rx_len;
+            }
+        }
         LED_Status_OnSubRS485Activity();
         {
             char b[80];
@@ -281,9 +516,13 @@ static void parse_response(void)
 #if MODBUS_MASTER_DEBUG_LOG
         ModbusMaster_LogSubPollFail(slave, "parse fail");
 #endif
+        comm_ok[SLAVE_TO_INDEX(e.slave_id)] = 0;
+        set_last_sub_fail(slave, recv_fc, MODBUS_SUB_FAIL_PARSE_FAIL, rx_len);
     }
     uart2_mb_unlock_rx_it();
     state = MST_IDLE;
+    ondemand_clear_slave(slave);
+    advance_poll_index();
 }
 
 void ModbusMaster_Init(void)
@@ -294,23 +533,33 @@ void ModbusMaster_Init(void)
     last_slave_responded = 0;
     memset(comm_ok, 0, sizeof(comm_ok));
     s_uart2_locked_for_txn = 0;
+    set_last_sub_fail(0u, 0u, MODBUS_SUB_FAIL_NONE, 0u);
     ModbusTable_ClearAllImages();
     set_de_rx();
+    rb_clear();
+    /* On-demand 정책: 초기에는 polling 비활성. PC 요청 시만 활성화. */
+    s_ondemand_poll_mask = 0u;
+    s_current_poll_slave_id = 0u;
+#if USE_PC_TEST_UART1_SLAVE
+    s_poll_enable_mask = (uint16_t)SLAVE_ID_HPSB;
+#else
+    s_poll_enable_mask = (uint16_t)(SLAVE_ID_HPSB | SLAVE_ID_LPSB1 | SLAVE_ID_LPSB2 | SLAVE_ID_LPSB3);
+#endif
+    uart2_rx_it_start();
 }
 
 void ModbusMaster_Poll(void)
 {
     if (s_write_in_progress) return;
-    /* Consume RX bytes if any */
+    uart2_clear_ore_if_any();
+    /* Consume RX bytes from ring buffer */
     uint8_t byte;
-    while (HAL_UART_Receive(&MODBUS_UART, &byte, 1, 0) == HAL_OK) {
-        if (rx_len < MODBUS_RTU_RX_BUF_SIZE)
-            rx_buf[rx_len++] = byte;
+    while (rx_len < MODBUS_RTU_RX_BUF_SIZE && rb_pop(&byte)) {
+        rx_buf[rx_len++] = byte;
     }
 
     switch (state) {
         case MST_IDLE:
-            poll_index = 0;
             send_request();
             break;
 
@@ -319,18 +568,33 @@ void ModbusMaster_Poll(void)
                 PollEntry_t te;
                 if (ModbusTable_GetPollEntry(poll_index, &te) == 0) {
                     comm_ok[SLAVE_TO_INDEX(te.slave_id)] = 0;
+                    set_last_sub_fail((uint8_t)te.slave_id, expected_fc_for_entry(te.entry_type), MODBUS_SUB_FAIL_TIMEOUT, rx_len);
 #if MODBUS_MASTER_DEBUG_LOG
                     ModbusMaster_LogSubPollRxTimeout((uint8_t)te.slave_id);
                     ModbusMaster_LogSubPollFail((uint8_t)te.slave_id, "timeout");
 #endif
                 }
+                if (rx_len > 0u) {
+                    uart2_mb_log_hex("timeout rx partial", rx_buf, rx_len);
+                }
+                {
+                    uint16_t exp_len = expected_resp_len_bytes(&te);
+                    char b[180];
+                    int n = snprintf(b, sizeof(b),
+                                     "[UART2-MB] timeout slave=%u fc=%02X exp_len=%u rx_len=%u rb=%u ore=%lu\r\n",
+                                     (unsigned)te.slave_id,
+                                     (unsigned)expected_fc_for_entry(te.entry_type),
+                                     (unsigned)exp_len,
+                                     (unsigned)rx_len,
+                                     (unsigned)rb_count(),
+                                     (unsigned long)s_uart2_ore_count_snapshot);
+                    if (n > 0) uart2_mb_log(b);
+                }
                 uart2_mb_log("[UART2-MB] timeout waiting response\r\n");
                 uart2_mb_unlock_rx_it();
                 state = MST_IDLE;
-                poll_index++;
-                if (poll_index >= POLL_TABLE_SIZE)
-                    poll_index = 0;
-                send_request();
+                ondemand_clear_slave(s_current_poll_slave_id);
+                advance_poll_index();
                 return;
             }
             if (rx_len >= 5) {
@@ -341,6 +605,7 @@ void ModbusMaster_Poll(void)
                     PollEntry_t te;
                     if (ModbusTable_GetPollEntry(poll_index, &te) == 0) {
                         comm_ok[SLAVE_TO_INDEX(te.slave_id)] = 0;
+                        set_last_sub_fail((uint8_t)te.slave_id, (uint8_t)(fc & 0x7Fu), MODBUS_SUB_FAIL_EXCEPTION, rx_len);
 #if MODBUS_MASTER_DEBUG_LOG
                         ModbusMaster_LogSubPollFail((uint8_t)te.slave_id, "exception");
 #endif
@@ -353,9 +618,8 @@ void ModbusMaster_Poll(void)
                     }
                     uart2_mb_unlock_rx_it();
                     state = MST_IDLE;
-                    poll_index++;
-                    if (poll_index >= POLL_TABLE_SIZE) poll_index = 0;
-                    send_request();
+                    ondemand_clear_slave(s_current_poll_slave_id);
+                    advance_poll_index();
                     return;
                 }
                 if (fc == 0x01 || fc == 0x02) {
@@ -370,15 +634,57 @@ void ModbusMaster_Poll(void)
 
         case MST_PARSE_RESPONSE:
             parse_response();
-            poll_index++;
-            if (poll_index >= POLL_TABLE_SIZE) poll_index = 0;
-            send_request();
             break;
 
         default:
             state = MST_IDLE;
             break;
     }
+}
+
+void ModbusMaster_GetLastSubFail(uint8_t *slave_id, uint8_t *fc, ModbusSubFailReason_t *reason, uint16_t *out_rx_len)
+{
+    if (slave_id) *slave_id = (uint8_t)s_last_sub_fail_slave;
+    if (fc) *fc = (uint8_t)s_last_sub_fail_fc;
+    if (reason) *reason = (ModbusSubFailReason_t)s_last_sub_fail_reason;
+    if (out_rx_len) *out_rx_len = (uint16_t)s_last_sub_fail_rx_len;
+}
+
+void ModbusMaster_GetSubFailForSlave(SlaveId_t slave, uint8_t *fc, ModbusSubFailReason_t *reason, uint16_t *rx_len)
+{
+    int idx = sub_fail_idx_from_slave((uint8_t)slave);
+    if (idx < 0) {
+        if (fc) *fc = 0u;
+        if (reason) *reason = MODBUS_SUB_FAIL_NONE;
+        if (rx_len) *rx_len = 0u;
+        return;
+    }
+    if (fc) *fc = (uint8_t)s_sub_fail_fc_tbl[idx];
+    if (reason) *reason = (ModbusSubFailReason_t)s_sub_fail_reason_tbl[idx];
+    if (rx_len) *rx_len = (uint16_t)s_sub_fail_rx_len_tbl[idx];
+}
+
+uint8_t ModbusMaster_IsBusy(void)
+{
+    return (uint8_t)((state != MST_IDLE) || (s_write_in_progress != 0u));
+}
+
+void ModbusMaster_SetPollEnableMask(uint16_t slave_id_mask)
+{
+    uint16_t m = (uint16_t)(slave_id_mask & (uint16_t)(SLAVE_ID_HPSB | SLAVE_ID_LPSB1 | SLAVE_ID_LPSB2 | SLAVE_ID_LPSB3));
+    if (m == 0u) m = (uint16_t)SLAVE_ID_HPSB;
+    s_poll_enable_mask = m;
+}
+
+/**
+ * @brief PC 요청에 의해 지정 slave(들)를 1회 polling하도록 요청.
+ *        On-demand 정책: PC 명령 없이는 downstream polling을 수행하지 않음.
+ * @param slave_mask SLAVE_ID_xxx 비트 OR 조합 (예: SLAVE_ID_HPSB | SLAVE_ID_LPSB1)
+ */
+void ModbusMaster_RequestOnDemandPoll(uint16_t slave_mask)
+{
+    uint16_t valid = (uint16_t)(SLAVE_ID_HPSB | SLAVE_ID_LPSB1 | SLAVE_ID_LPSB2 | SLAVE_ID_LPSB3);
+    s_ondemand_poll_mask |= (uint16_t)(slave_mask & valid);
 }
 
 int ModbusMaster_WriteCoil(SlaveId_t slave, uint16_t coil_addr, uint8_t value)
@@ -396,6 +702,12 @@ int ModbusMaster_WriteCoil(SlaveId_t slave, uint16_t coil_addr, uint8_t value)
     pdu[5] = (uint8_t)(modbus_value & 0xFF);
     ModbusRTU_AppendCRC(pdu, len);
     uart2_mb_lock_rx_it();
+    /* FC05는 HAL_UART_Receive()로 응답을 블로킹 수신하므로,
+     * 링버퍼 RX IT가 바이트를 훔치지 않도록 UART2 RX IT를 잠시 중지한다. */
+    uart2_rx_it_suspend();
+    /* 폴링 수신 찌꺼기/부분 프레임이 FC05 응답 수신을 오염시키는 경우가 있어,
+     * FC05 트랜잭션 시작 시점에 RX를 한 번 강제로 비운다. */
+    uart2_flush_rx();
     {
         uint16_t coil_value_raw = (uint16_t)((pdu[4] << 8) | pdu[5]);
         char b[128];
@@ -499,6 +811,7 @@ int ModbusMaster_WriteCoil(SlaveId_t slave, uint16_t coil_addr, uint8_t value)
 
     /* Cleanup: flush USART2 RX so poll does not see partial/leftover bytes; always clear busy. */
     uart2_flush_rx();
+    uart2_rx_it_resume();
     uart2_mb_unlock_rx_it();
     s_write_in_progress = 0;
 #if FC05_GW_STEP_LOG

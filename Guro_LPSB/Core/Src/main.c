@@ -21,7 +21,6 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include <stdio.h>
 #include "rs485_drv.h"
 #include "lpsb_app.h"
 #include "adc_app.h"
@@ -50,11 +49,7 @@ ADC_HandleTypeDef hadc;
 UART_HandleTypeDef huart1;
 
 /* USER CODE BEGIN PV */
-static uint8_t uart_rx_byte;
-static uint32_t s_adc_tick;
 static ACS712_RmsState s_rms;
-static uint32_t s_rms_print_tick;
-static uint32_t s_led4_hb_tick;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -127,13 +122,9 @@ int main(void)
   {
     Error_Handler();
   }
-  RS485_SetRxMode();
   LPSB_App_Init();
   LPSB_LED_Sequence();
-  s_adc_tick = HAL_GetTick();
-  s_rms_print_tick = HAL_GetTick();
-  s_led4_hb_tick = HAL_GetTick();
-  HAL_UART_Receive_IT(&huart1, &uart_rx_byte, 1);
+  Modbus_Init();
 
   /* Start RMS measurement on ADC3 channel (ADC_CH5 = PA5 = ACS_ADC03).
    * NOTE: While RMS DMA sampling is active, do not use adc_app polling reads concurrently.
@@ -154,42 +145,18 @@ int main(void)
     Modbus_Poll();
     /* Keep existing ADC update disabled while DMA RMS sampling is active to avoid ADC conflicts. */
     LPSB_Heartbeat();
-    /* RS485 활동 LED4 타임아웃 처리 (TX/RX 후 약 50ms 뒤 OFF) */
+    /* LED4: RS485 activity pulse + 무통신 시 2s 주기 idle blink */
     RS485_ActivityTick();
-    /* 전원/루프 동작 확인용: LED4를 5초마다 1회 짧게 점멸 (RS485 activity LED 로직 재사용) */
-    {
-      uint32_t now = HAL_GetTick();
-      if ((now - s_led4_hb_tick) >= 5000u)
-      {
-        s_led4_hb_tick = now;
-        RS485_NotifyRxActivity(); /* LED4 ON + timestamp; RS485_ActivityTick()이 50ms 후 OFF */
-      }
-    }
 
-    /* RMS poll + periodic debug print */
+    /* ADC DMA poll: update Modbus register map on each new half/full block. */
     if (ACS712_RMS_Poll(&s_rms))
     {
-      /* Feed Modbus register map (adc_app storage).
-       * RMS DMA samples 3 channels in scan+DMA interleaved buffer:
-       * ADC1=CH3(PA3), ADC2=CH4(PA4), ADC3=CH5(PA5).
-       */
       LPSB_ADC_SetStoredAvg(0, s_rms.last_avg_adc_ch[0]);
       LPSB_ADC_SetStoredAvg(1, s_rms.last_avg_adc_ch[1]);
       LPSB_ADC_SetStoredAvg(2, s_rms.last_avg_adc_ch[2]);
       LPSB_ADC_SetStoredPkpk(0, s_rms.last_pkpk_adc_ch[0]);
       LPSB_ADC_SetStoredPkpk(1, s_rms.last_pkpk_adc_ch[1]);
       LPSB_ADC_SetStoredPkpk(2, s_rms.last_pkpk_adc_ch[2]);
-    }
-    {
-      uint32_t now = HAL_GetTick();
-      if ((now - s_rms_print_tick) >= 500u)
-      {
-        s_rms_print_tick = now;
-        char line[80];
-        int n = snprintf(line, sizeof(line), "I_RMS=%.3fA, offset=%.3fV\r\n",
-                         (double)s_rms.last_irms_a, (double)s_rms.offset_v);
-        (void)HAL_UART_Transmit(&huart1, (uint8_t *)line, (uint16_t)n, 50u);
-      }
     }
   }
   /* USER CODE END 3 */
@@ -425,15 +392,7 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
-void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
-{
-  if (huart == &huart1)
-  {
-    RS485_NotifyRxActivity();
-    Modbus_PushByte(uart_rx_byte);
-    (void)HAL_UART_Receive_IT(&huart1, &uart_rx_byte, 1);
-  }
-}
+/* HAL_UART_RxCpltCallback: modbus_slave.c 에서 정의 (s_rx_byte 관리 포함) */
 /* USER CODE END 4 */
 
 /**

@@ -153,9 +153,14 @@ class DocModbusPanel(QWidget):
         lay.addLayout(row)
 
         # ---- buttons ----
+        # Unified Rule v1.0 강제: PC는 FC04(read) / FC05(write single coil)만 사용
         row_btn = QHBoxLayout()
-        btn_fc02 = QPushButton("FC02 읽기 (1x0821..)")
-        btn_fc01 = QPushButton("FC01 읽기 (1x0892..)")
+        btn_fc02 = QPushButton("FC02 읽기 (disabled)")
+        btn_fc02.setEnabled(False)
+        btn_fc02.setVisible(False)
+        btn_fc01 = QPushButton("FC01 읽기 (disabled)")
+        btn_fc01.setEnabled(False)
+        btn_fc01.setVisible(False)
         btn_fc04 = QPushButton("FC04 진단 읽기 (4x4000..)")
         row_btn.addWidget(btn_fc02)
         row_btn.addWidget(btn_fc01)
@@ -167,7 +172,9 @@ class DocModbusPanel(QWidget):
         row_wr.addWidget(self._coil_doc)
         row_wr.addWidget(self._coil_value)
         btn_fc05 = QPushButton("FC05 Write Single Coil")
-        btn_fc15 = QPushButton("FC15 Write Multiple Coils(예시)")
+        btn_fc15 = QPushButton("FC15 Write Multiple Coils(disabled)")
+        btn_fc15.setEnabled(False)
+        btn_fc15.setVisible(False)
         row_wr.addWidget(btn_fc05)
         row_wr.addWidget(btn_fc15)
         row_wr.addStretch()
@@ -267,7 +274,7 @@ class DocModbusPanel(QWidget):
             points.append((f"1x{d:04d}", f"CMD ON/OFF {d-884}", "DI", "R", "N/A"))
         for d in range(892, 911):
             points.append((f"1x{d:04d}", f"자동문 제어/가상버튼 {d-891}", "COIL", "RW", "N/A"))
-        for d in range(4000, 4012):
+        for d in range(4000, 4032):
             points.append((f"4x{d:04d}", f"진단레지스터 {d}", "IR", "R", "N/A"))
 
         self._table.setRowCount(len(points))
@@ -341,6 +348,8 @@ class DocModbusPanel(QWidget):
         return " ".join(f"{b:02X}" for b in frame)
 
     def _do_fc02(self):
+        self._append_out("[FC02] Unified Rule v1.0: disabled (FC03/FC02 호환 유지하지 않음)")
+        return
         # 1차: 1x0821부터 16bit 읽기(예시)
         unit = self._unit()
         start_doc = 821
@@ -356,6 +365,8 @@ class DocModbusPanel(QWidget):
             self._append_out("[FC02] FAIL: request callback not set")
 
     def _do_fc01(self):
+        self._append_out("[FC01] Unified Rule v1.0: disabled (FC03/FC02 호환 유지하지 않음)")
+        return
         unit = self._unit()
         start_doc = 892
         count = 24
@@ -399,6 +410,8 @@ class DocModbusPanel(QWidget):
             self._append_out("[FC05] FAIL: request callback not set")
 
     def _do_fc15(self):
+        self._append_out("[FC15] Unified Rule v1.0: disabled (FC05 write only)")
+        return
         unit = self._unit()
         start_doc = 892
         start = start_doc - 1

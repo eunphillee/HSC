@@ -48,7 +48,10 @@ typedef enum {
 #define MODBUS_HOLDING_START        0
 #define MODBUS_HOLDING_COUNT        4
 #define MODBUS_INPUT_REG_START      0
-#define MODBUS_INPUT_REG_COUNT      10
+#define MODBUS_INPUT_REG_COUNT_MAIN 14u
+#define MODBUS_INPUT_REG_COUNT_LPSB 14u
+#define MODBUS_INPUT_REG_COUNT_HPSB 16u
+#define MODBUS_INPUT_REG_IMG_MAX    16u
 
 /* ========== MAIN local Digital Inputs (GPIO) ========== */
 typedef enum {
@@ -73,11 +76,11 @@ typedef enum {
 } MainDoChannel_t;
 
 /* ========== Sub-board image indices (for application) ========== */
-/* HPSB/LPSB: Discrete, Coil, Holding[0..3], InputReg[0..9] (AVG/PKPK/CURRENT) */
+/* HPSB/LPSB: Discrete, Coil, Holding[0..3], InputReg[0..13] (Unified Rule FC04 map) */
 #define SUB_DISCRETE_COUNT    MODBUS_DISCRETE_COUNT
 #define SUB_COIL_COUNT        MODBUS_COIL_COUNT
 #define SUB_HOLDING_COUNT     MODBUS_HOLDING_COUNT
-#define SUB_INPUT_REG_COUNT   MODBUS_INPUT_REG_COUNT
+#define SUB_INPUT_REG_COUNT   MODBUS_INPUT_REG_IMG_MAX
 
 /* Holding register indices (status / alarm) */
 typedef enum {

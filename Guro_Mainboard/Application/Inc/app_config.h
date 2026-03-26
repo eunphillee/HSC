@@ -20,7 +20,11 @@
 #endif
 
 #if USE_PC_TEST_UART1_SLAVE
-#define MODBUS_MASTER_POLL_ENABLE        0
+/* PC 테스트(UART1 Modbus Slave)에서도 UART2 하위보드(HPSB/LPSB) 폴링은 계속 필요하다.
+ * - UART1: PC↔Mainboard Modbus Slave
+ * - UART2: Mainboard↔Subboards Modbus Master poll (FC04)
+ */
+#define MODBUS_MASTER_POLL_ENABLE        1
 #define UPSTREAM_PC_MODBUS_SLAVE_ENABLE  0
 #else
 #define MODBUS_MASTER_POLL_ENABLE        1

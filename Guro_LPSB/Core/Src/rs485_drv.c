@@ -9,13 +9,14 @@
 
 extern UART_HandleTypeDef huart1;
 
+/* LED4: 평상시 ON, RS485 RX/TX 활동 시 80ms 동안 OFF (activity blink). */
+#define LED4_BLINK_OFF_MS  80u
+static volatile uint32_t s_led4_last_activity = 0u;
+
 void RS485_SetRxMode(void)
 {
   HAL_GPIO_WritePin(RS485_DE_GPIO_Port, RS485_DE_Pin, GPIO_PIN_RESET);
 }
-
-/* LED4: RS485 Activity 표시용 (TX/RX). main.c에서 GPIO 초기화됨. */
-static uint32_t s_led4_last_activity = 0;
 
 void RS485_SetTxMode(void)
 {
@@ -25,29 +26,28 @@ void RS485_SetTxMode(void)
 void RS485_Send(const uint8_t *buf, uint16_t len)
 {
   if (buf == NULL || len == 0) return;
+  (void)HAL_UART_AbortReceive_IT(&huart1);
   RS485_SetTxMode();
-  /* RS485 TX 활동 표시: LED4 ON, 타임스탬프 기록 */
-  HAL_GPIO_WritePin(LED04_GPIO_Port, LED04_Pin, GPIO_PIN_RESET); /* LED4 active-low 라고 가정 시 조정 가능 */
+  HAL_Delay(1);
   s_led4_last_activity = HAL_GetTick();
   (void)HAL_UART_Transmit(&huart1, (uint8_t *)buf, len, 100u);
   /* TC 플래그로 전송 완료 확인 후 DE LOW */
   while (__HAL_UART_GET_FLAG(&huart1, UART_FLAG_TC) == RESET) { }
   RS485_SetRxMode();
+  /* RX IT 재등록은 Modbus_Poll()이 처리 */
 }
 
 void RS485_ActivityTick(void)
 {
-  /* 마지막 TX/RX 활동 후 50ms 경과 시 LED4 OFF */
-  uint32_t now = HAL_GetTick();
-  if ((now - s_led4_last_activity) > 50u)
-  {
-    HAL_GPIO_WritePin(LED04_GPIO_Port, LED04_Pin, GPIO_PIN_SET);
-  }
+    uint32_t now = HAL_GetTick();
+    if ((now - s_led4_last_activity) < LED4_BLINK_OFF_MS) {
+        HAL_GPIO_WritePin(LED04_GPIO_Port, LED04_Pin, GPIO_PIN_SET);   /* OFF (active-low) */
+    } else {
+        HAL_GPIO_WritePin(LED04_GPIO_Port, LED04_Pin, GPIO_PIN_RESET); /* ON  (active-low) */
+    }
 }
 
 void RS485_NotifyRxActivity(void)
 {
-  /* RX 인터럽트에서 호출: LED4 짧게 ON */
-  HAL_GPIO_WritePin(LED04_GPIO_Port, LED04_Pin, GPIO_PIN_RESET);
-  s_led4_last_activity = HAL_GetTick();
+    s_led4_last_activity = HAL_GetTick();
 }

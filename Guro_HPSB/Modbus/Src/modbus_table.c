@@ -71,22 +71,42 @@ uint16_t ModbusTable_GetInputReg(uint16_t addr)
 
 void ModbusTable_RefreshInputRegs(void)
 {
-    ModbusTable_RefreshDiscrete();
-    uint8_t byte = 0;
-    for (uint16_t i = 0; i < 8 && i < DISCRETE_COUNT; i++)
-        byte |= (discrete_image[i] ? (1u << i) : 0);
-    input_regs[HPSB_INPUT_REG_DISCRETE_IMAGE] = (uint16_t)byte;
-    {
-        uint16_t a[3], p[3], c[3];
-        HpsbCtAdc_GetSnapshot(a, p, c);
-        input_regs[HPSB_INPUT_REG_CT_CH1_AVG] = a[0];
-        input_regs[HPSB_INPUT_REG_CT_CH2_AVG] = a[1];
-        input_regs[HPSB_INPUT_REG_CT_CH3_AVG] = a[2];
-        input_regs[HPSB_INPUT_REG_CT_CH1_PKPK] = p[0];
-        input_regs[HPSB_INPUT_REG_CT_CH2_PKPK] = p[1];
-        input_regs[HPSB_INPUT_REG_CT_CH3_PKPK] = p[2];
-        input_regs[HPSB_INPUT_REG_CT_CH1_CURRENT] = c[0];
-        input_regs[HPSB_INPUT_REG_CT_CH2_CURRENT] = c[1];
-        input_regs[HPSB_INPUT_REG_CT_CH3_CURRENT] = c[2];
-    }
+    /* Unified Rule v1.1 HPSB FC04 map (reg0~15):
+     * reg0  = alive/status (1=정상)
+     * reg1  = error code
+     * reg2~5= relay1~4 state
+     * reg6~8= ADC1~3 AVG
+     * reg9~11= ADC1~3 PKPK
+     * reg12~14= Current1~3 state (0/1)
+     * reg15 reserve
+     */
+    uint16_t avg[3] = {0u, 0u, 0u};
+    uint16_t pkpk[3] = {0u, 0u, 0u};
+    uint16_t cur_on[3] = {0u, 0u, 0u};
+    HpsbCtAdc_GetSnapshot(avg, pkpk, cur_on);
+
+    input_regs[HPSB_INPUT_REG_ALIVE_STATUS] = 1u;
+    input_regs[HPSB_INPUT_REG_ERROR_CODE] = 0u;
+
+    /* relay state = coil 0..3 (coil 3 may be reserved/not wired on some boards) */
+    input_regs[HPSB_INPUT_REG_RELAY1_STATE] = (uint16_t)IO_HPSB_ReadCoil(0);
+    input_regs[HPSB_INPUT_REG_RELAY2_STATE] = (uint16_t)IO_HPSB_ReadCoil(1);
+    input_regs[HPSB_INPUT_REG_RELAY3_STATE] = (uint16_t)IO_HPSB_ReadCoil(2);
+    input_regs[HPSB_INPUT_REG_RELAY4_STATE] = (uint16_t)IO_HPSB_ReadCoil(3);
+
+    /* ADC AVG/PKPK */
+    input_regs[HPSB_INPUT_REG_ADC1_AVG] = avg[0];
+    input_regs[HPSB_INPUT_REG_ADC2_AVG] = avg[1];
+    input_regs[HPSB_INPUT_REG_ADC3_AVG] = avg[2];
+    input_regs[HPSB_INPUT_REG_ADC1_PKPK] = pkpk[0];
+    input_regs[HPSB_INPUT_REG_ADC2_PKPK] = pkpk[1];
+    input_regs[HPSB_INPUT_REG_ADC3_PKPK] = pkpk[2];
+
+    /* Current states */
+    input_regs[HPSB_INPUT_REG_CUR1_STATE] = cur_on[0];
+    input_regs[HPSB_INPUT_REG_CUR2_STATE] = cur_on[1];
+    input_regs[HPSB_INPUT_REG_CUR3_STATE] = cur_on[2];
+
+    /* reserve */
+    input_regs[HPSB_INPUT_REG_RESERVED_15] = 0u;
 }

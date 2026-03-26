@@ -1,7 +1,7 @@
 /**
  ******************************************************************************
  * @file    modbus_slave.h
- * @brief   LPSB Modbus RTU Slave. FC03(Read Holding), FC01(Read Coils), FC05(Write Single Coil).
+ * @brief   LPSB Modbus RTU Slave. FC04(Read Input Regs), FC05(Write Single Coil).
  ******************************************************************************
  */
 #ifndef MODBUS_SLAVE_H
@@ -13,10 +13,10 @@ extern "C" {
 
 #include <stdint.h>
 
-/** UART에서 1바이트 수신 시 호출. (HAL_UART_RxCpltCallback에서 호출) */
-void Modbus_PushByte(uint8_t b);
+/** 초기화: RX 모드 설정 + HAL_UART_Receive_IT 시작. main()에서 1회 호출. */
+void Modbus_Init(void);
 
-/** 메인 루프에서 주기 호출. 3.5 char idle 경과 시 프레임 처리 후 응답 전송. */
+/** 메인 루프에서 주기 호출. FRAME_SILENCE_MS 경과 시 프레임 처리 후 응답 전송. */
 void Modbus_Poll(void);
 
 /** 수신 프레임 버퍼 크기 */

@@ -16,7 +16,7 @@ extern "C" {
 #define COIL_COUNT           8
 #define DISCRETE_COUNT       8
 #define HOLDING_REG_COUNT    4
-#define INPUT_REG_COUNT     10
+#define INPUT_REG_COUNT     16
 
 #define COIL_START           0
 #define DISCRETE_START       0
@@ -55,18 +55,24 @@ typedef enum {
     HPSB_HOLDING_RESERVED_3 = 3
 } HpsbHoldingRegIdx_t;
 
-/* Input register indices (3x): Reg0=DI image; 1..3=AVG; 4..6=PKPK; 7..9=CURRENT 0/1 */
+/* Input register indices (3x / FC04 Input Register): Unified Rule v1.1 (0-based) */
 typedef enum {
-    HPSB_INPUT_REG_DISCRETE_IMAGE = 0,
-    HPSB_INPUT_REG_CT_CH1_AVG = 1,
-    HPSB_INPUT_REG_CT_CH2_AVG = 2,
-    HPSB_INPUT_REG_CT_CH3_AVG = 3,
-    HPSB_INPUT_REG_CT_CH1_PKPK = 4,
-    HPSB_INPUT_REG_CT_CH2_PKPK = 5,
-    HPSB_INPUT_REG_CT_CH3_PKPK = 6,
-    HPSB_INPUT_REG_CT_CH1_CURRENT = 7,
-    HPSB_INPUT_REG_CT_CH2_CURRENT = 8,
-    HPSB_INPUT_REG_CT_CH3_CURRENT = 9
+    HPSB_INPUT_REG_ALIVE_STATUS = 0,  /* reg0  alive/status (1=normal) */
+    HPSB_INPUT_REG_ERROR_CODE   = 1,  /* reg1  error code */
+    HPSB_INPUT_REG_RELAY1_STATE = 2,  /* reg2  relay1 state */
+    HPSB_INPUT_REG_RELAY2_STATE = 3,  /* reg3  relay2 state */
+    HPSB_INPUT_REG_RELAY3_STATE = 4,  /* reg4  relay3 state */
+    HPSB_INPUT_REG_RELAY4_STATE = 5,  /* reg5  relay4 state */
+    HPSB_INPUT_REG_ADC1_AVG     = 6,  /* reg6  ADC1 AVG */
+    HPSB_INPUT_REG_ADC2_AVG     = 7,  /* reg7  ADC2 AVG */
+    HPSB_INPUT_REG_ADC3_AVG     = 8,  /* reg8  ADC3 AVG */
+    HPSB_INPUT_REG_ADC1_PKPK    = 9,  /* reg9  ADC1 PKPK */
+    HPSB_INPUT_REG_ADC2_PKPK    = 10, /* reg10 ADC2 PKPK */
+    HPSB_INPUT_REG_ADC3_PKPK    = 11, /* reg11 ADC3 PKPK */
+    HPSB_INPUT_REG_CUR1_STATE   = 12, /* reg12 Current1 state */
+    HPSB_INPUT_REG_CUR2_STATE   = 13, /* reg13 Current2 state */
+    HPSB_INPUT_REG_CUR3_STATE   = 14, /* reg14 Current3 state */
+    HPSB_INPUT_REG_RESERVED_15  = 15  /* reg15 reserve */
 } HpsbInputRegIdx_t;
 
 uint8_t IO_HPSB_ReadDiscrete(uint16_t idx);

@@ -11,7 +11,6 @@ static uint8_t  s_slave_id = 2;
 static uint8_t  s_ssr[3] = {0, 0, 0};
 static uint16_t s_heartbeat = 0;
 static uint32_t s_heartbeat_tick = 0;
-static uint32_t s_led04_blink_tick = 0;
 
 static GPIO_TypeDef *const SSR_Port[] = { SSR1_EN_GPIO_Port, SSR2_EN_GPIO_Port, SSR3_EN_GPIO_Port };
 static uint16_t const SSR_Pin[]       = { SSR1_EN_Pin,       SSR2_EN_Pin,       SSR3_EN_Pin       };
@@ -35,24 +34,16 @@ void LPSB_LED_Sequence(void)
   HAL_GPIO_WritePin(LED04_GPIO_Port, LED04_Pin, GPIO_PIN_SET);
 }
 
-void LPSB_LED_RxBlink(void)
-{
-  HAL_GPIO_WritePin(LED04_GPIO_Port, LED04_Pin, GPIO_PIN_RESET);
-  s_led04_blink_tick = HAL_GetTick();
-}
+/* LED4 는 rs485_drv.c 의 RS485_ActivityTick() 이 일괄 관리하므로 no-op */
+void LPSB_LED_RxBlink(void) { }
 
 void LPSB_Heartbeat(void)
 {
-  uint32_t now = HAL_GetTick();
-  if (now - s_led04_blink_tick < 80u)
-    return;
-  if (now - s_heartbeat_tick >= 500u)
-  {
-    s_heartbeat_tick = now;
-    s_heartbeat++;
-    /* 이전에는 여기서 LED01을 heartbeat 용으로 토글했지만,
-       이제 LED01~3은 SSR 상태 표시 전용으로 사용하므로 토글을 제거한다. */
-  }
+    uint32_t now = HAL_GetTick();
+    if (now - s_heartbeat_tick >= 500u) {
+        s_heartbeat_tick = now;
+        s_heartbeat++;
+    }
 }
 
 void LPSB_SSR_Set(uint8_t ch, uint8_t on)

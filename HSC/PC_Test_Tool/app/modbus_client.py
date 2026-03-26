@@ -111,6 +111,7 @@ class ModbusClient:
         self._response_logger: Callable[[bool, int | None], None] | None = None
         self._tx_frame_hex_logger: Callable[[str], None] | None = None
         self._raw_exception_logger: Callable[[str], None] | None = None
+        self._last_sub_raw: dict | None = None
 
     def set_raw_exception_logger(self, callback: Callable[[str], None] | None):
         """Set callback(msg) for serial raw-read exceptions (UI immediate debug)."""
@@ -169,8 +170,10 @@ class ModbusClient:
                     bytesize=8,
                     parity="N",
                     stopbits=1,
-                    timeout=0.6,
-                    retries=0,
+                    # FC04 응답(최대 16regs=37B) 기준 여유 타임아웃.
+                    # OUTPUT_MONITORING 중 간헐 지연을 흡수하기 위해 2.0s로 설정.
+                    timeout=2.0,
+                    retries=1,
                 )
                 # pymodbus connect()는 실패 원인을 숨기는 경우가 있어,
                 # 동일 파라미터로 pyserial을 먼저 열어 예외 메시지를 보존한다.
@@ -236,8 +239,8 @@ class ModbusClient:
                 bytesize=8,
                 parity="N",
                 stopbits=1,
-                timeout=0.6,
-                retries=0,
+                timeout=1.2,
+                retries=1,
             )
             if not self._client.connect():
                 self._client = old
@@ -342,26 +345,27 @@ class ModbusClient:
             return out
 
     def read_di_bitmap(self) -> tuple[bool, list[int] | None, str | None]:
-        """FC03 read MAIN_DI_REG count=1 → 8 bits DI_01..DI_08. Returns (ok, bits[8] or None, err)."""
+        """Unified Rule: Mainboard DI bitmap via FC04 mainboard reg2..9 (8 bits)."""
         with self._lock:
             ok, err = self._ensure_socket_open()
             if not ok:
                 return False, None, err or "Not connected"
-            if self._request_logger:
-                self._request_logger(self._slave_id, "FC03", MAIN_DI_REG, 2)
+            # FC04 mainboard map: reg2..9 = DI1..DI8 (0/1)
             try:
-                rr = self._client.read_holding_registers(
-                    address=MAIN_DI_REG,
-                    count=2,
+                if self._request_logger:
+                    self._request_logger(self._slave_id, "FC04", 0, 14)
+                rr = self._client.read_input_registers(
+                    address=0,
+                    count=14,
                     unit=self._slave_id,
                 )
                 if self._response_logger:
                     self._response_logger(not rr.isError(), _response_exception_code(rr))
                 if rr.isError():
                     return False, None, format_modbus_error(resp=rr)
-                regs = list(rr.registers) if rr.registers else [0, 0]
-                di_val = regs[0] if len(regs) > 0 else 0
-                bits = [(di_val >> i) & 1 for i in range(MAIN_DI_COUNT)]
+                regs = list(rr.registers) if rr.registers else [0] * 14
+                regs = (regs + [0] * 14)[:14]
+                bits = [1 if regs[2 + i] else 0 for i in range(MAIN_DI_COUNT)]
                 return True, bits, None
             except Exception as e:
                 if self._response_logger:
@@ -369,16 +373,16 @@ class ModbusClient:
                 return False, None, format_modbus_error(exc=e)
 
     def read_pc_led_in(self) -> tuple[bool, bool | None, str | None]:
-        """FC03 read PC_LED_IN_REG count=1 → bit0 = PC_LED_IN. Returns (ok, state or None, err)."""
+        """Unified Rule: Mainboard PC_LED_IN via FC04 mainboard map reg10 (addr=10, count=1)."""
         with self._lock:
             ok, err = self._ensure_socket_open()
             if not ok:
                 return False, None, err or "Not connected"
-            if self._request_logger:
-                self._request_logger(self._slave_id, "FC03", PC_LED_IN_REG, 1)
             try:
-                rr = self._client.read_holding_registers(
-                    address=PC_LED_IN_REG,
+                if self._request_logger:
+                    self._request_logger(self._slave_id, "FC04", 10, 1)
+                rr = self._client.read_input_registers(
+                    address=10,
                     count=1,
                     unit=self._slave_id,
                 )
@@ -394,43 +398,52 @@ class ModbusClient:
                     self._response_logger(False, None)
                 return False, None, format_modbus_error(exc=e)
 
-    def read_env_shtc3(self) -> tuple[bool, tuple[float, float] | None, str | None]:
-        """FC03 read MAIN_ENV_REG count=3 → (temp_c, rh_pct, error_flags). Returns (ok, (t,rh,flags) or None, err)."""
+    def read_env_shtc3(self) -> tuple[bool, tuple[float, float, int] | None, str | None]:
+        """Env Sensor(SHTC3) via Mainboard FC04 local map.
+        - FC04 addr=0 count=14 응답에서 reg12=temp_c_x10(s16), reg13=rh_x10(u16)로 제공.
+        - 센서 에러/미연결은 보드가 -32768 / 0xFFFF로 채움. 이 경우도 통신 성공으로 처리한다.
+        Returns (ok, (temp_c, rh_pct, flags_u16), err).
+        """
         with self._lock:
             ok, err = self._ensure_socket_open()
             if not ok:
                 return False, None, err or "Not connected"
-            if self._request_logger:
-                self._request_logger(self._slave_id, "FC03", MAIN_ENV_REG, MAIN_ENV_COUNT)
             try:
-                rr = self._client.read_holding_registers(
-                    address=MAIN_ENV_REG,
-                    count=MAIN_ENV_COUNT,
+                if self._request_logger:
+                    self._request_logger(self._slave_id, "FC04", 0, 14)
+                rr = self._client.read_input_registers(
+                    address=0,
+                    count=14,
                     unit=self._slave_id,
                 )
                 if self._response_logger:
                     self._response_logger(not rr.isError(), _response_exception_code(rr))
                 if rr.isError():
                     return False, None, format_modbus_error(resp=rr)
-                regs = list(rr.registers) if rr.registers else [0, 0, 0]
-                if len(regs) < 3:
-                    regs = (regs + [0, 0, 0])[:3]
-                raw_t = regs[0] & 0xFFFF
-                # signed int16
-                if raw_t & 0x8000:
-                    raw_t = raw_t - 0x10000
-                raw_rh = regs[1] & 0xFFFF
-                flags = regs[2] & 0xFFFF
-                temp_c = float(raw_t) / 10.0
-                rh_pct = float(raw_rh) / 10.0
-                return True, (temp_c, rh_pct, flags), None
+                regs = list(rr.registers) if rr.registers else [0] * 14
+                regs = (regs + [0] * 14)[:14]
+
+                # flags from reg1 (u16)
+                flags = int(regs[1]) & 0xFFFF
+
+                # temp reg12 is signed 16-bit (cx10)
+                t_raw = int(regs[12]) & 0xFFFF
+                if t_raw & 0x8000:
+                    t_raw -= 0x10000
+                rh_raw = int(regs[13]) & 0xFFFF
+
+                # Sentinel: -32768 / 0xFFFF -> N/A
+                if t_raw == -32768 or rh_raw == 0xFFFF:
+                    return True, (-3276.8, 6553.5, flags), None
+
+                return True, (t_raw / 10.0, rh_raw / 10.0, flags), None
             except Exception as e:
                 if self._response_logger:
                     self._response_logger(False, None)
                 return False, None, format_modbus_error(exc=e)
 
     def write_relay(self, ch: int, onoff: bool) -> tuple[bool, str | None]:
-        """Set one relay (ch 0..3). Read current DO bitmap, set bit ch, FC06 write. Returns (ok, err)."""
+        """Unified Rule: Mainboard FC05 coil0..3 = Relay1..4 state."""
         if ch < 0 or ch >= MAIN_DO_COUNT:
             return False, "Invalid relay index 0..3"
         with self._lock:
@@ -439,27 +452,10 @@ class ModbusClient:
                 return False, err or "Not connected"
             try:
                 if self._request_logger:
-                    self._request_logger(self._slave_id, "FC03", MAIN_DI_REG, 2)
-                rr = self._client.read_holding_registers(
-                    address=MAIN_DI_REG,
-                    count=2,
-                    unit=self._slave_id,
-                )
-                if self._response_logger:
-                    self._response_logger(not rr.isError(), _response_exception_code(rr))
-                if rr.isError():
-                    return False, format_modbus_error(resp=rr)
-                regs = list(rr.registers) if rr.registers else [0, 0]
-                do_val = regs[1] & 0x0F if len(regs) > 1 else 0
-                if onoff:
-                    do_val |= 1 << ch
-                else:
-                    do_val &= ~(1 << ch)
-                if self._request_logger:
-                    self._request_logger(self._slave_id, "FC06", MAIN_DO_REG, do_val)
-                wr = self._client.write_register(
-                    address=MAIN_DO_REG,
-                    value=do_val,
+                    self._request_logger(self._slave_id, "FC05", ch, 1 if onoff else 0)
+                wr = self._client.write_coil(
+                    address=ch,
+                    value=onoff,
                     unit=self._slave_id,
                 )
                 if self._response_logger:
@@ -473,107 +469,159 @@ class ModbusClient:
                 return False, format_modbus_error(exc=e)
 
     def write_pc_on_en(self, onoff: bool) -> tuple[bool, str | None]:
-        """FC06 write PC_ON_EN_REG (2120): value=1 → 100ms pulse, 0 → LOW. Returns (ok, err)."""
-        return self._write_pc_reg(PC_ON_EN_REG, 1 if onoff else 0)
+        """Unified Rule: Mainboard FC05 coil4 = PC_ON (value=True -> pulse)."""
+        return self.write_single_coil(4, onoff, unit=None)
 
     def write_pc_reset_en(self, onoff: bool) -> tuple[bool, str | None]:
-        """FC06 write PC_RESET_EN_REG (2121): value=1 → 100ms pulse, 0 → LOW. Returns (ok, err)."""
-        return self._write_pc_reg(PC_RESET_EN_REG, 1 if onoff else 0)
+        """Unified Rule: Mainboard FC05 coil6 = RESET (value=True -> pulse)."""
+        return self.write_single_coil(6, onoff, unit=None)
 
     def read_sub_sense(self) -> tuple[bool, list[int] | None, str | None]:
-        """FC03 read SUB_SENSE_REG count=40 → HPSB/LPSB×3 각 AVG[3],PKPK[3],CUR[3] + reserved[4]."""
+        """Unified Rule: Mainboard routing 상태를 FC04로 읽어서 UI의 sense 레이아웃(길이=SUB_SENSE_COUNT=40)에 맞춰 변환."""
         with self._lock:
             ok, err = self._ensure_socket_open()
             if not ok:
                 return False, None, err or "Not connected"
-            if self._request_logger:
-                self._request_logger(self._slave_id, "FC03", SUB_SENSE_REG, SUB_SENSE_COUNT)
             try:
-                rr = self._client.read_holding_registers(
-                    address=SUB_SENSE_REG,
-                    count=SUB_SENSE_COUNT,
-                    unit=self._slave_id,
-                )
-                if self._response_logger:
-                    self._response_logger(not rr.isError(), _response_exception_code(rr))
-                if rr.isError():
-                    return False, None, format_modbus_error(resp=rr)
-                regs = list(rr.registers) if rr.registers else []
-                regs = (regs + [0] * SUB_SENSE_COUNT)[:SUB_SENSE_COUNT]
-                return True, [r & 0xFFFF for r in regs], None
+                # Mainboard FC04 read blocks:
+                # - HPSB copy: 100..115 (v1.1: 16 regs)
+                # - LPSB1 copy: 200..213
+                # - LPSB2 copy: 300..313
+                # - LPSB3 copy: 400..413
+                def rd(addr: int, count: int) -> list[int]:
+                    if self._request_logger:
+                        self._request_logger(self._slave_id, "FC04", addr, count)
+                    r = self._client.read_input_registers(address=addr, count=count, unit=self._slave_id)
+                    if self._response_logger:
+                        self._response_logger(not r.isError(), _response_exception_code(r))
+                    if r.isError():
+                        raise RuntimeError(format_modbus_error(resp=r))
+                    out = list(r.registers) if r.registers else []
+                    out = (out + [0] * count)[:count]
+                    return [x & 0xFFFF for x in out]
+
+                hpsb_regs = rd(100, 16)
+                lpsb1_regs = rd(200, 14)
+                lpsb2_regs = rd(300, 14)
+                lpsb3_regs = rd(400, 14)
+                # raw dump용: worker/UI에서 그대로 표시할 수 있도록 보관 (lock 내부)
+                self._last_sub_raw = {
+                    "hpsb_100_115": list(hpsb_regs),
+                    "lpsb1_200_213": list(lpsb1_regs),
+                    "lpsb2_300_313": list(lpsb2_regs),
+                    "lpsb3_400_413": list(lpsb3_regs),
+                }
+
+                sense = [0] * SUB_SENSE_COUNT
+
+                # HPSB v1.1: AVG(reg6..8), PKPK(reg9..11), CUR(reg12..14)
+                sense[0] = hpsb_regs[6]
+                sense[1] = hpsb_regs[7]
+                sense[2] = hpsb_regs[8]
+                sense[3] = hpsb_regs[9]
+                sense[4] = hpsb_regs[10]
+                sense[5] = hpsb_regs[11]
+                sense[6] = hpsb_regs[12]
+                sense[7] = hpsb_regs[13]
+                sense[8] = hpsb_regs[14]
+
+                # LPSB blocks: old layout maps cleanly
+                # AVG -> reg5..7, PKPK -> reg8..10, CUR -> reg11..13
+                def fill_lpsb(base: int, regs: list[int]):
+                    for ch in range(3):
+                        sense[base + ch] = regs[5 + ch]
+                        sense[base + 3 + ch] = regs[8 + ch]
+                        sense[base + 6 + ch] = regs[11 + ch]
+
+                fill_lpsb(9, lpsb1_regs)
+                fill_lpsb(18, lpsb2_regs)
+                fill_lpsb(27, lpsb3_regs)
+
+                return True, sense, None
             except Exception as e:
                 if self._response_logger:
                     self._response_logger(False, None)
                 return False, None, format_modbus_error(exc=e)
 
+    def get_last_sub_raw_copy(self) -> dict | None:
+        """최근 read_sub_sense()에서 읽은 raw 블록을 복사해 반환."""
+        with self._lock:
+            if not self._last_sub_raw:
+                return None
+            try:
+                return {k: list(v) for k, v in self._last_sub_raw.items()}
+            except Exception:
+                return None
+
     def read_sub_coil_status(self) -> tuple[bool, list[bool] | None, str | None]:
-        """FC02 read discrete SUB_COIL_STATUS_START count=14 → ONOFF_3..14. Returns (ok, bits or None, err)."""
+        """Unified Rule: Mainboard routing 상태를 FC04에서 읽어 coils 레이아웃(길이 14)에 맞춰 변환."""
         with self._lock:
             ok, err = self._ensure_socket_open()
             if not ok:
                 return False, None, err or "Not connected"
-            if self._request_logger:
-                self._request_logger(self._slave_id, "FC02", SUB_COIL_STATUS_START, SUB_COIL_STATUS_COUNT)
             try:
-                rr = self._client.read_discrete_inputs(
-                    address=SUB_COIL_STATUS_START,
-                    count=SUB_COIL_STATUS_COUNT,
-                    unit=self._slave_id,
-                )
-                if self._response_logger:
-                    self._response_logger(not rr.isError(), _response_exception_code(rr))
-                if rr.isError():
-                    return False, None, format_modbus_error(resp=rr)
-                bits = list(rr.bits) if rr.bits else []
-                bits = (bits + [False] * SUB_COIL_STATUS_COUNT)[:SUB_COIL_STATUS_COUNT]
-                return True, [bool(b) for b in bits], None
+                def rd(addr: int, count: int) -> list[int]:
+                    if self._request_logger:
+                        self._request_logger(self._slave_id, "FC04", addr, count)
+                    r = self._client.read_input_registers(address=addr, count=count, unit=self._slave_id)
+                    if self._response_logger:
+                        self._response_logger(not r.isError(), _response_exception_code(r))
+                    if r.isError():
+                        raise RuntimeError(format_modbus_error(resp=r))
+                    out = list(r.registers) if r.registers else []
+                    out = (out + [0] * count)[:count]
+                    return [x & 0xFFFF for x in out]
+
+                hpsb_regs = rd(100, 16)
+                lpsb1_regs = rd(200, 14)
+                lpsb2_regs = rd(300, 14)
+                lpsb3_regs = rd(400, 14)
+
+                coils = [False] * 14
+                # HPSB: reg2..4 = relay1..3 (UI는 3채널만 표시)
+                coils[0] = bool(hpsb_regs[2])
+                coils[1] = bool(hpsb_regs[3])
+                coils[2] = bool(hpsb_regs[4])
+                # LPSB1/2/3: reg2..4 = SSR1..3
+                coils[3] = bool(lpsb1_regs[2])
+                coils[4] = bool(lpsb1_regs[3])
+                coils[5] = bool(lpsb1_regs[4])
+                coils[6] = bool(lpsb2_regs[2])
+                coils[7] = bool(lpsb2_regs[3])
+                coils[8] = bool(lpsb2_regs[4])
+                coils[9] = bool(lpsb3_regs[2])
+                coils[10] = bool(lpsb3_regs[3])
+                coils[11] = bool(lpsb3_regs[4])
+
+                return True, coils, None
             except Exception as e:
                 if self._response_logger:
                     self._response_logger(False, None)
                 return False, None, format_modbus_error(exc=e)
 
     def read_sub_alarms(self) -> tuple[bool, list[bool] | None, str | None]:
-        """FC02 read discrete SUB_ALARM_START count=12 → ALM_1..12. Returns (ok, bits or None, err)."""
-        with self._lock:
-            ok, err = self._ensure_socket_open()
-            if not ok:
-                return False, None, err or "Not connected"
-            if self._request_logger:
-                self._request_logger(self._slave_id, "FC02", SUB_ALARM_START, SUB_ALARM_COUNT)
-            try:
-                rr = self._client.read_discrete_inputs(
-                    address=SUB_ALARM_START,
-                    count=SUB_ALARM_COUNT,
-                    unit=self._slave_id,
-                )
-                if self._response_logger:
-                    self._response_logger(not rr.isError(), _response_exception_code(rr))
-                if rr.isError():
-                    return False, None, format_modbus_error(resp=rr)
-                bits = list(rr.bits) if rr.bits else []
-                bits = (bits + [False] * SUB_ALARM_COUNT)[:SUB_ALARM_COUNT]
-                return True, [bool(b) for b in bits], None
-            except Exception as e:
-                if self._response_logger:
-                    self._response_logger(False, None)
-                return False, None, format_modbus_error(exc=e)
+        """FC02 not allowed per Unified Rule v1.2 (FC04 read only). Always returns error."""
+        return False, None, "FC02 not allowed (Unified Rule v1.2: FC04 read only)"
 
     def read_error_flags(self) -> tuple[bool, int | None, str | None]:
-        """FC03 read env block; return error_flags (bit0=HPSB comm, bit1=LPSB comm). Returns (ok, flags or None, err)."""
+        """Unified Rule: Mainboard error_flags via FC04 mainboard reg1."""
         with self._lock:
             ok, err = self._ensure_socket_open()
             if not ok:
                 return False, None, err or "Not connected"
             try:
-                rr = self._client.read_holding_registers(
-                    address=MAIN_ENV_REG,
-                    count=MAIN_ENV_COUNT,
+                if self._request_logger:
+                    self._request_logger(self._slave_id, "FC04", 0, 14)
+                rr = self._client.read_input_registers(
+                    address=0,
+                    count=14,
                     unit=self._slave_id,
                 )
                 if rr.isError():
                     return False, None, format_modbus_error(resp=rr)
-                regs = list(rr.registers) if rr.registers else [0, 0, 0]
-                flags = (regs[2] & 0xFFFF) if len(regs) > 2 else 0
+                regs = list(rr.registers) if rr.registers else [0] * 14
+                regs = (regs + [0] * 14)[:14]
+                flags = regs[1] & 0xFFFF
                 return True, flags, None
             except Exception as e:
                 return False, None, format_modbus_error(exc=e)
@@ -604,75 +652,21 @@ class ModbusClient:
     def read_holding_registers_direct(
         self, slave_id: int, start: int, count: int
     ) -> tuple[bool, list[int] | str]:
-        """FC03 read holding registers from given slave (e.g. LPSB slave_id=2).
-        Returns (True, list of register values) or (False, error_string)."""
-        with self._lock:
-            ok, err = self._ensure_socket_open()
-            if not ok:
-                return False, err or "Not connected"
-            try:
-                if self._request_logger:
-                    self._request_logger(slave_id, "FC03", start, count)
-                rr = self._client.read_holding_registers(
-                    address=start,
-                    count=count,
-                    unit=slave_id,
-                )
-                if self._response_logger:
-                    self._response_logger(not rr.isError(), _response_exception_code(rr))
-                if rr.isError():
-                    return False, format_modbus_error(resp=rr)
-                regs = list(rr.registers) if rr.registers else []
-                return True, regs
-            except Exception as e:
-                if self._response_logger:
-                    self._response_logger(False, None)
-                return False, format_modbus_error(exc=e)
+        """FC03 not allowed per Unified Rule v1.2 (FC04 read only). Use read_input_registers instead."""
+        del slave_id, start, count
+        return False, "FC03 not allowed (Unified Rule v1.2: use FC04 read_input_registers)"
 
-    # ---- Generic H2Tech tests (Mainboard only) ----
+    # ---- Generic test helpers (Mainboard only) ----
+    # Unified Rule v1.2: FC01/FC02/FC03 금지. read_coils/read_discrete_inputs는 항상 에러 반환.
     def read_coils(self, start: int, count: int, unit: int | None = None) -> tuple[bool, list[bool] | None, str | None]:
-        with self._lock:
-            ok, err = self._ensure_socket_open()
-            if not ok:
-                return False, None, err or "Not connected"
-            u = self._slave_id if unit is None else unit
-            try:
-                if self._request_logger:
-                    self._request_logger(u, "FC01", start, count)
-                rr = self._client.read_coils(address=start, count=count, unit=u)
-                if self._response_logger:
-                    self._response_logger(not rr.isError(), _response_exception_code(rr))
-                if rr.isError():
-                    return False, None, format_modbus_error(resp=rr)
-                bits = list(rr.bits) if rr.bits else []
-                bits = (bits + [False] * count)[:count]
-                return True, [bool(b) for b in bits], None
-            except Exception as e:
-                if self._response_logger:
-                    self._response_logger(False, None)
-                return False, None, format_modbus_error(exc=e)
+        """FC01 not allowed per Unified Rule v1.2 (FC04 read only)."""
+        del start, count, unit
+        return False, None, "FC01 not allowed (Unified Rule v1.2: FC04 read only)"
 
     def read_discrete_inputs(self, start: int, count: int, unit: int | None = None) -> tuple[bool, list[bool] | None, str | None]:
-        with self._lock:
-            ok, err = self._ensure_socket_open()
-            if not ok:
-                return False, None, err or "Not connected"
-            u = self._slave_id if unit is None else unit
-            try:
-                if self._request_logger:
-                    self._request_logger(u, "FC02", start, count)
-                rr = self._client.read_discrete_inputs(address=start, count=count, unit=u)
-                if self._response_logger:
-                    self._response_logger(not rr.isError(), _response_exception_code(rr))
-                if rr.isError():
-                    return False, None, format_modbus_error(resp=rr)
-                bits = list(rr.bits) if rr.bits else []
-                bits = (bits + [False] * count)[:count]
-                return True, [bool(b) for b in bits], None
-            except Exception as e:
-                if self._response_logger:
-                    self._response_logger(False, None)
-                return False, None, format_modbus_error(exc=e)
+        """FC02 not allowed per Unified Rule v1.2 (FC04 read only)."""
+        del start, count, unit
+        return False, None, "FC02 not allowed (Unified Rule v1.2: FC04 read only)"
 
     def read_input_registers(self, start: int, count: int, unit: int | None = None) -> tuple[bool, list[int] | None, str | None]:
         with self._lock:
@@ -718,24 +712,9 @@ class ModbusClient:
                 return False, format_modbus_error(exc=e)
 
     def write_multiple_coils(self, start: int, values: list[bool], unit: int | None = None) -> tuple[bool, str | None]:
-        with self._lock:
-            ok, err = self._ensure_socket_open()
-            if not ok:
-                return False, err or "Not connected"
-            u = self._slave_id if unit is None else unit
-            try:
-                if self._request_logger:
-                    self._request_logger(u, "FC15", start, len(values))
-                wr = self._client.write_coils(address=start, values=values, unit=u)
-                if self._response_logger:
-                    self._response_logger(not wr.isError(), _response_exception_code(wr))
-                if wr.isError():
-                    return False, format_modbus_error(resp=wr)
-                return True, None
-            except Exception as e:
-                if self._response_logger:
-                    self._response_logger(False, None)
-                return False, format_modbus_error(exc=e)
+        """FC15 not allowed per Unified Rule v1.2 (FC05 write only)."""
+        del start, values, unit
+        return False, "FC15 not allowed (Unified Rule v1.2: FC05 write only)"
 
     def write_coil_direct(self, slave_id: int, coil_addr: int, value: bool) -> tuple[bool, str | None]:
         """FC05 직접 전송 (메인보드 경유 없음). raw_only 연결이면 시리얼로 프레임만 전송."""
@@ -780,12 +759,9 @@ class ModbusClient:
                 return False, format_modbus_error(exc=e)
 
     def write_sub_coil(self, addr: int, value: bool) -> tuple[bool, str | None]:
-        """FC05 write single coil to Mainboard.
-        Returns: (True, None) on success, (False, error_message) on timeout/exception/invalid response.
-        addr 898..909 (HPSB 898-900, LPSB 901-909).
-        """
-        if addr < SUB_HPSB_COIL_BASE or addr >= SUB_HPSB_COIL_BASE + SUB_HPSB_COIL_COUNT + SUB_LPSB_COIL_COUNT:
-            return False, f"Addr {addr} out of range 898..909"
+        """Unified Rule: Mainboard FC05 coil write.
+        Unified addresses: coil0..3=Relay1..4, coil4=PC_ON, coil5=PC_OFF, coil6=RESET.
+        (Legacy addresses도 펌웨어가 유지하는 경우는 그대로 통과)"""
         with self._lock:
             ok, err = self._ensure_socket_open()
             if not ok:
@@ -806,24 +782,6 @@ class ModbusClient:
                 return False, format_modbus_error(exc=e)
 
     def _write_pc_reg(self, address: int, value: int) -> tuple[bool, str | None]:
-        with self._lock:
-            ok, err = self._ensure_socket_open()
-            if not ok:
-                return False, err or "Not connected"
-            try:
-                if self._request_logger:
-                    self._request_logger(self._slave_id, "FC06", address, value)
-                wr = self._client.write_register(
-                    address=address,
-                    value=value,
-                    unit=self._slave_id,
-                )
-                if self._response_logger:
-                    self._response_logger(not wr.isError(), _response_exception_code(wr))
-                if wr.isError():
-                    return False, format_modbus_error(resp=wr)
-                return True, None
-            except Exception as e:
-                if self._response_logger:
-                    self._response_logger(False, None)
-                return False, format_modbus_error(exc=e)
+        """FC06 not allowed per Unified Rule v1.2 (FC05 write only)."""
+        del address, value
+        return False, "FC06 not allowed (Unified Rule v1.2: FC05 write only)"

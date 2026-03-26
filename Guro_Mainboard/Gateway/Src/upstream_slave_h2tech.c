@@ -1,8 +1,9 @@
 /**
  * @file upstream_slave_h2tech.c
- * @brief Upstream Modbus Slave (PC link): H2TECH table-driven read/write.
- *        FC02: h2_dec = start_addr + 1, H2Map_FindByDec + H2Map_ReadAggBit, LSB-first.
- *        FC05/15: H2Map_ApplyWrite(entry, value, 300ms). Illegal address -> 0x02.
+ * @brief Upstream Modbus Slave (PC link): Unified Rule v1.2.
+ *        Read = FC04 only. Write = FC05 only.
+ *        FC01/FC02/FC03/FC06/FC15/FC16 → EX_ILLEGAL_FUNCTION.
+ *        Illegal address -> EX_ILLEGAL_DATA_ADDR(0x02).
  */
 #include "upstream_slave_h2tech.h"
 #include "h2tech_address_map.h"
@@ -15,6 +16,7 @@
 #include "system_config.h"
 #include "app_config.h"
 #include "modbus_table.h"
+#include "modbus_master.h"
 
 #define EX_ILLEGAL_FUNCTION  0x01
 #define EX_ILLEGAL_DATA_ADDR 0x02
@@ -50,7 +52,7 @@
 #define UPSTREAM_SYSCFG_REG_COUNT  3u
 /* FC04 input register diagnostics (service extension) */
 #define UPSTREAM_DIAG_IR_START      4000u
-#define UPSTREAM_DIAG_IR_COUNT      12u
+#define UPSTREAM_DIAG_IR_COUNT      32u
 
 static uint32_t baudrate_from_code(uint16_t code)
 {
@@ -92,7 +94,7 @@ static int h2_dec_to_sub_coil(uint16_t h2_dec, uint8_t *out_slave_id, uint16_t *
 }
 
 /* FC01 Read Coils: writable 1x 영역(0892~0910)을 coil 상태로 제공 */
-static int handle_fc01(uint16_t start_addr, uint16_t count, uint8_t *response, uint16_t resp_max)
+__attribute__((unused)) static int handle_fc01(uint16_t start_addr, uint16_t count, uint8_t *response, uint16_t resp_max)
 {
     uint16_t byte_count = (uint16_t)((count + 7u) / 8u);
     if (resp_max < (uint16_t)(2u + byte_count)) return -1;
@@ -127,7 +129,7 @@ static int handle_fc01(uint16_t start_addr, uint16_t count, uint8_t *response, u
 }
 
 /* FC02 Read Discrete Inputs: H2TECH 1x, h2_dec = start_addr + 1 + i */
-static int handle_fc02(uint16_t start_addr, uint16_t count, uint8_t *response, uint16_t resp_max)
+__attribute__((unused)) static int handle_fc02(uint16_t start_addr, uint16_t count, uint8_t *response, uint16_t resp_max)
 {
     const uint16_t byte_count = (uint16_t)((count + 7u) / 8u);
     if (resp_max < 2u + byte_count) return -1;
@@ -163,7 +165,7 @@ static int handle_fc02(uint16_t start_addr, uint16_t count, uint8_t *response, u
 /* FC03 Read Holding Registers: 4x2000..4x2027 = HPSB/LPSB AVG+PKPK+CURRENT (read-only).
  * Also 4x2100 count=2: MAIN DI bitmap (reg 2100), DO bitmap (reg 2101).
  * Policy: start=2000 count=40 or start=2100 count=2 ... */
-static int handle_fc03(uint16_t start_addr, uint16_t count, const void *p_agg,
+__attribute__((unused)) static int handle_fc03(uint16_t start_addr, uint16_t count, const void *p_agg,
                        uint8_t *response, uint16_t resp_max)
 {
     /* Reset flags: RCC->CSR snapshot (2 regs) */
@@ -363,44 +365,225 @@ static int handle_fc03(uint16_t start_addr, uint16_t count, const void *p_agg,
 static int handle_fc04(uint16_t start_addr, uint16_t count, const void *p_agg,
                        uint8_t *response, uint16_t resp_max)
 {
-    if (start_addr != UPSTREAM_DIAG_IR_START) {
+    const aggregated_status_t *agg = (const aggregated_status_t *)p_agg;
+
+    /* Unified Rule v1.1 FC04 map (0-based)
+     * - Mainboard: 0..13 (14 regs)
+     * - HPSB copy: 100..115 (16 regs: 0..15)
+     * - LPSB(2) copy: 200..213 (14 regs: 0..13)
+     * - LPSB(4) copy: 300..313 (14 regs: 0..13)
+     * - LPSB(8) copy: 400..413 (14 regs: 0..13)
+     */
+    enum { MAP_MAIN_SIZE = 14u, MAP_HPSB_SIZE = 16u, MAP_LPSB_SIZE = 14u, MAP_MAX_SIZE = 16u };
+    uint16_t base = 0xFFFFu;
+    enum { MAP_MAIN, MAP_HPSB, MAP_LPSB2, MAP_LPSB4, MAP_LPSB8 } which = MAP_MAIN;
+
+    if (start_addr == UPSTREAM_DIAG_IR_START) {
+        /* Legacy diagnostic extension remains supported at 4000.. */
+        if (count == 0u || count > UPSTREAM_DIAG_IR_COUNT) {
+            response[0] = 0x84;
+            response[1] = EX_ILLEGAL_DATA_VAL;
+            return 2;
+        }
+        if (resp_max < (uint16_t)(2u + count * 2u)) return -1;
+
+        uint16_t regs[UPSTREAM_DIAG_IR_COUNT] = {0};
+        regs[0] = (agg && agg->error_flags == 0u) ? 0u : 1u; /* main status code */
+        regs[1] = (agg && !(agg->error_flags & AGG_ERR_COMM_HPSB)) ? 1u : 0u; /* hpsb online */
+        regs[2] = (agg && !(agg->error_flags & AGG_ERR_COMM_LPSB)) ? 1u : 0u; /* lpsb online(any) */
+        regs[3] = agg ? agg->hpsb_status_reg : 0u;
+        regs[4] = agg ? agg->lpsb1_alarm_reg : 0u;
+        regs[5] = agg ? agg->lpsb1_sense_raw[0] : 0u;
+        regs[6] = agg ? agg->lpsb1_sense_raw[1] : 0u;
+        regs[7] = agg ? agg->lpsb1_sense_raw[2] : 0u;
+        regs[8] = agg ? agg->error_flags : 0u;
+        /* UART2 ORE(overrun) counter: non-zero이면 하위 응답 바이트를 놓치고 있을 가능성이 큼 */
+        regs[9] = (uint16_t)(ModbusMaster_GetUart2OreCount() & 0xFFFFu);
+        regs[10] = IO_Main_ReadDI_Bitmap();
+        regs[11] = IO_Main_ReadDO_Bitmap();
+        /* Last sub-bus failure reason (ModbusMaster) */
+        {
+            uint8_t sid = 0u, fc = 0u;
+            ModbusSubFailReason_t r = MODBUS_SUB_FAIL_NONE;
+            uint16_t len = 0u;
+            ModbusMaster_GetLastSubFail(&sid, &fc, &r, &len);
+            regs[12] = (uint16_t)sid;
+            regs[13] = (uint16_t)fc;
+            regs[14] = (uint16_t)r;
+            regs[15] = (uint16_t)len;
+        }
+
+        /* Per-slave sub-bus failure table (HPSB=1, LPSB=2/4/8) */
+        {
+            const SlaveId_t sids[4] = { SLAVE_ID_HPSB, SLAVE_ID_LPSB1, SLAVE_ID_LPSB2, SLAVE_ID_LPSB3 };
+            uint16_t w = 16u;
+            for (uint16_t i = 0u; i < 4u; i++) {
+                uint8_t fc = 0u;
+                ModbusSubFailReason_t r = MODBUS_SUB_FAIL_NONE;
+                uint16_t len = 0u;
+                ModbusMaster_GetSubFailForSlave(sids[i], &fc, &r, &len);
+                regs[w++] = (uint16_t)((uint8_t)sids[i]); /* slave id */
+                regs[w++] = (uint16_t)fc;                /* fc */
+                regs[w++] = (uint16_t)r;                 /* reason */
+                regs[w++] = (uint16_t)len;               /* rx_len */
+            }
+        }
+
+        response[0] = 0x04;
+        response[1] = (uint8_t)(count * 2u);
+        for (uint16_t i = 0; i < count; i++) {
+            response[2u + i * 2u] = (uint8_t)(regs[i] >> 8);
+            response[2u + i * 2u + 1u] = (uint8_t)(regs[i] & 0xFFu);
+        }
+        return (int)(2u + count * 2u);
+    }
+
+    if (start_addr < MAP_MAIN_SIZE) {
+        base = 0u;
+        which = MAP_MAIN;
+        /* Mainboard 자체 데이터: downstream poll 불필요 */
+    } else if (start_addr >= 100u && start_addr < 116u) {
+        base = 100u;
+        which = MAP_HPSB;
+        /* PC가 HPSB 데이터를 요청 → 다음 poll 주기에 HPSB를 1회 읽도록 요청 */
+        ModbusMaster_RequestOnDemandPoll((uint16_t)SLAVE_ID_HPSB);
+    } else if (start_addr >= 200u && start_addr < 214u) {
+        base = 200u;
+        which = MAP_LPSB2;
+        ModbusMaster_RequestOnDemandPoll((uint16_t)SLAVE_ID_LPSB1);
+    } else if (start_addr >= 300u && start_addr < 314u) {
+        base = 300u;
+        which = MAP_LPSB4;
+        ModbusMaster_RequestOnDemandPoll((uint16_t)SLAVE_ID_LPSB2);
+    } else if (start_addr >= 400u && start_addr < 414u) {
+        base = 400u;
+        which = MAP_LPSB8;
+        ModbusMaster_RequestOnDemandPoll((uint16_t)SLAVE_ID_LPSB3);
+    } else {
         response[0] = 0x84;
         response[1] = EX_ILLEGAL_DATA_ADDR;
         return 2;
     }
-    if (count == 0u || count > UPSTREAM_DIAG_IR_COUNT) {
+
+    uint16_t map_size = MAP_MAIN_SIZE;
+    if (which == MAP_HPSB) map_size = MAP_HPSB_SIZE;
+    else if (which == MAP_LPSB2 || which == MAP_LPSB4 || which == MAP_LPSB8) map_size = MAP_LPSB_SIZE;
+
+    if (count == 0u || count > map_size) {
         response[0] = 0x84;
         response[1] = EX_ILLEGAL_DATA_VAL;
         return 2;
     }
+
+    uint16_t offset = (uint16_t)(start_addr - base);
+    if ((uint16_t)(offset + count) > map_size) {
+        response[0] = 0x84;
+        response[1] = EX_ILLEGAL_DATA_ADDR;
+        return 2;
+    }
+
     if (resp_max < (uint16_t)(2u + count * 2u)) return -1;
 
-    const aggregated_status_t *agg = (const aggregated_status_t *)p_agg;
-    uint16_t regs[UPSTREAM_DIAG_IR_COUNT] = {0};
-    regs[0] = (agg && agg->error_flags == 0u) ? 0u : 1u; /* main status code */
-    regs[1] = (agg && !(agg->error_flags & AGG_ERR_COMM_HPSB)) ? 1u : 0u; /* hpsb online */
-    regs[2] = (agg && !(agg->error_flags & AGG_ERR_COMM_LPSB)) ? 1u : 0u; /* lpsb online(any) */
-    regs[3] = agg ? agg->hpsb_status_reg : 0u;    /* hpsb response/status counter substitute */
-    regs[4] = agg ? agg->lpsb1_alarm_reg : 0u;    /* lpsb response/status counter substitute */
-    regs[5] = agg ? agg->lpsb1_sense_raw[0] : 0u; /* ADC1 */
-    regs[6] = agg ? agg->lpsb1_sense_raw[1] : 0u; /* ADC2 */
-    regs[7] = agg ? agg->lpsb1_sense_raw[2] : 0u; /* ADC3 */
-    regs[8] = agg ? agg->error_flags : 0u;        /* alarm bitmask */
-    regs[9] = 0x0003u;                            /* fw version */
-    regs[10] = IO_Main_ReadDI_Bitmap();
-    regs[11] = IO_Main_ReadDO_Bitmap();
+    uint16_t regs[MAP_MAX_SIZE] = {0};
+
+    switch (which) {
+    case MAP_MAIN:
+        regs[0] = (agg && agg->error_flags == 0u) ? 1u : 0u;
+        regs[1] = agg ? agg->error_flags : 0u;
+        for (uint16_t i = 0; i < 8u; i++) {
+            regs[2u + i] = (agg && (agg->main_di & (1u << i))) ? 1u : 0u;
+        }
+        regs[10] = (uint16_t)BSP_ReadPC_LED_IN();
+        /* Mainboard local relay states (bitmap bits0..3 = Relay1..4) */
+        regs[11] = agg ? (uint16_t)(agg->main_do & 0x0Fu) : 0u;
+        /* Env (SHTC3): temp_c_x10 (signed), rh_x10 (unsigned). If sensor error -> -32768 / 0xFFFF. */
+        regs[12] = agg ? (uint16_t)agg->env_temp_cx10 : (uint16_t)0x8000u;
+        regs[13] = agg ? agg->env_rh_x10 : 0xFFFFu;
+        break;
+    case MAP_HPSB:
+        regs[0] = agg ? (agg->hpsb_status_reg ? 1u : 0u) : 0u;
+        regs[1] = 0u;
+        regs[2] = agg ? ((agg->hpsb_coils & (1u << 0)) ? 1u : 0u) : 0u;
+        regs[3] = agg ? ((agg->hpsb_coils & (1u << 1)) ? 1u : 0u) : 0u;
+        regs[4] = agg ? ((agg->hpsb_coils & (1u << 2)) ? 1u : 0u) : 0u;
+        regs[5] = agg ? ((agg->hpsb_coils & (1u << 3)) ? 1u : 0u) : 0u;
+        regs[6]  = agg ? agg->hpsb_sense_raw[0] : 0u; /* ADC1 AVG */
+        regs[7]  = agg ? agg->hpsb_sense_raw[1] : 0u; /* ADC2 AVG */
+        regs[8]  = agg ? agg->hpsb_sense_raw[2] : 0u; /* ADC3 AVG */
+        regs[9]  = agg ? agg->hpsb_pkpk[0] : 0u;      /* ADC1 PKPK */
+        regs[10] = agg ? agg->hpsb_pkpk[1] : 0u;      /* ADC2 PKPK */
+        regs[11] = agg ? agg->hpsb_pkpk[2] : 0u;      /* ADC3 PKPK (may be 0 if not provided) */
+        regs[12] = agg ? agg->hpsb_current_st[0] : 0u;
+        regs[13] = agg ? agg->hpsb_current_st[1] : 0u;
+        regs[14] = agg ? agg->hpsb_current_st[2] : 0u;
+        regs[15] = 0u; /* reserve */
+        break;
+    case MAP_LPSB2:
+        /* LPSB slave2 (modbus id=2) = aggregated_status.lpsb1_* */
+        regs[0] = agg ? (agg->lpsb1_alarm_reg ? 1u : 0u) : 0u;
+        regs[1] = 0u;
+        regs[2] = agg ? (agg->lpsb1_coils[0] ? 1u : 0u) : 0u;
+        regs[3] = agg ? (agg->lpsb1_coils[1] ? 1u : 0u) : 0u;
+        regs[4] = agg ? (agg->lpsb1_coils[2] ? 1u : 0u) : 0u;
+        regs[5] = agg ? agg->lpsb1_sense_raw[0] : 0u;
+        regs[6] = agg ? agg->lpsb1_sense_raw[1] : 0u;
+        regs[7] = agg ? agg->lpsb1_sense_raw[2] : 0u;
+        regs[8] = agg ? agg->lpsb1_pkpk[0] : 0u;
+        regs[9] = agg ? agg->lpsb1_pkpk[1] : 0u;
+        regs[10] = agg ? agg->lpsb1_pkpk[2] : 0u;
+        regs[11] = agg ? agg->lpsb1_current_st[0] : 0u;
+        regs[12] = agg ? agg->lpsb1_current_st[1] : 0u;
+        regs[13] = agg ? agg->lpsb1_current_st[2] : 0u;
+        break;
+    case MAP_LPSB4:
+        /* LPSB slave4 (modbus id=4) = aggregated_status.lpsb2_* */
+        regs[0] = agg ? (agg->lpsb2_alarm_reg ? 1u : 0u) : 0u;
+        regs[1] = 0u;
+        regs[2] = agg ? (agg->lpsb2_coils[0] ? 1u : 0u) : 0u;
+        regs[3] = agg ? (agg->lpsb2_coils[1] ? 1u : 0u) : 0u;
+        regs[4] = agg ? (agg->lpsb2_coils[2] ? 1u : 0u) : 0u;
+        regs[5] = agg ? agg->lpsb2_sense_raw[0] : 0u;
+        regs[6] = agg ? agg->lpsb2_sense_raw[1] : 0u;
+        regs[7] = agg ? agg->lpsb2_sense_raw[2] : 0u;
+        regs[8] = agg ? agg->lpsb2_pkpk[0] : 0u;
+        regs[9] = agg ? agg->lpsb2_pkpk[1] : 0u;
+        regs[10] = agg ? agg->lpsb2_pkpk[2] : 0u;
+        regs[11] = agg ? agg->lpsb2_current_st[0] : 0u;
+        regs[12] = agg ? agg->lpsb2_current_st[1] : 0u;
+        regs[13] = agg ? agg->lpsb2_current_st[2] : 0u;
+        break;
+    case MAP_LPSB8:
+        /* LPSB slave8 (modbus id=8) = aggregated_status.lpsb3_* */
+        regs[0] = agg ? (agg->lpsb3_alarm_reg ? 1u : 0u) : 0u;
+        regs[1] = 0u;
+        regs[2] = agg ? (agg->lpsb3_coils[0] ? 1u : 0u) : 0u;
+        regs[3] = agg ? (agg->lpsb3_coils[1] ? 1u : 0u) : 0u;
+        regs[4] = agg ? (agg->lpsb3_coils[2] ? 1u : 0u) : 0u;
+        regs[5] = agg ? agg->lpsb3_sense_raw[0] : 0u;
+        regs[6] = agg ? agg->lpsb3_sense_raw[1] : 0u;
+        regs[7] = agg ? agg->lpsb3_sense_raw[2] : 0u;
+        regs[8] = agg ? agg->lpsb3_pkpk[0] : 0u;
+        regs[9] = agg ? agg->lpsb3_pkpk[1] : 0u;
+        regs[10] = agg ? agg->lpsb3_pkpk[2] : 0u;
+        regs[11] = agg ? agg->lpsb3_current_st[0] : 0u;
+        regs[12] = agg ? agg->lpsb3_current_st[1] : 0u;
+        regs[13] = agg ? agg->lpsb3_current_st[2] : 0u;
+        break;
+    }
 
     response[0] = 0x04;
     response[1] = (uint8_t)(count * 2u);
     for (uint16_t i = 0; i < count; i++) {
-        response[2u + i * 2u] = (uint8_t)(regs[i] >> 8);
-        response[2u + i * 2u + 1u] = (uint8_t)(regs[i] & 0xFFu);
+        uint16_t v = regs[offset + i];
+        response[2u + i * 2u] = (uint8_t)(v >> 8);
+        response[2u + i * 2u + 1u] = (uint8_t)(v & 0xFFu);
     }
     return (int)(2u + count * 2u);
 }
 
-/* FC06 Write Single Register: 2101 (DO bitmap); 2120 (PC_ON_EN); 2121 (PC_RESET_EN). 2122 read-only. */
-static int handle_fc06(uint16_t start_addr, const uint8_t *write_data,
+/* FC06 Write Single Register: 2101 (DO bitmap); 2120 (PC_ON_EN); 2121 (PC_RESET_EN). 2122 read-only.
+ * NOTE: Unified Rule v1.2 금지 FC. UpstreamSlave_HandleRequest에서 EX_ILLEGAL_FUNCTION 반환으로 변경됨. */
+__attribute__((unused)) static int handle_fc06(uint16_t start_addr, const uint8_t *write_data,
                        uint8_t *response, uint16_t resp_max)
 {
     if (resp_max < 6u || !write_data) return -1;
@@ -559,8 +742,9 @@ static int handle_fc06(uint16_t start_addr, const uint8_t *write_data,
     return 6;
 }
 
-/* FC16 Write Multiple Holding Registers: 4x2101(1개), 4x3000~3002(1~3개) */
-static int handle_fc16(uint16_t start_addr, uint16_t count, const uint8_t *write_data,
+/* FC16 Write Multiple Holding Registers: 4x2101(1개), 4x3000~3002(1~3개).
+ * NOTE: Unified Rule v1.2 금지 FC. UpstreamSlave_HandleRequest에서 EX_ILLEGAL_FUNCTION 반환으로 변경됨. */
+__attribute__((unused)) static int handle_fc16(uint16_t start_addr, uint16_t count, const uint8_t *write_data,
                        uint8_t *response, uint16_t resp_max)
 {
     if (resp_max < 5u || !write_data || count == 0u) return -1;
@@ -658,6 +842,53 @@ static int handle_fc05(uint16_t start_addr, const uint8_t *write_data,
     Gateway_LogFc05DiagRange(892, 910);
 #endif
 
+    /* Unified Rule: mainboard coil map (0-based) */
+    /* coil0..3 = Mainboard local Relay1..4 (MUST NOT forward downstream)
+     * coil4 = PC_ON  → pulse PC_ON_EN
+     * coil5 = PC_OFF → set PC_ON_EN = 0
+     * coil6 = RESET  → pulse PC_RESET_EN
+     */
+    if (start_addr <= 3u) {
+        IO_Main_WriteDO((MainDoChannel_t)start_addr, value ? 1u : 0u);
+        response[0] = 0x05;
+        response[1] = (uint8_t)(start_addr >> 8);
+        response[2] = (uint8_t)(start_addr & 0xFFu);
+        response[3] = value ? 0xFFu : 0u;
+        response[4] = 0u;
+        return 5;
+    }
+    if (start_addr == 4u) {
+        if (value) Gateway_Action_StartPulsePC_ON_EN();
+        else BSP_WritePC_ON_EN(0);
+        response[0] = 0x05;
+        response[1] = (uint8_t)(start_addr >> 8);
+        response[2] = (uint8_t)(start_addr & 0xFFu);
+        response[3] = value ? 0xFFu : 0u;
+        response[4] = 0u;
+        return 5;
+    }
+    if (start_addr == 5u) {
+        /* PC_OFF: writing ON should turn PC_ON_EN off */
+        if (value) BSP_WritePC_ON_EN(0);
+        else BSP_WritePC_ON_EN(0);
+        response[0] = 0x05;
+        response[1] = (uint8_t)(start_addr >> 8);
+        response[2] = (uint8_t)(start_addr & 0xFFu);
+        response[3] = value ? 0xFFu : 0u;
+        response[4] = 0u;
+        return 5;
+    }
+    if (start_addr == 6u) {
+        if (value) Gateway_Action_StartPulsePC_RESET_EN();
+        else BSP_WritePC_RESET_EN(0);
+        response[0] = 0x05;
+        response[1] = (uint8_t)(start_addr >> 8);
+        response[2] = (uint8_t)(start_addr & 0xFFu);
+        response[3] = value ? 0xFFu : 0u;
+        response[4] = 0u;
+        return 5;
+    }
+
     uint16_t h2_dec = H2Map_ModbusAddrToH2Dec(start_addr);
     const H2_MapEntry_t *e = H2Map_FindByDec(H2_AREA_1X, h2_dec);
     if (!e) {
@@ -732,6 +963,13 @@ static int handle_fc05(uint16_t start_addr, const uint8_t *write_data,
 #if FC05_GW_STEP_LOG
     Gateway_LogFc05StepBeforeSendNormalToPc();
 #endif
+    /* FC05 성공 후 해당 slave 상태를 즉시 갱신하도록 on-demand poll 요청 */
+    if (e->action == H2_ACT_WRITE_SUB_COIL && e->h2_dec >= 899u && e->h2_dec <= 910u) {
+        uint16_t offset = (uint16_t)(e->h2_dec - 899u);
+        static const uint8_t sid_poll[] = { 1u, 2u, 4u, 8u };
+        uint8_t poll_sid = sid_poll[offset / 3u];
+        ModbusMaster_RequestOnDemandPoll((uint16_t)poll_sid);
+    }
     response[0] = 0x05;
     response[1] = (uint8_t)(start_addr >> 8);
     response[2] = (uint8_t)(start_addr & 0xFF);
@@ -741,7 +979,7 @@ static int handle_fc05(uint16_t start_addr, const uint8_t *write_data,
 }
 
 /* FC15 Write Multiple Coils */
-static int handle_fc15(uint16_t start_addr, uint16_t count, const uint8_t *write_data,
+__attribute__((unused)) static int handle_fc15(uint16_t start_addr, uint16_t count, const uint8_t *write_data,
                        uint8_t *response, uint16_t resp_max)
 {
     if (resp_max < 5u || !write_data) return -1;
@@ -784,22 +1022,24 @@ int UpstreamSlave_HandleRequest(uint8_t fc, uint16_t start_addr, uint16_t count,
     if (!response || resp_max < 2u) return -1;
 
     switch (fc) {
+    /* Unified Rule v1.2: Read = FC04 ONLY. FC01/FC02/FC03 금지. */
     case 0x01:
-        return handle_fc01(start_addr, count, response, resp_max);
     case 0x02:
-        return handle_fc02(start_addr, count, response, resp_max);
     case 0x03:
-        return handle_fc03(start_addr, count, p_agg, response, resp_max);
+        response[0] = (uint8_t)(fc | 0x80);
+        response[1] = EX_ILLEGAL_FUNCTION;
+        return 2;
     case 0x04:
         return handle_fc04(start_addr, count, p_agg, response, resp_max);
     case 0x05:
         return handle_fc05(start_addr, write_data, response, resp_max);
+    /* Unified Rule v1.2: Write = FC05 ONLY. FC06/FC15/FC16 금지. */
     case 0x06:
-        return handle_fc06(start_addr, write_data, response, resp_max);
     case 0x0F:
-        return handle_fc15(start_addr, count, write_data, response, resp_max);
     case 0x10:
-        return handle_fc16(start_addr, count, write_data, response, resp_max);
+        response[0] = (uint8_t)(fc | 0x80u);
+        response[1] = EX_ILLEGAL_FUNCTION;
+        return 2;
     default:
         response[0] = (uint8_t)(fc | 0x80);
         response[1] = EX_ILLEGAL_FUNCTION;

@@ -13,10 +13,12 @@ class MainboardWorker(QObject):
     write_result = pyqtSignal(bool, object)       # ok, err
     raw_bytes_received = pyqtSignal(list)          # raw RX bytes (e.g. 0xAA from board)
     sniff_result = pyqtSignal(list)                # 연결 직후 2초 수신 테스트 결과 (바이트 리스트)
-    # HPSB/LPSB: ok, sense[14], coil_bits[14], error_flags u16, err
-    sub_data_result = pyqtSignal(bool, object, object, object, object)
-    # Direct LPSB: FC03 start=0 count=9 (SSR 상태 + ADC1/2/3 + ID/heartbeat/fw)
-    lpsb_adc_result = pyqtSignal(bool, object, object)  # ok, regs[9] or None, err
+    # HPSB/LPSB: ok, sense[40], coil_bits[14], error_flags u16, raw_blocks(dict) or None, err
+    sub_data_result = pyqtSignal(bool, object, object, object, object, object)
+    # Direct LPSB: FC04 start=0 count=14 (Unified Rule v1.2 LPSB map reg0..13)
+    lpsb_adc_result = pyqtSignal(bool, object, object)  # ok, regs[14] or None, err
+    # Direct HPSB: FC04 start=0 count=16 (Unified Rule v1.1 HPSB map reg0..15)
+    hpsb_adc_result = pyqtSignal(bool, object, object)  # ok, regs[16] or None, err
     # 문서 기반 Modbus 테스트 탭 결과 (worker thread 경유)
     doc_fc01_result = pyqtSignal(bool, object, object)  # ok, bits or None, err
     doc_fc02_result = pyqtSignal(bool, object, object)  # ok, bits or None, err
@@ -71,7 +73,7 @@ class MainboardWorker(QObject):
         self.write_result.emit(ok, err)
 
     def on_request_pc_on_pulse(self):
-        """PC_ON_EN: FC06 2120 value=1 → 보드에서 500ms HIGH 펄스 수행."""
+        """PC_ON_EN: FC05 coil4 value=1 → 보드에서 500ms HIGH 펄스 수행."""
         if not self._client.connected:
             self.write_result.emit(False, "Not connected")
             return
@@ -79,7 +81,7 @@ class MainboardWorker(QObject):
         self.write_result.emit(ok, err)
 
     def on_request_pc_reset_pulse(self):
-        """PC_RESET_EN: FC06 2121 value=1 → 보드에서 500ms HIGH 펄스 수행."""
+        """PC_RESET_EN: FC05 coil6 value=1 → 보드에서 500ms HIGH 펄스 수행."""
         if not self._client.connected:
             self.write_result.emit(False, "Not connected")
             return
@@ -102,20 +104,33 @@ class MainboardWorker(QObject):
         self.sniff_result.emit(buf)
 
     def on_request_read_sub(self):
-        """Read HPSB/LPSB: sense(14), coil status(14), error_flags. Emit sub_data_result."""
+        """Read HPSB/LPSB: sense(40), coil status(14), error_flags + raw blocks. Emit sub_data_result."""
         if not self._client.connected:
-            self.sub_data_result.emit(False, None, None, None, "Not connected")
+            self.sub_data_result.emit(False, None, None, None, None, "Not connected")
             return
         ok_s, sense, err_s = self._client.read_sub_sense()
+        raw = self._client.get_last_sub_raw_copy() if ok_s else None
         ok_c, coils, err_c = self._client.read_sub_coil_status()
         ok_f, flags, err_f = self._client.read_error_flags()
         if not ok_s:
-            self.sub_data_result.emit(False, None, None, None, err_s or "sense fail")
+            self.sub_data_result.emit(False, None, None, None, None, err_s or "sense fail")
             return
         if not ok_c:
-            self.sub_data_result.emit(False, sense, None, (flags if ok_f else None), err_c or "coil fail")
+            self.sub_data_result.emit(False, sense, None, (flags if ok_f else None), raw, err_c or "coil fail")
             return
-        self.sub_data_result.emit(True, sense, coils, (flags if ok_f else 0), None)
+        self.sub_data_result.emit(True, sense, coils, (flags if ok_f else 0), raw, None)
+
+    def on_request_read_direct_hpsb_adc(self):
+        """HPSB 다이렉트: FC04 slave_id=1, start=0, count=16 (Unified Rule v1.1 HPSB map)."""
+        if not self._client.connected:
+            self.hpsb_adc_result.emit(False, None, "Not connected")
+            return
+        try:
+            ok, result, err = self._client.read_input_registers(0, 16, unit=1)
+        except Exception as e:
+            self.hpsb_adc_result.emit(False, None, f"[FC04] {type(e).__name__}: {e}")
+            return
+        self.hpsb_adc_result.emit(ok, result, err)
 
     def on_request_sub_pulse(self, coil_index: int):
         """FC05 pulse one LPSB VB (coil_index 0..4 = VB 8..12). Emit write_result."""
@@ -156,12 +171,12 @@ class MainboardWorker(QObject):
         self.write_result.emit(ok, err)
 
     def on_request_read_direct_lpsb_adc(self):
-        """LPSB 다이렉트: FC04 slave_id=2, start=0, count=10 (Input reg: DI바이트+AVG×3+PKPK×3+CUR×3)."""
+        """LPSB 다이렉트: FC04 slave_id=2, start=0, count=14 (Unified Rule FC04 map)."""
         if not self._client.connected:
             self.lpsb_adc_result.emit(False, None, "Not connected")
             return
         try:
-            ok, result, err = self._client.read_input_registers(0, 10, unit=2)
+            ok, result, err = self._client.read_input_registers(0, 14, unit=2)
         except Exception as e:
             self.lpsb_adc_result.emit(False, None, f"[FC04] {type(e).__name__}: {e}")
             return
@@ -198,18 +213,14 @@ class MainboardWorker(QObject):
 
     # ---- Doc Modbus tab (Mainboard only) ----
     def on_request_doc_fc01(self, unit: int, start: int, count: int):
-        if not self._client.connected:
-            self.doc_fc01_result.emit(False, None, "Not connected")
-            return
-        ok, bits, err = self._client.read_coils(start, count, unit=unit)
-        self.doc_fc01_result.emit(ok, bits, err)
+        """FC01: Unified Rule v1.2 금지 FC. 전송하지 않음."""
+        del unit, start, count
+        self.doc_fc01_result.emit(False, None, "FC01 not allowed (Unified Rule v1.2: FC04 read only)")
 
     def on_request_doc_fc02(self, unit: int, start: int, count: int):
-        if not self._client.connected:
-            self.doc_fc02_result.emit(False, None, "Not connected")
-            return
-        ok, bits, err = self._client.read_discrete_inputs(start, count, unit=unit)
-        self.doc_fc02_result.emit(ok, bits, err)
+        """FC02 (read_discrete_inputs): Unified Rule v1.2 금지 FC. 전송하지 않음."""
+        del unit, start, count
+        self.doc_fc02_result.emit(False, None, "FC02 not allowed (Unified Rule v1.2: FC04 read only)")
 
     def on_request_doc_fc04(self, unit: int, start: int, count: int):
         if not self._client.connected:
@@ -226,16 +237,9 @@ class MainboardWorker(QObject):
         self.doc_fc05_result.emit(ok, err)
 
     def on_request_doc_fc15(self, unit: int, start: int, values: object):
-        if not self._client.connected:
-            self.doc_fc15_result.emit(False, "Not connected")
-            return
-        try:
-            vals = [bool(v) for v in list(values)]
-        except Exception:
-            self.doc_fc15_result.emit(False, "Invalid values")
-            return
-        ok, err = self._client.write_multiple_coils(start, vals, unit=unit)
-        self.doc_fc15_result.emit(ok, err)
+        """FC15: Unified Rule v1.2 금지 FC. 전송하지 않음."""
+        del unit, start, values
+        self.doc_fc15_result.emit(False, "FC15 not allowed (Unified Rule v1.2: FC05 write only)")
 
 
 def create_worker_and_thread(client):

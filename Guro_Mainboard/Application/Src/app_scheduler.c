@@ -11,7 +11,7 @@ static uint8_t  task_due[TASK_COUNT];
 
 static const uint32_t period_ms[TASK_COUNT] = {
 	10,   /* UPSTREAM_POLL */
-	10,   /* DOWNSTREAM_MODBUS */
+	1,    /* DOWNSTREAM_MODBUS: 하위 RS485(ModbusMaster) RX 오버런 방지 */
 	100,  /* AGGREGATE_UPDATE */
 	500   /* UPSTREAM_SEND_STATUS */
 };

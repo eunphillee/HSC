@@ -271,7 +271,12 @@ int main(void)
   AggregatedStatus_Clear(&aggregated_status);
   SystemSync_Init();
 #if !MB_UART2_ASCII_BRIDGE_TEST
+#if !USE_PC_TEST_UART1_SLAVE
+  /* NOTE: UpstreamPC uses USART2 ReceiveToIdle_IT.
+   * When PC_TEST_UART1_SLAVE is enabled, USART2 is reserved for downstream Modbus Master (sub RS485).
+   * Running both on USART2 causes RX competition and truncated FC04 responses. */
   UpstreamPC_Init();
+#endif
 #endif
 #if USE_PC_TEST_UART1_SLAVE && !ENABLE_PC_TEST_AA_STREAM
   UpstreamSlaveUart1_Init();
@@ -341,14 +346,19 @@ int main(void)
 #if MB_UART2_ASCII_BRIDGE_TEST
     ascii_bridge_tick();
 #else
+#if !USE_PC_TEST_UART1_SLAVE
     if (AppScheduler_IsDue(TASK_UPSTREAM_POLL))
       UpstreamPC_Poll(&aggregated_status);
+#endif
+#if USE_PC_TEST_UART1_SLAVE || MODBUS_MASTER_POLL_ENABLE
+    if (AppScheduler_IsDue(TASK_DOWNSTREAM_MODBUS)) {
 #if USE_PC_TEST_UART1_SLAVE
-    if (AppScheduler_IsDue(TASK_DOWNSTREAM_MODBUS))
       UpstreamSlaveUart1_Poll(&aggregated_status);
-#elif MODBUS_MASTER_POLL_ENABLE
-    if (AppScheduler_IsDue(TASK_DOWNSTREAM_MODBUS))
+#endif
+#if MODBUS_MASTER_POLL_ENABLE
       ModbusMaster_Poll();
+#endif
+    }
 #endif
 #endif
 #endif
@@ -356,8 +366,10 @@ int main(void)
       SystemSync_Update(&aggregated_status, HAL_GetTick());
     Gateway_Action_Update();
 #if !MB_UART2_ASCII_BRIDGE_TEST
+#if !USE_PC_TEST_UART1_SLAVE
     if (AppScheduler_IsDue(TASK_UPSTREAM_SEND_STATUS))
       UpstreamPC_SendStatus(&aggregated_status);
+#endif
 #endif
 
     /* 진단 단계(윈도우 위반 배제):

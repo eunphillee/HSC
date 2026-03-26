@@ -29,8 +29,10 @@ typedef struct {
     uint16_t         count;
 } PollEntry_t;
 
-/* Number of poll entries in the table (one per slave per read type) */
-#define POLL_TABLE_SIZE   (SLAVE_ID_COUNT * 4)   /* HPSB: 4 read types, LPSB: 4 read types */
+/* Number of poll entries in the table.
+ * Unified Rule v1.0: Sub-board reads are FC04 only (Input Register) → one poll entry per slave.
+ */
+#define POLL_TABLE_SIZE   (SLAVE_ID_COUNT * 1)
 
 /* Get poll entry by index (0 .. POLL_TABLE_SIZE-1). Returns 0 on success. */
 int ModbusTable_GetPollEntry(uint8_t index, PollEntry_t *entry);

@@ -38,6 +38,7 @@ static volatile uint32_t last_rx_tick;
 static uint8_t tx_busy;
 static upstream_cmd_cb_t cmd_cb;
 static volatile uint8_t s_uart2_rx_it_paused;
+static volatile uint8_t s_upstreampc_inited;
 
 static uint32_t invalid_len_count;
 static uint32_t invalid_crc_count;
@@ -62,11 +63,13 @@ void UpstreamPC_Init(void)
 	invalid_len_count = 0;
 	invalid_crc_count = 0;
 	s_uart2_rx_it_paused = 0;
+	s_upstreampc_inited = 1;
 	(void)HAL_UARTEx_ReceiveToIdle_IT(&huart2, rx_buf, UPSTREAM_RX_BUF_SIZE);
 }
 
 void UpstreamPC_PauseUart2RxIT(void)
 {
+	if (!s_upstreampc_inited) return;
 	/* ReceiveToIdle_IT로 활성화된 UART2 RX를 중지한다.
 	 * 하위통신 트랜잭션에서 HAL_UART_Receive()가 응답 바이트를 독점 수신하도록 보장. */
 	(void)HAL_UART_AbortReceive_IT(&huart2);
@@ -75,6 +78,7 @@ void UpstreamPC_PauseUart2RxIT(void)
 
 void UpstreamPC_ResumeUart2RxIT(void)
 {
+	if (!s_upstreampc_inited) return;
 	if (!s_uart2_rx_it_paused) return;
 	s_uart2_rx_it_paused = 0;
 	(void)HAL_UARTEx_ReceiveToIdle_IT(&huart2, rx_buf, UPSTREAM_RX_BUF_SIZE);

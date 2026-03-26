@@ -7,14 +7,15 @@
 #include "h2tech_address_map.h"
 #include "gateway_actions.h"
 
-/* Sub-board input reg 7..9 = CURRENT 0/1; debounce before H2 ALM bits */
+/* Sub-board input reg 11..13 = Current state (0/1) for LPSB; debounce before H2 ALM bits */
 #define SUB_CURRENT_DEBOUNCE_CYCLES  3u
 
 static void debounce_current_3ch(SlaveId_t sid, uint8_t cnt[3], uint8_t *any_tripped)
 {
 	*any_tripped = 0;
 	for (int i = 0; i < 3; i++) {
-		uint8_t on = ModbusTable_GetInputReg(sid, (uint16_t)(7 + i)) ? 1u : 0u;
+		/* LPSB FC04 map: reg11..13 = Current1..3 */
+		uint8_t on = ModbusTable_GetInputReg(sid, (uint16_t)(11 + i)) ? 1u : 0u;
 		if (on) {
 			if (cnt[i] < 255u) cnt[i]++;
 		} else {
@@ -38,7 +39,8 @@ void Aggregator_Update(aggregated_status_t *out)
 		last_env_tick = out->timestamp_ms;
 		extern I2C_HandleTypeDef hi2c1; /* I2C1 = SHTC3 */
 		float t = 0.0f, rh = 0.0f;
-		if (SHTC3_Measure(&hi2c1, &t, &rh) == 0) {
+		/* 하위 RS485(ModbusMaster) 트랜잭션 중에는 HAL_Delay(15) 블로킹 측정을 건너뛰어 RX 손실을 방지 */
+		if (!ModbusMaster_IsBusy() && SHTC3_Measure(&hi2c1, &t, &rh) == 0) {
 			/* store x10 */
 			out->env_temp_cx10 = (int16_t)(t * 10.0f);
 			out->env_rh_x10    = (uint16_t)(rh * 10.0f);
@@ -54,76 +56,104 @@ void Aggregator_Update(aggregated_status_t *out)
 	for (int i = 0; i < MAIN_DI_COUNT; i++)
 		out->main_di |= (IO_Main_ReadDI((MainDiChannel_t)i) ? (1u << i) : 0);
 	out->main_do = 0;
-	for (int i = 0; i < 2; i++)
+	for (int i = 0; i < MAIN_DO_COUNT; i++)
 		out->main_do |= (IO_Main_ReadDO((MainDoChannel_t)i) ? (1u << i) : 0);
 
 	out->hpsb_coils      = 0;
 	out->hpsb_discrete   = 0;
 	out->hpsb_status_reg = 0;
 	out->hpsb_alarm_reg  = 0;
-	out->hpsb_sense_raw[0] = ModbusTable_GetInputReg(SLAVE_ID_HPSB, 1);
-	out->hpsb_sense_raw[1] = ModbusTable_GetInputReg(SLAVE_ID_HPSB, 2);
-	out->hpsb_sense_raw[2] = ModbusTable_GetInputReg(SLAVE_ID_HPSB, 3);
-	out->hpsb_pkpk[0] = ModbusTable_GetInputReg(SLAVE_ID_HPSB, 4);
-	out->hpsb_pkpk[1] = ModbusTable_GetInputReg(SLAVE_ID_HPSB, 5);
-	out->hpsb_pkpk[2] = ModbusTable_GetInputReg(SLAVE_ID_HPSB, 6);
-	out->hpsb_current_st[0] = ModbusTable_GetInputReg(SLAVE_ID_HPSB, 7) ? 1u : 0u;
-	out->hpsb_current_st[1] = ModbusTable_GetInputReg(SLAVE_ID_HPSB, 8) ? 1u : 0u;
-	out->hpsb_current_st[2] = ModbusTable_GetInputReg(SLAVE_ID_HPSB, 9) ? 1u : 0u;
-	for (int i = 0; i < MODBUS_COIL_COUNT; i++)
-		out->hpsb_coils |= (ModbusTable_GetCoil(SLAVE_ID_HPSB, (uint16_t)i) ? (1u << i) : 0);
-	for (int i = 0; i < MODBUS_DISCRETE_COUNT; i++)
-		out->hpsb_discrete |= (ModbusTable_GetDiscrete(SLAVE_ID_HPSB, (uint16_t)i) ? (1u << i) : 0);
-	out->hpsb_status_reg = ModbusTable_GetHoldingReg(SLAVE_ID_HPSB, HOLDING_REG_STATUS);
+	/* HPSB FC04 map (reg0~13):
+	 * reg2~5 = relay1~4 state (coils bit0..3)
+	 * reg6~8 = sensor1~3 (current state 0/1)
+	 */
+	out->hpsb_coils |= ModbusTable_GetInputReg(SLAVE_ID_HPSB, 2) ? (1u << 0) : 0u;
+	out->hpsb_coils |= ModbusTable_GetInputReg(SLAVE_ID_HPSB, 3) ? (1u << 1) : 0u;
+	out->hpsb_coils |= ModbusTable_GetInputReg(SLAVE_ID_HPSB, 4) ? (1u << 2) : 0u;
+	out->hpsb_coils |= ModbusTable_GetInputReg(SLAVE_ID_HPSB, 5) ? (1u << 3) : 0u;
+
+	/* Unified Rule v1.1 HPSB FC04 map:
+	 * reg6~8  = ADC1~3 AVG
+	 * reg9~11 = ADC1~3 PKPK
+	 * reg12~14= Current1~3 state
+	 * reg15   = reserve
+	 */
+	out->hpsb_sense_raw[0] = ModbusTable_GetInputReg(SLAVE_ID_HPSB, 6);
+	out->hpsb_sense_raw[1] = ModbusTable_GetInputReg(SLAVE_ID_HPSB, 7);
+	out->hpsb_sense_raw[2] = ModbusTable_GetInputReg(SLAVE_ID_HPSB, 8);
+
+	out->hpsb_pkpk[0] = ModbusTable_GetInputReg(SLAVE_ID_HPSB, 9);
+	out->hpsb_pkpk[1] = ModbusTable_GetInputReg(SLAVE_ID_HPSB, 10);
+	out->hpsb_pkpk[2] = ModbusTable_GetInputReg(SLAVE_ID_HPSB, 11);
+
+	out->hpsb_current_st[0] = ModbusTable_GetInputReg(SLAVE_ID_HPSB, 12) ? 1u : 0u;
+	out->hpsb_current_st[1] = ModbusTable_GetInputReg(SLAVE_ID_HPSB, 13) ? 1u : 0u;
+	out->hpsb_current_st[2] = ModbusTable_GetInputReg(SLAVE_ID_HPSB, 14) ? 1u : 0u;
 	/* hpsb_alarm_reg filled after CURRENT debounce (below) */
 
-	/* Separate LPSB aggregator image: coils[3] and alarm/sense per slave */
-	out->lpsb1_coils[0] = ModbusTable_GetCoil(SLAVE_ID_LPSB1, 0);
-	out->lpsb1_coils[1] = ModbusTable_GetCoil(SLAVE_ID_LPSB1, 1);
-	out->lpsb1_coils[2] = ModbusTable_GetCoil(SLAVE_ID_LPSB1, 2);
-	out->lpsb2_coils[0] = ModbusTable_GetCoil(SLAVE_ID_LPSB2, 0);
-	out->lpsb2_coils[1] = ModbusTable_GetCoil(SLAVE_ID_LPSB2, 1);
-	out->lpsb2_coils[2] = ModbusTable_GetCoil(SLAVE_ID_LPSB2, 2);
-	out->lpsb3_coils[0] = ModbusTable_GetCoil(SLAVE_ID_LPSB3, 0);
-	out->lpsb3_coils[1] = ModbusTable_GetCoil(SLAVE_ID_LPSB3, 1);
-	out->lpsb3_coils[2] = ModbusTable_GetCoil(SLAVE_ID_LPSB3, 2);
-	out->lpsb1_alarm_reg  = ModbusTable_GetHoldingReg(SLAVE_ID_LPSB1, HOLDING_REG_ALARM);
-	out->lpsb2_alarm_reg  = ModbusTable_GetHoldingReg(SLAVE_ID_LPSB2, HOLDING_REG_ALARM);
-	out->lpsb3_alarm_reg  = ModbusTable_GetHoldingReg(SLAVE_ID_LPSB3, HOLDING_REG_ALARM);
-	out->lpsb1_sense_raw[0] = ModbusTable_GetInputReg(SLAVE_ID_LPSB1, 1);
-	out->lpsb1_sense_raw[1] = ModbusTable_GetInputReg(SLAVE_ID_LPSB1, 2);
-	out->lpsb1_sense_raw[2] = ModbusTable_GetInputReg(SLAVE_ID_LPSB1, 3);
-	out->lpsb1_pkpk[0] = ModbusTable_GetInputReg(SLAVE_ID_LPSB1, 4);
-	out->lpsb1_pkpk[1] = ModbusTable_GetInputReg(SLAVE_ID_LPSB1, 5);
-	out->lpsb1_pkpk[2] = ModbusTable_GetInputReg(SLAVE_ID_LPSB1, 6);
-	out->lpsb1_current_st[0] = ModbusTable_GetInputReg(SLAVE_ID_LPSB1, 7) ? 1u : 0u;
-	out->lpsb1_current_st[1] = ModbusTable_GetInputReg(SLAVE_ID_LPSB1, 8) ? 1u : 0u;
-	out->lpsb1_current_st[2] = ModbusTable_GetInputReg(SLAVE_ID_LPSB1, 9) ? 1u : 0u;
-	out->lpsb2_sense_raw[0] = ModbusTable_GetInputReg(SLAVE_ID_LPSB2, 1);
-	out->lpsb2_sense_raw[1] = ModbusTable_GetInputReg(SLAVE_ID_LPSB2, 2);
-	out->lpsb2_sense_raw[2] = ModbusTable_GetInputReg(SLAVE_ID_LPSB2, 3);
-	out->lpsb2_pkpk[0] = ModbusTable_GetInputReg(SLAVE_ID_LPSB2, 4);
-	out->lpsb2_pkpk[1] = ModbusTable_GetInputReg(SLAVE_ID_LPSB2, 5);
-	out->lpsb2_pkpk[2] = ModbusTable_GetInputReg(SLAVE_ID_LPSB2, 6);
-	out->lpsb2_current_st[0] = ModbusTable_GetInputReg(SLAVE_ID_LPSB2, 7) ? 1u : 0u;
-	out->lpsb2_current_st[1] = ModbusTable_GetInputReg(SLAVE_ID_LPSB2, 8) ? 1u : 0u;
-	out->lpsb2_current_st[2] = ModbusTable_GetInputReg(SLAVE_ID_LPSB2, 9) ? 1u : 0u;
-	out->lpsb3_sense_raw[0] = ModbusTable_GetInputReg(SLAVE_ID_LPSB3, 1);
-	out->lpsb3_sense_raw[1] = ModbusTable_GetInputReg(SLAVE_ID_LPSB3, 2);
-	out->lpsb3_sense_raw[2] = ModbusTable_GetInputReg(SLAVE_ID_LPSB3, 3);
-	out->lpsb3_pkpk[0] = ModbusTable_GetInputReg(SLAVE_ID_LPSB3, 4);
-	out->lpsb3_pkpk[1] = ModbusTable_GetInputReg(SLAVE_ID_LPSB3, 5);
-	out->lpsb3_pkpk[2] = ModbusTable_GetInputReg(SLAVE_ID_LPSB3, 6);
-	out->lpsb3_current_st[0] = ModbusTable_GetInputReg(SLAVE_ID_LPSB3, 7) ? 1u : 0u;
-	out->lpsb3_current_st[1] = ModbusTable_GetInputReg(SLAVE_ID_LPSB3, 8) ? 1u : 0u;
-	out->lpsb3_current_st[2] = ModbusTable_GetInputReg(SLAVE_ID_LPSB3, 9) ? 1u : 0u;
+	/* Separate LPSB aggregator image from FC04 Input Registers */
+	/* LPSB FC04 map (reg0~13):
+	 * reg2~4  = SSR1~3 state → coils[0..2]
+	 * reg5~7  = ADC1/2/3 AVG
+	 * reg8~10 = ADC1/2/3 PKPK
+	 * reg11~13= Current1/2/3 state (0/1)
+	 */
+	out->lpsb1_coils[0] = ModbusTable_GetInputReg(SLAVE_ID_LPSB1, 2);
+	out->lpsb1_coils[1] = ModbusTable_GetInputReg(SLAVE_ID_LPSB1, 3);
+	out->lpsb1_coils[2] = ModbusTable_GetInputReg(SLAVE_ID_LPSB1, 4);
+	out->lpsb2_coils[0] = ModbusTable_GetInputReg(SLAVE_ID_LPSB2, 2);
+	out->lpsb2_coils[1] = ModbusTable_GetInputReg(SLAVE_ID_LPSB2, 3);
+	out->lpsb2_coils[2] = ModbusTable_GetInputReg(SLAVE_ID_LPSB2, 4);
+	out->lpsb3_coils[0] = ModbusTable_GetInputReg(SLAVE_ID_LPSB3, 2);
+	out->lpsb3_coils[1] = ModbusTable_GetInputReg(SLAVE_ID_LPSB3, 3);
+	out->lpsb3_coils[2] = ModbusTable_GetInputReg(SLAVE_ID_LPSB3, 4);
+
+	out->lpsb1_alarm_reg = 0u;
+	out->lpsb2_alarm_reg = 0u;
+	out->lpsb3_alarm_reg = 0u;
+
+	out->lpsb1_sense_raw[0] = ModbusTable_GetInputReg(SLAVE_ID_LPSB1, 5);
+	out->lpsb1_sense_raw[1] = ModbusTable_GetInputReg(SLAVE_ID_LPSB1, 6);
+	out->lpsb1_sense_raw[2] = ModbusTable_GetInputReg(SLAVE_ID_LPSB1, 7);
+	out->lpsb1_pkpk[0] = ModbusTable_GetInputReg(SLAVE_ID_LPSB1, 8);
+	out->lpsb1_pkpk[1] = ModbusTable_GetInputReg(SLAVE_ID_LPSB1, 9);
+	out->lpsb1_pkpk[2] = ModbusTable_GetInputReg(SLAVE_ID_LPSB1, 10);
+	out->lpsb1_current_st[0] = ModbusTable_GetInputReg(SLAVE_ID_LPSB1, 11) ? 1u : 0u;
+	out->lpsb1_current_st[1] = ModbusTable_GetInputReg(SLAVE_ID_LPSB1, 12) ? 1u : 0u;
+	out->lpsb1_current_st[2] = ModbusTable_GetInputReg(SLAVE_ID_LPSB1, 13) ? 1u : 0u;
+
+	out->lpsb2_sense_raw[0] = ModbusTable_GetInputReg(SLAVE_ID_LPSB2, 5);
+	out->lpsb2_sense_raw[1] = ModbusTable_GetInputReg(SLAVE_ID_LPSB2, 6);
+	out->lpsb2_sense_raw[2] = ModbusTable_GetInputReg(SLAVE_ID_LPSB2, 7);
+	out->lpsb2_pkpk[0] = ModbusTable_GetInputReg(SLAVE_ID_LPSB2, 8);
+	out->lpsb2_pkpk[1] = ModbusTable_GetInputReg(SLAVE_ID_LPSB2, 9);
+	out->lpsb2_pkpk[2] = ModbusTable_GetInputReg(SLAVE_ID_LPSB2, 10);
+	out->lpsb2_current_st[0] = ModbusTable_GetInputReg(SLAVE_ID_LPSB2, 11) ? 1u : 0u;
+	out->lpsb2_current_st[1] = ModbusTable_GetInputReg(SLAVE_ID_LPSB2, 12) ? 1u : 0u;
+	out->lpsb2_current_st[2] = ModbusTable_GetInputReg(SLAVE_ID_LPSB2, 13) ? 1u : 0u;
+
+	out->lpsb3_sense_raw[0] = ModbusTable_GetInputReg(SLAVE_ID_LPSB3, 5);
+	out->lpsb3_sense_raw[1] = ModbusTable_GetInputReg(SLAVE_ID_LPSB3, 6);
+	out->lpsb3_sense_raw[2] = ModbusTable_GetInputReg(SLAVE_ID_LPSB3, 7);
+	out->lpsb3_pkpk[0] = ModbusTable_GetInputReg(SLAVE_ID_LPSB3, 8);
+	out->lpsb3_pkpk[1] = ModbusTable_GetInputReg(SLAVE_ID_LPSB3, 9);
+	out->lpsb3_pkpk[2] = ModbusTable_GetInputReg(SLAVE_ID_LPSB3, 10);
+	out->lpsb3_current_st[0] = ModbusTable_GetInputReg(SLAVE_ID_LPSB3, 11) ? 1u : 0u;
+	out->lpsb3_current_st[1] = ModbusTable_GetInputReg(SLAVE_ID_LPSB3, 12) ? 1u : 0u;
+	out->lpsb3_current_st[2] = ModbusTable_GetInputReg(SLAVE_ID_LPSB3, 13) ? 1u : 0u;
 
 	if (!ModbusMaster_IsCommOk(SLAVE_ID_HPSB)) out->error_flags |= AGG_ERR_COMM_HPSB;
 	if (!ModbusMaster_IsCommOk(SLAVE_ID_LPSB1) || !ModbusMaster_IsCommOk(SLAVE_ID_LPSB2) || !ModbusMaster_IsCommOk(SLAVE_ID_LPSB3))
 		out->error_flags |= AGG_ERR_COMM_LPSB;
 	if (Gateway_Action_PollDownstreamWriteFail()) out->error_flags |= AGG_ERR_DOWNSTREAM_WRITE;
 
-	/* HPSB: merge slave holding alarm with debounced CURRENT (input reg 7..9) → bits 0..2 */
+	/* Unified Rule v1.0: sub-board alive/status flags */
+	out->hpsb_status_reg = ModbusMaster_IsCommOk(SLAVE_ID_HPSB) ? 1u : 0u;
+	out->lpsb1_alarm_reg = ModbusMaster_IsCommOk(SLAVE_ID_LPSB1) ? 1u : 0u;
+	out->lpsb2_alarm_reg = ModbusMaster_IsCommOk(SLAVE_ID_LPSB2) ? 1u : 0u;
+	out->lpsb3_alarm_reg = ModbusMaster_IsCommOk(SLAVE_ID_LPSB3) ? 1u : 0u;
+
+	/* HPSB: debounce current states (FC04 reg12~14) → bits 0..2 */
 	static uint8_t hpsb_cur_db[3];
 	{
 		uint8_t trip_ch[3] = {0, 0, 0};
@@ -137,8 +167,8 @@ void Aggregator_Update(aggregated_status_t *out)
 			if (hpsb_cur_db[i] >= SUB_CURRENT_DEBOUNCE_CYCLES)
 				trip_ch[i] = 1u;
 		}
-		uint16_t hpsb_hold = ModbusTable_GetHoldingReg(SLAVE_ID_HPSB, HOLDING_REG_ALARM);
-		out->hpsb_alarm_reg = hpsb_hold;
+		/* FC02 기반 알람은 Unified Rule에서 사용하지 않으므로, slave holding 값은 0으로 취급 */
+		out->hpsb_alarm_reg = 0u;
 		if (trip_ch[0]) out->hpsb_alarm_reg |= (1u << 0);
 		if (trip_ch[1]) out->hpsb_alarm_reg |= (1u << 1);
 		if (trip_ch[2]) out->hpsb_alarm_reg |= (1u << 2);

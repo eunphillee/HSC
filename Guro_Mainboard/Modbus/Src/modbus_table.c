@@ -9,29 +9,14 @@
 static uint8_t  discrete_img[SLAVE_ID_COUNT][MODBUS_DISCRETE_COUNT];
 static uint8_t  coil_img[SLAVE_ID_COUNT][MODBUS_COIL_COUNT];
 static uint16_t holding_img[SLAVE_ID_COUNT][MODBUS_HOLDING_COUNT];
-static uint16_t input_reg_img[SLAVE_ID_COUNT][MODBUS_INPUT_REG_COUNT];
+static uint16_t input_reg_img[SLAVE_ID_COUNT][MODBUS_INPUT_REG_IMG_MAX];
 
 static const PollEntry_t poll_table[POLL_TABLE_SIZE] = {
-    /* HPSB */
-    { SLAVE_ID_HPSB, POLL_ENTRY_READ_DISCRETE,  MODBUS_DISCRETE_START, MODBUS_DISCRETE_COUNT },
-    { SLAVE_ID_HPSB, POLL_ENTRY_READ_COIL,      MODBUS_COIL_START,     MODBUS_COIL_COUNT },
-    { SLAVE_ID_HPSB, POLL_ENTRY_READ_HOLDING,   MODBUS_HOLDING_START, MODBUS_HOLDING_COUNT },
-    { SLAVE_ID_HPSB, POLL_ENTRY_READ_INPUT_REG, MODBUS_INPUT_REG_START, MODBUS_INPUT_REG_COUNT },
-    /* LPSB1 */
-    { SLAVE_ID_LPSB1, POLL_ENTRY_READ_DISCRETE,  MODBUS_DISCRETE_START, MODBUS_DISCRETE_COUNT },
-    { SLAVE_ID_LPSB1, POLL_ENTRY_READ_COIL,      MODBUS_COIL_START,     MODBUS_COIL_COUNT },
-    { SLAVE_ID_LPSB1, POLL_ENTRY_READ_HOLDING,   MODBUS_HOLDING_START, MODBUS_HOLDING_COUNT },
-    { SLAVE_ID_LPSB1, POLL_ENTRY_READ_INPUT_REG, MODBUS_INPUT_REG_START, MODBUS_INPUT_REG_COUNT },
-    /* LPSB2 */
-    { SLAVE_ID_LPSB2, POLL_ENTRY_READ_DISCRETE,  MODBUS_DISCRETE_START, MODBUS_DISCRETE_COUNT },
-    { SLAVE_ID_LPSB2, POLL_ENTRY_READ_COIL,      MODBUS_COIL_START,     MODBUS_COIL_COUNT },
-    { SLAVE_ID_LPSB2, POLL_ENTRY_READ_HOLDING,   MODBUS_HOLDING_START, MODBUS_HOLDING_COUNT },
-    { SLAVE_ID_LPSB2, POLL_ENTRY_READ_INPUT_REG, MODBUS_INPUT_REG_START, MODBUS_INPUT_REG_COUNT },
-    /* LPSB3 */
-    { SLAVE_ID_LPSB3, POLL_ENTRY_READ_DISCRETE,  MODBUS_DISCRETE_START, MODBUS_DISCRETE_COUNT },
-    { SLAVE_ID_LPSB3, POLL_ENTRY_READ_COIL,      MODBUS_COIL_START,     MODBUS_COIL_COUNT },
-    { SLAVE_ID_LPSB3, POLL_ENTRY_READ_HOLDING,   MODBUS_HOLDING_START, MODBUS_HOLDING_COUNT },
-    { SLAVE_ID_LPSB3, POLL_ENTRY_READ_INPUT_REG, MODBUS_INPUT_REG_START, MODBUS_INPUT_REG_COUNT },
+    /* Unified Rule v1.0: Sub-board reads are FC04 only */
+    { SLAVE_ID_HPSB,  POLL_ENTRY_READ_INPUT_REG, MODBUS_INPUT_REG_START, MODBUS_INPUT_REG_COUNT_HPSB },
+    { SLAVE_ID_LPSB1, POLL_ENTRY_READ_INPUT_REG, MODBUS_INPUT_REG_START, MODBUS_INPUT_REG_COUNT_LPSB },
+    { SLAVE_ID_LPSB2, POLL_ENTRY_READ_INPUT_REG, MODBUS_INPUT_REG_START, MODBUS_INPUT_REG_COUNT_LPSB },
+    { SLAVE_ID_LPSB3, POLL_ENTRY_READ_INPUT_REG, MODBUS_INPUT_REG_START, MODBUS_INPUT_REG_COUNT_LPSB },
 };
 
 static inline uint8_t slave_idx(SlaveId_t slave)
@@ -69,7 +54,7 @@ uint16_t ModbusTable_GetHoldingReg(SlaveId_t slave, uint16_t reg_index)
 
 uint16_t ModbusTable_GetInputReg(SlaveId_t slave, uint16_t reg_index)
 {
-    if (!IS_VALID_SLAVE_ID(slave) || reg_index >= MODBUS_INPUT_REG_COUNT)
+    if (!IS_VALID_SLAVE_ID(slave) || reg_index >= MODBUS_INPUT_REG_IMG_MAX)
         return 0;
     return input_reg_img[slave_idx(slave)][reg_index];
 }
@@ -94,7 +79,7 @@ void ModbusTable_SetHoldingReg(SlaveId_t slave, uint16_t reg_index, uint16_t val
 
 void ModbusTable_SetInputReg(SlaveId_t slave, uint16_t reg_index, uint16_t value)
 {
-    if (!IS_VALID_SLAVE_ID(slave) || reg_index >= MODBUS_INPUT_REG_COUNT) return;
+    if (!IS_VALID_SLAVE_ID(slave) || reg_index >= MODBUS_INPUT_REG_IMG_MAX) return;
     input_reg_img[slave_idx(slave)][reg_index] = value;
 }
 
@@ -126,7 +111,7 @@ void ModbusTable_SetInputRegs(SlaveId_t slave, uint16_t start, const uint16_t *r
 {
     uint8_t si = slave_idx(slave);
     if (!IS_VALID_SLAVE_ID(slave) || regs == NULL) return;
-    for (uint16_t i = 0; i < num && (start + i) < MODBUS_INPUT_REG_COUNT; i++)
+    for (uint16_t i = 0; i < num && (start + i) < MODBUS_INPUT_REG_IMG_MAX; i++)
         input_reg_img[si][start + i] = regs[i];
 }
 
