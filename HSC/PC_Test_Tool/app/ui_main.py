@@ -1981,10 +1981,11 @@ class MainWindow(QMainWindow):
             self._lpsb_log_timer.stop()
             return
         # 모든 SSR이 OFF 상태이면 모니터링 중단
+        # HPSB와 동일하게 버튼 체크 상태 기준으로 판단 (FC04 stale 데이터에 의한 오중단 방지)
         try:
-            any_on = any(bool(s) for s in self._lpsb_ssr_state)
+            any_on = any(bool(b.isChecked()) for b in self._lpsb_ssr_btns)
         except Exception:
-            any_on = False
+            any_on = any(bool(s) for s in self._lpsb_ssr_state)
         if not any_on:
             self._lpsb_log_timer.stop()
             self._log.log_info("[STATE] → IDLE (LPSB: 모든 SSR OFF → 모니터링 중단)")

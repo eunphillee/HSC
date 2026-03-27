@@ -164,12 +164,17 @@ int Gateway_Action_WriteSubCoil(uint8_t slave_id, uint16_t coil_index, uint8_t v
     if (ret == 0) {
         /* ACK received: definite success */
         ModbusTable_SetCoil(s, coil_index, value ? 1 : 0);
+        /* Immediately mirror SSR/Relay state into input_reg_img (reg2..4 = coil0..2).
+         * Prevents stale data being returned to PC before the next on-demand FC04 poll.
+         * FC04 map (HPSB & LPSB): reg2=ch1, reg3=ch2, reg4=ch3 state. */
+        ModbusTable_SetInputReg(s, 2u + coil_index, value ? 1u : 0u);
         return 0;
     }
     if (err == MODBUS_MASTER_FC05_ERR_TIMEOUT || err == MODBUS_MASTER_FC05_ERR_INVALID_RESP) {
         /* LPSB may not always echo FC05 but physically executes the command.
-         * Optimistic update: PC-side FC04 read-back will confirm actual state. */
+         * Optimistic update: mirror into both coil and input_reg images. */
         ModbusTable_SetCoil(s, coil_index, value ? 1 : 0);
+        ModbusTable_SetInputReg(s, 2u + coil_index, value ? 1u : 0u);
         return 0;
     }
     /* EXCEPTION (0x04 etc.): subboard explicitly rejected – report failure */
