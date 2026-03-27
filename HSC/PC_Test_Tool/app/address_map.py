@@ -50,12 +50,16 @@ SUB_VB_COIL_COUNT = 5    # 891..895
 # Unified Rule:
 # - Mainboard local relay control: FC05 coil0..3 (0-based)
 # - Downstream(HPSB/LPSB) relay/SSR control via Mainboard routing: use H2Tech mapped coil addresses.
-#   HPSB: 898..901 (RELAY1..4), LPSB: 902..910 (SSR1..3 * 3 boards)
+#   H2Map: h2_dec = FC05_addr + 1
+#   HPSB:  FC05 addr 898..900 → h2_dec 899..901 → HPSB coil 0..2 (RELAY1..3)
+#   LPSB2: FC05 addr 901..903 → h2_dec 902..904 → LPSB1(slave=2) coil 0..2 (SSR1..3)
+#   LPSB4: FC05 addr 904..906 → h2_dec 905..907 → LPSB2(slave=4) coil 0..2
+#   LPSB8: FC05 addr 907..909 → h2_dec 908..910 → LPSB3(slave=8) coil 0..2
 # UI는 HPSB 채널을 3개만 표시(0..2)하므로 SUB_HPSB_COIL_COUNT는 3으로 둡니다.
 SUB_HPSB_COIL_BASE = 898
 SUB_HPSB_COIL_COUNT = 3
-SUB_LPSB_COIL_BASE = 902   # FC05 addr 902..910 = LPSB2/3/4(=slave 2/4/8) SSR1..3
-SUB_LPSB_COIL_COUNT = 9    # 902..904=slave2, 905..907=slave4, 908..910=slave8
+SUB_LPSB_COIL_BASE = 901   # FC05 addr 901..909 = LPSB2/4/8(=slave 2/4/8) SSR1..3
+SUB_LPSB_COIL_COUNT = 9    # 901..903=slave2, 904..906=slave4, 907..909=slave8
 # error_flags (FC03 2112): bit0=AGG_ERR_COMM_HPSB, bit1=AGG_ERR_COMM_LPSB
 ERROR_FLAGS_REG = 2112
 

@@ -181,11 +181,14 @@ int Gateway_Action_WriteSubCoil(uint8_t slave_id, uint16_t coil_index, uint8_t v
          */
         err = ModbusMaster_GetLastFc05Error();
         if (err == MODBUS_MASTER_FC05_ERR_TIMEOUT || err == MODBUS_MASTER_FC05_ERR_INVALID_RESP) {
+            /* Physical write may have succeeded even if FC05 response was missed.
+             * Verify by on-demand FC04 read: HPSB/LPSB both report coil state at input_reg[2+coil_index].
+             * (HPSB reg2..4=RELAY1..3 state; LPSB reg2..4=SSR1..3 state) */
             uint32_t deadline = HAL_GetTick() + FC05_READBACK_VERIFY_TIMEOUT_MS;
             ModbusMaster_RequestOnDemandPoll((uint16_t)slave_id);
             while ((int32_t)(HAL_GetTick() - deadline) < 0) {
                 ModbusMaster_Poll();
-                if ((uint8_t)ModbusTable_GetCoil(s, coil_index) == (value ? 1u : 0u)) {
+                if ((uint8_t)ModbusTable_GetInputReg(s, 2u + coil_index) == (value ? 1u : 0u)) {
                     ret = 0;
                     break;
                 }

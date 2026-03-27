@@ -1768,7 +1768,8 @@ class MainWindow(QMainWindow):
         self._pending_lpsb_ui_write = {"idx": ssr_idx, "prev": prev_state, "target": new_state}
         onoff_str = "ON" if new_state else "OFF"
         board_idx = int(getattr(self, "_selected_lpsb_index", 0))
-        board_no = board_idx + 2  # UI label: LPSB2/3/4
+        _lpsb_board_ids = [2, 4, 8]
+        board_no = _lpsb_board_ids[board_idx] if board_idx < len(_lpsb_board_ids) else board_idx + 2
         addr = SUB_LPSB_COIL_BASE + board_idx * 3 + ssr_idx
         self._log.log_info("[PC-TOOL] route=mainboard-routing target=LPSB")
         self._log.log_info(f"[LPSB{board_no}] FC05 write SSR{ssr_idx + 1} -> {onoff_str} (addr={addr})")
@@ -2072,6 +2073,7 @@ class MainWindow(QMainWindow):
         AGG_ERR_COMM_HPSB = 1
         AGG_ERR_COMM_LPSB = 2
         self._hpsb_probe_inflight = False
+        self._lpsb_adc_poll_inflight = False
         # comm bad 시 진단(4000..)을 너무 자주 읽지 않도록 레이트리밋
         if not hasattr(self, "_diag_last_ms"):
             self._diag_last_ms = 0
