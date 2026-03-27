@@ -113,6 +113,12 @@ static void set_de_rx(void)
 
 #define DE_RX_GUARD_MS  1  /* Delay after TX before DE->RX so last byte leaves driver (PB12) */
 
+/* FC05 전송 전, 이전 FC04 poll 응답(예: HPSB 37바이트)이 버스에 아직 남아 있는 경우
+ * RS485 버스 충돌 및 응답 오인을 방지하기 위해 버스 무음이 될 때까지 드레인한다.
+ * max_ms=50: HPSB FC04 응답 최대 38ms + 여유. silence=4: 3.5 char-time(9600baud≈3.6ms) 초과. */
+#define FC05_STALE_RX_DRAIN_MS      50u
+#define FC05_STALE_RX_SILENCE_MS     4u
+
 static void uart2_mb_log(const char *msg)
 {
 #if MODBUS_MASTER_DEBUG_LOG
@@ -241,6 +247,25 @@ static void uart2_flush_rx(void)
 	__HAL_UART_FLUSH_DRREGISTER(&MODBUS_UART);
 }
 
+/* RXNEIE가 suspend된 상태에서 직접 SR/DR 폴링으로 잔여 바이트를 소비한다.
+ * HAL_UART_Receive를 쓰지 않아 ORE 상태에서도 안정적으로 동작한다. */
+static void uart2_drain_stale_rx_window(uint32_t max_ms)
+{
+    uint32_t start   = HAL_GetTick();
+    uint32_t last_rx = start;
+    while ((HAL_GetTick() - start) < max_ms) {
+        uint32_t sr = MODBUS_UART.Instance->SR;
+        if (sr & (USART_SR_RXNE | USART_SR_ORE)) {
+            /* SR을 먼저 읽고 DR을 읽으면 RXNE + ORE 동시 클리어(RM0090 기준) */
+            volatile uint8_t b = (uint8_t)MODBUS_UART.Instance->DR;
+            (void)b;
+            last_rx = HAL_GetTick();
+        }
+        if ((HAL_GetTick() - last_rx) >= FC05_STALE_RX_SILENCE_MS) {
+            break;
+        }
+    }
+}
 
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
@@ -706,9 +731,11 @@ int ModbusMaster_WriteCoil(SlaveId_t slave, uint16_t coil_addr, uint8_t value)
     /* FC05는 HAL_UART_Receive()로 응답을 블로킹 수신하므로,
      * 링버퍼 RX IT가 바이트를 훔치지 않도록 UART2 RX IT를 잠시 중지한다. */
     uart2_rx_it_suspend();
-    /* 폴링 수신 찌꺼기/부분 프레임이 FC05 응답 수신을 오염시키는 경우가 있어,
-     * FC05 트랜잭션 시작 시점에 RX를 한 번 강제로 비운다. */
+    /* 링버퍼 + HW RX 클리어 후, 이전 FC04 poll 응답(예: HPSB 37바이트)이
+     * 버스에서 전송 완료될 때까지 드레인한다.
+     * → RS485 충돌 및 응답 바이트 오인 방지 */
     uart2_flush_rx();
+    uart2_drain_stale_rx_window(FC05_STALE_RX_DRAIN_MS);
     {
         uint16_t coil_value_raw = (uint16_t)((pdu[4] << 8) | pdu[5]);
         char b[128];
@@ -780,7 +807,11 @@ int ModbusMaster_WriteCoil(SlaveId_t slave, uint16_t coil_addr, uint8_t value)
 #if FC05_GW_STEP_LOG
         Gateway_LogFc05StepUart2RxTimeout();
 #endif
+    } else if (rx_buf_fc05[0] != (uint8_t)target_slave) {
+        /* 슬레이브 주소 불일치: 다른 장치(예: HPSB FC04 응답)의 프레임 잔류 */
+        s_last_fc05_err = MODBUS_MASTER_FC05_ERR_INVALID_RESP;
     } else if (rx_buf_fc05[1] & 0x80) {
+        /* 올바른 슬레이브에서 온 exception 응답 */
         s_last_fc05_err = MODBUS_MASTER_FC05_ERR_EXCEPTION;
 #if FC05_GW_STEP_LOG
         Gateway_LogFc05StepUart2RxException(rx_buf_fc05[1]);
@@ -791,7 +822,9 @@ int ModbusMaster_WriteCoil(SlaveId_t slave, uint16_t coil_addr, uint8_t value)
         Gateway_LogFc05StepUart2RxOk();
 #endif
     }
-    int is_exception = (rx == HAL_OK && (rx_buf_fc05[1] & 0x80u) != 0u);
+    int is_exception = (rx == HAL_OK &&
+                        rx_buf_fc05[0] == (uint8_t)target_slave &&
+                        (rx_buf_fc05[1] & 0x80u) != 0u);
     int rx_ok = 0;
     if (!is_exception && rx == HAL_OK) {
         rx_ok = (ModbusRTU_ValidateFC05Response(rx_buf_fc05, MODBUS_FC05_RESPONSE_LEN, target_slave) == 0);
