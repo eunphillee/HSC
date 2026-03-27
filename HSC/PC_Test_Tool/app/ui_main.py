@@ -1137,11 +1137,12 @@ class MainWindow(QMainWindow):
             return False
 
     def _sync_hpsb_adc_log_timer(self):
-        """HPSB: OUTPUT_MONITORING 상태에서만 2s 주기 모니터링 타이머 동작."""
+        """OUTPUT_MONITORING 상태에서만 2s 주기 통합 모니터링 타이머 동작.
+        monitor_target == "hpsb" 또는 "both" 모두 허용."""
         should_run = bool(
             self._client.connected
             and self._op_state == "OUTPUT_MONITORING"
-            and self._monitor_target == "hpsb"
+            and self._monitor_target in ("hpsb", "both")
         )
         if should_run and not self._hpsb_adc_log_timer.isActive():
             self._hpsb_adc_log_timer.start()
