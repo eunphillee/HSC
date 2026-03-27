@@ -2282,6 +2282,13 @@ class MainWindow(QMainWindow):
             self._lpsb_strips[i].set_state(on)
             self._lpsb_ssr_btns[i].setChecked(on)
             self._lpsb_current_labels[i].setText(_format_sense_channel(sense, base_s, i))
+        # 항상 최신 ADC 값을 캐시 (OUTPUT_MONITORING 시 첫 사이클에도 실제 값 출력)
+        try:
+            self._lpsb_adc_state["avg"]  = [int(sense[base_s + 0]), int(sense[base_s + 1]), int(sense[base_s + 2])]
+            self._lpsb_adc_state["pkpk"] = [int(sense[base_s + 3]), int(sense[base_s + 4]), int(sense[base_s + 5])]
+            self._lpsb_adc_state["cur"]  = [int(sense[base_s + 6]), int(sense[base_s + 7]), int(sense[base_s + 8])]
+        except Exception:
+            pass
         # FC05 fail 후 read-back 검증: 실제 coil 상태와 목표가 같으면 성공으로 확정
         if self._pending_lpsb_verify is not None:
             try:
@@ -2329,16 +2336,7 @@ class MainWindow(QMainWindow):
             if self._monitor_target == "hpsb":
                 self._log_hpsb_monitoring_state()
             elif self._monitor_target == "lpsb":
-                # Mainboard routing의 선택 보드(LPSB2/3/4) 블록에서 LPSB 상태 구성
-                try:
-                    avg_l = [int(sense[base_s + 0]), int(sense[base_s + 1]), int(sense[base_s + 2])]
-                    pk_l = [int(sense[base_s + 3]), int(sense[base_s + 4]), int(sense[base_s + 5])]
-                    cur_l = [int(sense[base_s + 6]), int(sense[base_s + 7]), int(sense[base_s + 8])]
-                    self._lpsb_adc_state["avg"] = avg_l
-                    self._lpsb_adc_state["pkpk"] = pk_l
-                    self._lpsb_adc_state["cur"] = cur_l
-                except Exception:
-                    pass
+                # _lpsb_adc_state는 위에서 이미 업데이트됨 → 바로 로그 출력
                 self._log_lpsb_monitoring_state()
         else:
             self._log.log_tagged("[HPSB][LPSB2][LPSB4][LPSB8]", "FC04", SUB_SENSE_REG, "sub", "OK")
