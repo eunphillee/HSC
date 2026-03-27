@@ -1016,18 +1016,14 @@ class MainWindow(QMainWindow):
 
     def _start_output_monitoring(self, target: str):
         """Relay/SSR ON 상태 진입 시 OUTPUT_MONITORING 상태로 전환.
-        target: "hpsb" | "lpsb"
-        출력이 모두 OFF 될 때까지 2s 주기 상태 로그를 계속 출력.
+        target: "hpsb" | "lpsb" (내부적으로 항상 "both"로 통합: HPSB+LPSB 2줄 동시 출력)
+        모든 출력(HPSB Relay + LPSB SSR)이 OFF 될 때까지 2s 주기 로그 출력.
         """
-        self._monitor_target = target
+        self._monitor_target = "both"
         self._monitor_retry_count = 0
         self._set_op_state("OUTPUT_MONITORING")
-        board = "HPSB" if target == "hpsb" else "LPSB"
-        self._log.log_info(f"[STATE] → OUTPUT MONITORING ({board}, 출력 OFF 시 자동 중단)")
-        if target == "hpsb":
-            self._hpsb_adc_log_timer.start()
-        elif target == "lpsb":
-            self._lpsb_log_timer.start()
+        self._log.log_info("[STATE] → OUTPUT MONITORING (HPSB+LPSB, 모든 출력 OFF 시 자동 중단)")
+        self._hpsb_adc_log_timer.start()
 
     def _log_hpsb_monitoring_state(self):
         """HPSB 상태를 규격 포맷으로 로그 출력 (OUTPUT_MONITORING 전용 단일 상태 줄)."""
@@ -1172,20 +1168,24 @@ class MainWindow(QMainWindow):
             self.request_read_sub.emit()
 
     def _on_hpsb_adc_log_tick(self):
-        """2s OUTPUT MONITORING: FC04 read 요청 → result 핸들러에서 상태 로그 출력.
-        HPSB Relay 중 하나라도 ON 상태인 동안 계속 실행, 모두 OFF 되면 자동 IDLE 복귀.
+        """2s OUTPUT MONITORING (HPSB+LPSB 통합): FC04 read 요청 → result 핸들러에서 두 줄 로그 출력.
+        HPSB Relay / LPSB SSR 중 하나라도 ON 상태인 동안 계속 실행, 모두 OFF 되면 자동 IDLE 복귀.
         """
-        if not (self._client.connected and self._op_state == "OUTPUT_MONITORING" and self._monitor_target == "hpsb"):
+        if not (self._client.connected and self._op_state == "OUTPUT_MONITORING" and self._monitor_target == "both"):
             self._hpsb_adc_log_timer.stop()
             return
-        # 모든 Relay가 OFF 상태이면 모니터링 중단
+        # HPSB Relay + LPSB SSR 모두 OFF → 모니터링 중단
         try:
-            any_on = any(bool(b.isChecked()) for b in self._hpsb_btns)
+            any_hpsb_on = any(bool(b.isChecked()) for b in self._hpsb_btns)
         except Exception:
-            any_on = False
-        if not any_on:
+            any_hpsb_on = False
+        try:
+            any_lpsb_on = any(bool(b.isChecked()) for b in self._lpsb_ssr_btns)
+        except Exception:
+            any_lpsb_on = any(bool(s) for s in self._lpsb_ssr_state)
+        if not (any_hpsb_on or any_lpsb_on):
             self._hpsb_adc_log_timer.stop()
-            self._log.log_info("[STATE] → IDLE (HPSB: 모든 Relay OFF → 모니터링 중단)")
+            self._log.log_info("[STATE] → IDLE (모든 출력 OFF → 모니터링 중단)")
             self._set_op_state("IDLE")
             return
         self._request_hpsb_adc_refresh_if_needed()
@@ -1970,14 +1970,17 @@ class MainWindow(QMainWindow):
             self._lpsb_log_timer.stop()
 
     def _on_lpsb_log_tick(self):
-        """2s OUTPUT MONITORING: FC04 read 요청 → result 핸들러에서 상태 로그 출력.
-        LPSB SSR 중 하나라도 ON 상태인 동안 계속 실행, 모두 OFF 되면 자동 IDLE 복귀.
+        """(레거시) _lpsb_log_timer 콜백. 통합 모니터링(_on_hpsb_adc_log_tick)으로 대체됨.
+        _monitor_target == "both" 이면 타이머를 멈추고 종료 (중복 실행 방지).
         """
-        if not (self._client.connected and self._op_state == "OUTPUT_MONITORING" and self._monitor_target == "lpsb"):
+        if not (self._client.connected and self._op_state == "OUTPUT_MONITORING"):
             self._lpsb_log_timer.stop()
             return
-        # 모든 SSR이 OFF 상태이면 모니터링 중단
-        # HPSB와 동일하게 버튼 체크 상태 기준으로 판단 (FC04 stale 데이터에 의한 오중단 방지)
+        if self._monitor_target == "both":
+            # 통합 모니터링 타이머(_hpsb_adc_log_timer)가 담당하므로 이 타이머는 중지
+            self._lpsb_log_timer.stop()
+            return
+        # 하위 호환: monitor_target == "lpsb" (구버전 경로, 정상 운영에서는 진입 안 함)
         try:
             any_on = any(bool(b.isChecked()) for b in self._lpsb_ssr_btns)
         except Exception:
@@ -1992,7 +1995,6 @@ class MainWindow(QMainWindow):
             if self._direct_mode == "lpsb":
                 self.request_read_direct_lpsb_adc.emit()
             else:
-                # Mainboard routing 모드: 선택 LPSB2/3/4 상태도 sub read 결과에서 추출
                 if not getattr(self, "_hpsb_probe_inflight", False):
                     self._hpsb_probe_inflight = True
                     self.request_read_sub.emit()
@@ -2331,13 +2333,10 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         if self._op_state == "OUTPUT_MONITORING":
-            # OUTPUT_MONITORING 중: 규격 포맷 상태 로그 1줄만 출력, retry count 리셋
+            # OUTPUT_MONITORING 중: HPSB + LPSB 두 줄 동시 출력, retry count 리셋
             self._monitor_retry_count = 0
-            if self._monitor_target == "hpsb":
-                self._log_hpsb_monitoring_state()
-            elif self._monitor_target == "lpsb":
-                # _lpsb_adc_state는 위에서 이미 업데이트됨 → 바로 로그 출력
-                self._log_lpsb_monitoring_state()
+            self._log_hpsb_monitoring_state()
+            self._log_lpsb_monitoring_state()
         else:
             self._log.log_tagged("[HPSB][LPSB2][LPSB4][LPSB8]", "FC04", SUB_SENSE_REG, "sub", "OK")
         # READ_ONCE (Read once 버튼) 경로: 완료 후 IDLE 복귀
