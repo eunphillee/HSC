@@ -180,7 +180,9 @@ int Gateway_Action_WriteSubCoil(uint8_t slave_id, uint16_t coil_index, uint8_t v
          * causing false 0x04 to PC. For timeout/invalid response, verify by short read-back.
          */
         err = ModbusMaster_GetLastFc05Error();
-        if (err == MODBUS_MASTER_FC05_ERR_TIMEOUT || err == MODBUS_MASTER_FC05_ERR_INVALID_RESP) {
+        if (err == MODBUS_MASTER_FC05_ERR_TIMEOUT ||
+            err == MODBUS_MASTER_FC05_ERR_INVALID_RESP ||
+            err == MODBUS_MASTER_FC05_ERR_EXCEPTION) {
             /* Physical write may have succeeded even if FC05 response was missed.
              * Verify by on-demand FC04 read: HPSB/LPSB both report coil state at input_reg[2+coil_index].
              * (HPSB reg2..4=RELAY1..3 state; LPSB reg2..4=SSR1..3 state) */

@@ -112,6 +112,9 @@ static void set_de_rx(void)
 }
 
 #define DE_RX_GUARD_MS  1  /* Delay after TX before DE->RX so last byte leaves driver (PB12) */
+/* FC05 직전, 이전 poll 응답 잔여 프레임이 뒤늦게 도착해 응답 파싱을 오염시키는 현상 방지용 */
+#define FC05_STALE_RX_DRAIN_MS      30u
+#define FC05_STALE_RX_SILENCE_MS     3u
 
 static void uart2_mb_log(const char *msg)
 {
@@ -239,6 +242,26 @@ static void uart2_flush_rx(void)
 	rb_clear();
 	uart2_clear_ore_if_any();
 	__HAL_UART_FLUSH_DRREGISTER(&MODBUS_UART);
+}
+
+/* FC05 트랜잭션 시작 전 짧은 시간 동안 UART2 RX를 비워 stale frame 혼입을 줄인다.
+ * - 이전 on-demand poll 응답이 늦게 들어오는 경우를 흡수
+ * - RX IT는 이미 suspend된 상태에서만 호출 */
+static void uart2_drain_stale_rx_window(uint32_t max_ms)
+{
+    uint32_t start = HAL_GetTick();
+    uint32_t last_rx = start;
+    uint8_t dump;
+    while ((HAL_GetTick() - start) < max_ms) {
+        HAL_StatusTypeDef st = HAL_UART_Receive(&MODBUS_UART, &dump, 1u, 1u);
+        if (st == HAL_OK) {
+            last_rx = HAL_GetTick();
+            continue;
+        }
+        if ((HAL_GetTick() - last_rx) >= FC05_STALE_RX_SILENCE_MS) {
+            break;
+        }
+    }
 }
 
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
@@ -705,6 +728,8 @@ int ModbusMaster_WriteCoil(SlaveId_t slave, uint16_t coil_addr, uint8_t value)
     /* FC05는 HAL_UART_Receive()로 응답을 블로킹 수신하므로,
      * 링버퍼 RX IT가 바이트를 훔치지 않도록 UART2 RX IT를 잠시 중지한다. */
     uart2_rx_it_suspend();
+    /* in-flight poll 응답이 지연 도착해 FC05 응답으로 오인되지 않도록 짧게 drain */
+    uart2_drain_stale_rx_window(FC05_STALE_RX_DRAIN_MS);
     /* 폴링 수신 찌꺼기/부분 프레임이 FC05 응답 수신을 오염시키는 경우가 있어,
      * FC05 트랜잭션 시작 시점에 RX를 한 번 강제로 비운다. */
     uart2_flush_rx();
