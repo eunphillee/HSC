@@ -1036,16 +1036,14 @@ class MainWindow(QMainWindow):
             pkpk = self._hpsb_adc_state.get("pkpk", [0, 0, 0])
             cur  = self._hpsb_adc_state.get("cur",  [0, 0, 0])
             def _io(v): return "ON" if int(v) else "OFF"
-            ts = _now_ts()
             msg = (
-                f"{ts}: "
                 f"ADC1 AVG={int(avg[0])} PKPK={int(pkpk[0])} I={_io(cur[0])} | "
                 f"ADC2 AVG={int(avg[1])} PKPK={int(pkpk[1])} I={_io(cur[1])} | "
                 f"ADC3 AVG={int(avg[2])} PKPK={int(pkpk[2])} I={_io(cur[2])}"
             )
             self._log.log_info(msg)
         except Exception:
-            self._log.log_info(f"{_now_ts()}: ADC1 AVG=0 PKPK=0 I=OFF | ADC2 AVG=0 PKPK=0 I=OFF | ADC3 AVG=0 PKPK=0 I=OFF")
+            self._log.log_info("ADC1 AVG=0 PKPK=0 I=OFF | ADC2 AVG=0 PKPK=0 I=OFF | ADC3 AVG=0 PKPK=0 I=OFF")
 
     def _log_lpsb_monitoring_state(self):
         """LPSB 상태를 규격 포맷으로 로그 출력 (OUTPUT_MONITORING 전용 단일 상태 줄)."""
@@ -1054,16 +1052,14 @@ class MainWindow(QMainWindow):
             pkpk = self._lpsb_adc_state.get("pkpk", [0, 0, 0])
             cur  = self._lpsb_adc_state.get("cur",  [0, 0, 0])
             def _io(v): return "ON" if int(v) else "OFF"
-            ts = _now_ts()
             msg = (
-                f"{ts}: "
                 f"ADC1 AVG={int(avg[0])} PKPK={int(pkpk[0])} I={_io(cur[0])} | "
                 f"ADC2 AVG={int(avg[1])} PKPK={int(pkpk[1])} I={_io(cur[1])} | "
                 f"ADC3 AVG={int(avg[2])} PKPK={int(pkpk[2])} I={_io(cur[2])}"
             )
             self._log.log_info(msg)
         except Exception:
-            self._log.log_info(f"{_now_ts()}: ADC1 AVG=0 PKPK=0 I=OFF | ADC2 AVG=0 PKPK=0 I=OFF | ADC3 AVG=0 PKPK=0 I=OFF")
+            self._log.log_info("ADC1 AVG=0 PKPK=0 I=OFF | ADC2 AVG=0 PKPK=0 I=OFF | ADC3 AVG=0 PKPK=0 I=OFF")
 
     def _set_hpsb_write_pending_ui(self, idx: int, desired_value: bool):
         if idx < 0 or idx >= len(self._hpsb_btns):
@@ -1782,7 +1778,7 @@ class MainWindow(QMainWindow):
             # OUTPUT_MONITORING 중 단일 실패: 마지막 정상값 유지 + WARN 1줄 (최대 2회 재시도)
             if self._op_state == "OUTPUT_MONITORING":
                 self._monitor_retry_count += 1
-                self._log.log_info(f"{_now_ts()}: MONITOR WARN - no response (keep last value)")
+                self._log.log_info(f"MONITOR WARN - no response (keep last value)")
                 if self._monitor_retry_count <= 2:
                     self._lpsb_adc_poll_inflight = True
                     def _retry_lpsb():
@@ -1844,7 +1840,7 @@ class MainWindow(QMainWindow):
             # OUTPUT_MONITORING 중 단일 실패: 마지막 정상값 유지 + WARN 1줄 (최대 2회 재시도)
             if self._op_state == "OUTPUT_MONITORING":
                 self._monitor_retry_count += 1
-                self._log.log_info(f"{_now_ts()}: MONITOR WARN - no response (keep last value)")
+                self._log.log_info(f"MONITOR WARN - no response (keep last value)")
                 if self._monitor_retry_count <= 2:
                     self._hpsb_adc_poll_inflight = True
                     def _retry_hpsb():
@@ -2090,7 +2086,7 @@ class MainWindow(QMainWindow):
             # 최대 2회까지 재시도, 초과 시 다음 2s 틱까지 대기 (무한 루프 방지)
             if self._op_state == "OUTPUT_MONITORING":
                 self._monitor_retry_count += 1
-                self._log.log_info(f"{_now_ts()}: MONITOR WARN - no response (keep last value)")
+                self._log.log_info(f"MONITOR WARN - no response (keep last value)")
                 if self._monitor_retry_count <= 2:
                     self._hpsb_probe_inflight = True
                     def _retry_sub():
