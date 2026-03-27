@@ -566,11 +566,9 @@ void ModbusMaster_Init(void)
     /* On-demand 정책: 초기에는 polling 비활성. PC 요청 시만 활성화. */
     s_ondemand_poll_mask = 0u;
     s_current_poll_slave_id = 0u;
-#if USE_PC_TEST_UART1_SLAVE
-    s_poll_enable_mask = (uint16_t)SLAVE_ID_HPSB;
-#else
+    /* PC Test 모드 여부 무관하게 모든 슬레이브 on-demand 폴 허용.
+     * s_ondemand_poll_mask가 0이면 어차피 폴 안 됨. */
     s_poll_enable_mask = (uint16_t)(SLAVE_ID_HPSB | SLAVE_ID_LPSB1 | SLAVE_ID_LPSB2 | SLAVE_ID_LPSB3);
-#endif
     uart2_rx_it_start();
 }
 
