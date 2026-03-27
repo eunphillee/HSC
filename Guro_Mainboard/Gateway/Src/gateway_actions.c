@@ -14,8 +14,6 @@
 
 #define PULSE_MS_DOOR  300u
 #define PULSE_MS_PC_IO 500u
-#define FC05_RETRY_DELAY_MS 5u
-#define FC05_READBACK_VERIFY_TIMEOUT_MS 220u
 
 static uint8_t door1_active;
 static uint32_t door1_tick;
@@ -152,7 +150,7 @@ void Gateway_Action_ClearDownstreamWriteFailAlarm(void)
     s_downstream_write_fail = 0;
 }
 
-/* PC→Mainboard FC05 to coil 898..909: forward to HPSB/LPSB (Slave 1,2,4,8). Returns 0 on success (subboard applied). */
+/* PC→Mainboard FC05 to coil 898..909: forward to HPSB/LPSB (Slave 1,2,4,8). Returns 0 on success. */
 int Gateway_Action_WriteSubCoil(uint8_t slave_id, uint16_t coil_index, uint8_t value)
 {
     SlaveId_t s = (SlaveId_t)slave_id;
@@ -163,46 +161,20 @@ int Gateway_Action_WriteSubCoil(uint8_t slave_id, uint16_t coil_index, uint8_t v
     Gateway_LogUart2TxStart(slave_id, coil_index, value ? 1 : 0);
     int ret = ModbusMaster_WriteCoil(s, coil_index, value ? 1 : 0);
     err = ModbusMaster_GetLastFc05Error();
-    if (ret != 0 &&
-        (err == MODBUS_MASTER_FC05_ERR_TIMEOUT || err == MODBUS_MASTER_FC05_ERR_INVALID_RESP)) {
-        const char *reason = (err == MODBUS_MASTER_FC05_ERR_TIMEOUT) ? "timeout" : "invalid/crc";
-        Gateway_LogFc05RetryTry1Fail(slave_id, coil_index, reason);
-        Gateway_LogFc05RetryStart();
-        HAL_Delay(FC05_RETRY_DELAY_MS);
-        ret = ModbusMaster_WriteCoil(s, coil_index, value ? 1 : 0);
-        Gateway_LogFc05RetryTry2Result(ret == 0);
-    }
-    if (ret == 0)
+    if (ret == 0) {
+        /* ACK received: definite success */
         ModbusTable_SetCoil(s, coil_index, value ? 1 : 0);
-    else {
-        /* Field observation:
-         * Downstream coil state can be applied even when FC05 response is missed/invalid,
-         * causing false 0x04 to PC. For timeout/invalid response, verify by short read-back.
-         */
-        err = ModbusMaster_GetLastFc05Error();
-        if (err == MODBUS_MASTER_FC05_ERR_TIMEOUT ||
-            err == MODBUS_MASTER_FC05_ERR_INVALID_RESP ||
-            err == MODBUS_MASTER_FC05_ERR_EXCEPTION) {
-            /* Physical write may have succeeded even if FC05 response was missed.
-             * Verify by on-demand FC04 read: HPSB/LPSB both report coil state at input_reg[2+coil_index].
-             * (HPSB reg2..4=RELAY1..3 state; LPSB reg2..4=SSR1..3 state) */
-            uint32_t deadline = HAL_GetTick() + FC05_READBACK_VERIFY_TIMEOUT_MS;
-            ModbusMaster_RequestOnDemandPoll((uint16_t)slave_id);
-            while ((int32_t)(HAL_GetTick() - deadline) < 0) {
-                ModbusMaster_Poll();
-                if ((uint8_t)ModbusTable_GetInputReg(s, 2u + coil_index) == (value ? 1u : 0u)) {
-                    ret = 0;
-                    break;
-                }
-                HAL_Delay(1);
-            }
-        }
+        return 0;
     }
-    if (ret == 0)
+    if (err == MODBUS_MASTER_FC05_ERR_TIMEOUT || err == MODBUS_MASTER_FC05_ERR_INVALID_RESP) {
+        /* LPSB may not always echo FC05 but physically executes the command.
+         * Optimistic update: PC-side FC04 read-back will confirm actual state. */
         ModbusTable_SetCoil(s, coil_index, value ? 1 : 0);
-    else
-        s_downstream_write_fail = 1;
-    return ret;
+        return 0;
+    }
+    /* EXCEPTION (0x04 etc.): subboard explicitly rejected – report failure */
+    s_downstream_write_fail = 1;
+    return -1;
 }
 
 int Gateway_Action_RequestSubCoilWrite(uint8_t slave_id, uint16_t coil_index, uint8_t value)
