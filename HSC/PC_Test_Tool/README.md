@@ -30,6 +30,16 @@ cd HSC/PC_Test_Tool && python3 -m venv .venv && source .venv/bin/activate && pip
 python main.py
 ```
 
+## Windows 실행 파일 (.exe)
+
+PyInstaller로 단일 실행 파일을 만들 수 있습니다. **반드시 Windows PC에서** 빌드해야 합니다 (macOS에서 `.exe` 크로스 빌드는 불가).
+
+1. Python 3.11+ 설치 후 `HSC/PC_Test_Tool` 폴더에서:
+2. `scripts\build_windows.bat` 실행 (더블클릭 또는 명령 프롬프트)
+3. 결과: `dist\HSC_PC_Test_Tool.exe` (콘솔 창 없음)
+
+수동 빌드: `pip install -r requirements.txt -r requirements-build.txt` 후 `pyinstaller --noconfirm hsc_pc_tool.spec`
+
 After the window opens, the **console** prints a layout verification block: main window size, layout tree (top bar, 3 left cards, 1 right card, bottom 2 cards), and that all sections are visible on 1440×900 without scrolling.
 
 Select COM port (e.g. `COM3` on Windows, `/dev/tty.usbserial-*` or `/dev/ttyUSB0` on macOS/Linux), set Slave ID (default **9**), then Connect. Use the read panels and control buttons as needed.

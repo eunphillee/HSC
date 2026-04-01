@@ -1,0 +1,2 @@
+# Windows .exe 빌드용 (빌드 PC에만 설치)
+pyinstaller>=6.0

@@ -3,3 +3,8 @@ __pycache__/
 .venv/
 venv/
 *.csv
+
+# PyInstaller
+build/
+dist/
+*.spec.bak
