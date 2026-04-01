@@ -38,6 +38,7 @@ from .address_map import (
     SUB_HPSB_COIL_BASE,
     SUB_LPSB_COIL_BASE,
     MAIN_ENV_REG,
+    MAIN_FC04_DI_VBIT_COUNT,
 )
 
 from PyQt6.QtWidgets import QTabWidget
@@ -114,14 +115,14 @@ class DiLedIndicator(QFrame):
         self._state = None  # None=미확인, True=입력 있음(빨강), False=입력 없음(파랑)
 
     def set_di_state(self, has_input: bool | None):
-        """has_input: True=입력 있음(빨강), False=입력 없음(파랑), None=미확인(회색)."""
+        """has_input: True=ON(빨강), False=OFF(파랑), None=미확인(회색)."""
         self._state = has_input
         if has_input is None:
-            self.setStyleSheet("border-radius: 7px; background-color: #555555;")
+            self.setStyleSheet("border-radius: 7px; background-color: #808080;")
         elif has_input:
-            self.setStyleSheet("border-radius: 7px; background-color: #e53935;")
+            self.setStyleSheet("border-radius: 7px; background-color: #ff3b30;")
         else:
-            self.setStyleSheet("border-radius: 7px; background-color: #2196F3;")
+            self.setStyleSheet("border-radius: 7px; background-color: #2f95ff;")
 
 
 class ColorStrip(QFrame):
@@ -154,7 +155,10 @@ def card_frame(title: str = "") -> tuple[QFrame, QVBoxLayout]:
 class MainWindow(QMainWindow):
     request_read_di = pyqtSignal()
     request_read_pc_led = pyqtSignal()
+    request_read_rtc = pyqtSignal()
+    request_set_rtc = pyqtSignal()
     request_write_relay = pyqtSignal(int, bool)
+    request_write_virtual_bit = pyqtSignal(int, bool)
     request_pc_on_pulse = pyqtSignal()
     request_pc_reset_pulse = pyqtSignal()
     request_read_env = pyqtSignal()
@@ -278,6 +282,18 @@ class MainWindow(QMainWindow):
         self._direct_diag_timer = QTimer(self)
         self._direct_diag_timer.setInterval(3000)  # 3초마다 수신 0이면 안내
         self._direct_diag_timer.timeout.connect(self._on_direct_diag_tick)
+        # Mainboard 상태 자동 polling: 300ms (DI / relay 실제 상태 / virtual bit)
+        self._main_poll_timer = QTimer(self)
+        self._main_poll_timer.setInterval(300)
+        self._main_poll_timer.timeout.connect(self._on_main_poll_tick)
+        self._main_poll_inflight = False
+        # RTC read 10회 반복 타이머
+        self._rtc_read_timer = QTimer(self)
+        self._rtc_read_timer.setInterval(500)
+        self._rtc_read_timer.timeout.connect(self._on_rtc_read_tick)
+        self._rtc_read_remaining = 0
+        self._last_main_read_sig: tuple | None = None
+        self._last_relay_led_sig: tuple | None = None
         # direct mode: "none" / "hpsb" / "lpsb"
         self._direct_mode: str = "none"
         self._build_ui()
@@ -296,6 +312,7 @@ class MainWindow(QMainWindow):
         self.request_read_di.connect(self._worker.on_request_read_di, Qt.ConnectionType.QueuedConnection)
         self.request_read_pc_led.connect(self._worker.on_request_read_pc_led, Qt.ConnectionType.QueuedConnection)
         self.request_write_relay.connect(self._worker.on_request_write_relay, Qt.ConnectionType.QueuedConnection)
+        self.request_write_virtual_bit.connect(self._worker.on_request_write_virtual_bit, Qt.ConnectionType.QueuedConnection)
         self.request_pc_on_pulse.connect(self._worker.on_request_pc_on_pulse, Qt.ConnectionType.QueuedConnection)
         self.request_pc_reset_pulse.connect(self._worker.on_request_pc_reset_pulse, Qt.ConnectionType.QueuedConnection)
         self.request_read_env.connect(self._worker.on_request_read_env, Qt.ConnectionType.QueuedConnection)
@@ -323,6 +340,10 @@ class MainWindow(QMainWindow):
         self.request_doc_fc05.connect(self._worker.on_request_doc_fc05, Qt.ConnectionType.QueuedConnection)
         self._worker.doc_fc04_result.connect(self._on_doc_fc04_result)
         self._worker.doc_fc05_result.connect(self._on_doc_fc05_result)
+        # RTC
+        self.request_read_rtc.connect(self._worker.on_request_read_rtc, Qt.ConnectionType.QueuedConnection)
+        self.request_set_rtc.connect(self._worker.on_request_set_rtc, Qt.ConnectionType.QueuedConnection)
+        self._worker.rtc_result.connect(self._on_rtc_result)
 
     def _build_ui(self):
         central = QWidget()
@@ -373,6 +394,17 @@ class MainWindow(QMainWindow):
             "border: 1px solid #3a3a3a; border-radius: 4px;"
         )
         top_lay.addWidget(self._op_state_label)
+        # RTC 버튼
+        self._btn_set_rtc = QPushButton("Set RTC")
+        self._btn_set_rtc.setToolTip("현재 PC 시간을 Mainboard RTC에 설정")
+        self._btn_set_rtc.clicked.connect(lambda: self.request_set_rtc.emit())
+        self._btn_set_rtc.setEnabled(False)
+        top_lay.addWidget(self._btn_set_rtc)
+        self._btn_read_rtc = QPushButton("Read RTC")
+        self._btn_read_rtc.setToolTip("Mainboard RTC 시간을 500ms × 10회 로그 출력")
+        self._btn_read_rtc.clicked.connect(self._on_read_rtc_btn)
+        self._btn_read_rtc.setEnabled(False)
+        top_lay.addWidget(self._btn_read_rtc)
         top_lay.addStretch()
         main_layout.addWidget(top)
 
@@ -407,12 +439,21 @@ class MainWindow(QMainWindow):
         card_out, lay_out = card_frame("Mainboard Outputs (Relay1~4)")
         out_labels = ["RELAY1_EN", "RELAY2_EN", "RELAY3_EN", "RELAY4_EN"]
         self._relay_checks = []
+        self._relay_state_leds = []
         grid_out = QGridLayout()
+        grid_out.setHorizontalSpacing(6)
         for i in range(4):
             chk = QCheckBox(out_labels[i])
             chk.stateChanged.connect(lambda s, idx=i: self._on_relay_toggle(idx, s == Qt.CheckState.Checked.value))
             self._relay_checks.append(chk)
-            grid_out.addWidget(chk, i // 2, i % 2)
+            led = DiLedIndicator()
+            self._relay_state_leds.append(led)
+            col = (i % 2) * 3
+            grid_out.addWidget(chk, i // 2, col)
+            grid_out.addWidget(led, i // 2, col + 1)
+            spc = QLabel("")
+            spc.setFixedWidth(8)
+            grid_out.addWidget(spc, i // 2, col + 2)
         lay_out.addLayout(grid_out)
         left_layout.addWidget(card_out)
 
@@ -432,6 +473,17 @@ class MainWindow(QMainWindow):
         lay_in.addWidget(btn_read_di)
         self._btn_read_di = btn_read_di
         left_layout.addWidget(card_in)
+
+        card_vbit, lay_vbit = card_frame("Virtual Bits (CH1~CH4)")
+        self._vbit_checks = []
+        grid_vbit = QGridLayout()
+        for i in range(4):
+            chk = QCheckBox(f"VBIT_{i + 1:02d}")
+            chk.stateChanged.connect(lambda s, idx=i: self._on_vbit_toggle(idx, s == Qt.CheckState.Checked.value))
+            self._vbit_checks.append(chk)
+            grid_vbit.addWidget(chk, i // 2, i % 2)
+        lay_vbit.addLayout(grid_vbit)
+        left_layout.addWidget(card_vbit)
 
         card_pc, lay_pc = card_frame("PC Status")
         lay_pc.addWidget(QLabel("Outputs (클릭 시 500ms high 출력):"))
@@ -519,7 +571,7 @@ class MainWindow(QMainWindow):
 
         gb_ctrl = QGroupBox("제어")
         lay_ctrl = QVBoxLayout(gb_ctrl)
-        self._btn_main_minimal = QPushButton("Mainboard minimal test (FC04 0/14)")
+        self._btn_main_minimal = QPushButton("Mainboard minimal test (FC04 0/24)")
         self._btn_main_minimal.clicked.connect(self._on_mainboard_minimal_test)
         lay_ctrl.addWidget(self._btn_main_minimal)
         btn_read_once = QPushButton("Read once (HPSB/LPSB)")
@@ -911,7 +963,17 @@ class MainWindow(QMainWindow):
             and func == "FC04"
             and self._lpsb_adc_poll_running
         )
+        # Mainboard 300ms 자동 poll (FC04 addr=0 cnt=24): TX/RX 로그 완전 억제
+        is_main_fc04_poll = bool(
+            self._direct_mode == "none"
+            and func == "FC04"
+            and str(addr) == "0"
+            and str(count_or_value) == str(MAIN_FC04_DI_VBIT_COUNT)
+        )
         emit_detailed_log = True
+        if is_main_fc04_poll:
+            self._suppress_main_fc04_rsp_log = True
+            emit_detailed_log = False
         if is_direct_lpsb_fc04_poll:
             emit_detailed_log = (now - self._last_direct_lpsb_fc04_req_log_ts) >= 2.0
             if emit_detailed_log:
@@ -952,6 +1014,10 @@ class MainWindow(QMainWindow):
         if getattr(self, "_op_state", "IDLE") == "OUTPUT_MONITORING":
             return
         now = time.monotonic()
+        # Mainboard 자동 poll 응답 로그 완전 억제
+        if getattr(self, "_suppress_main_fc04_rsp_log", False):
+            self._suppress_main_fc04_rsp_log = False
+            return
         throttle_direct_lpsb_fc04 = bool(
             self._last_req_route == "direct-lpsb" and self._lpsb_adc_poll_running
         )
@@ -1266,12 +1332,12 @@ class MainWindow(QMainWindow):
         self.request_read_env.emit()
 
     def _on_mainboard_minimal_test(self):
-        """최소 모드: Mainboard FC04 (DI bitmap) 1회 요청 (READ_ONCE)."""
+        """최소 모드: Mainboard FC04 0/24(DI+VBIT) 1회 요청 (READ_ONCE)."""
         if not self._client.connected:
             self._log.log_info("[MAIN] Not connected")
             return
         self._set_op_state("READ_ONCE")
-        self._log.log_info("[MINIMAL] FC04 addr=0 cnt=14 unit=9 (single shot)")
+        self._log.log_info("[MINIMAL] FC04 addr=0 cnt=24 unit=9 (single shot)")
         self.request_read_di.emit()
 
     def _run_hpsb_probe_only(self):
@@ -1302,6 +1368,8 @@ class MainWindow(QMainWindow):
         self._btn_read_di.setEnabled(connected)          # Mainboard DI는 항상 가능
         self._btn_read_pc_led.setEnabled(connected)      # PC LED도 항상 가능
         self._btn_read_env.setEnabled(connected)         # Env도 항상 가능
+        self._btn_set_rtc.setEnabled(connected)
+        self._btn_read_rtc.setEnabled(connected)
         # Read once 버튼은 Direct LPSB 모드에서도 사용:
         # - Mainboard routing: HPSB/LPSB sub read
         # - Direct LPSB: LPSB FC04 (ADC raw 포함) read
@@ -1317,6 +1385,8 @@ class MainWindow(QMainWindow):
         for b in self._lpsb_ssr_btns:
             b.setEnabled(connected and not direct_mode_active)
         for chk in self._relay_checks:
+            chk.setEnabled(connected)
+        for chk in getattr(self, "_vbit_checks", []):
             chk.setEnabled(connected)
         self._btn_pc_on.setEnabled(connected and not direct_mode_active)
         self._btn_pc_reset.setEnabled(connected and not direct_mode_active)
@@ -1354,20 +1424,27 @@ class MainWindow(QMainWindow):
                 else:
                     self._log.log_info("→ [DIRECT] 보드→PC 수신: 이 툴에서 raw 수신 미지원. 터미널에서 screen ... 9600 로 확인하세요.")
             else:
-                # self._env_poll_timer.start()
-                self._log.log_info("→ Read DI 버튼을 눌러 보드 응답을 확인하세요. (보드는 요청 받을 때만 응답 전송)")
+                # Mainboard routing: 300ms 자동 폴링 시작
+                self._main_poll_inflight = False
+                self._main_poll_timer.start()
+                self._log.log_info("→ Mainboard 상태 자동 polling 시작 (300ms: DI / Relay 실제 상태 / Virtual Bit)")
         else:
             self._log.set_raw_line_only(False)
             self._raw_poll_timer.stop()
             self._direct_diag_timer.stop()
             self._env_poll_timer.stop()
             self._sub_poll_timer.stop()
+            self._main_poll_timer.stop()
+            self._main_poll_inflight = False
             self._sub_auto_poll = False
             self._chk_auto_poll.setChecked(False)
             self._status_badge.setText("Disconnected")
             self._status_badge.setStyleSheet("color: #555555; font-weight: bold; padding: 4px 8px;")
             self._stop_lpsb_auto_adc_poll("disconnect")
             self._pending_lpsb_ui_write = None
+            # relay 상태 LED 초기화
+            for led in getattr(self, "_relay_state_leds", []):
+                led.set_di_state(None)
 
     def _refresh_ports(self):
         try:
@@ -1495,18 +1572,93 @@ class MainWindow(QMainWindow):
     def _on_relay_toggle(self, ch: int, onoff: bool):
         self.request_write_relay.emit(ch, onoff)
 
-    def _on_di_result(self, ok: bool, bits: list | None, err: str | None):
+    def _on_vbit_toggle(self, ch: int, onoff: bool):
+        self.request_write_virtual_bit.emit(ch, onoff)
+
+    def _apply_vbit_checks_from_hw(self, vbits: list | None):
+        if not hasattr(self, "_vbit_checks"):
+            return
+        vals = list(vbits) if isinstance(vbits, list) else []
+        vals = (vals + [0, 0, 0, 0])[:4]
+        for i, chk in enumerate(self._vbit_checks):
+            desired = bool(vals[i])
+            old = chk.blockSignals(True)
+            chk.setChecked(desired)
+            chk.blockSignals(old)
+
+    def _apply_relay_state_leds(self, relay_states: list | None):
+        """릴레이 실제 상태 LED 갱신: ON=빨강, OFF=파랑."""
+        if not hasattr(self, "_relay_state_leds"):
+            return
+        vals = list(relay_states) if isinstance(relay_states, list) else []
+        # relay 상태가 부족/미확인인 채널은 OFF(파랑)로 오해되지 않게 None(회색)로 처리
+        vals = (vals + [None, None, None, None])[:4]
+        for i, led in enumerate(self._relay_state_leds):
+            st = vals[i]
+            led.set_di_state(None if st is None else bool(st))
+        sig = tuple(vals)
+        if sig != self._last_relay_led_sig:
+            self._last_relay_led_sig = sig
+            self._log.log_info(f"[UI][RELAY_LED] relay_states={list(sig)}")
+
+    def _on_main_poll_tick(self):
+        """300ms 자동 polling: Mainboard routing 모드 + 연결 상태일 때만."""
+        if self._direct_mode != "none":
+            return
+        if not self._client.connected:
+            return
+        if self._main_poll_inflight:
+            return
+        self._main_poll_inflight = True
+        self.request_read_di.emit()
+
+    # ---- RTC 핸들러 ----
+    def _on_read_rtc_btn(self):
+        self._rtc_read_remaining = 10
+        self._rtc_read_timer.start()
+        self.request_read_rtc.emit()
+
+    def _on_rtc_read_tick(self):
+        if self._rtc_read_remaining <= 0:
+            self._rtc_read_timer.stop()
+            return
+        self._rtc_read_remaining -= 1
+        self.request_read_rtc.emit()
+
+    def _on_rtc_result(self, ok: bool, regs, err):
+        _WDAY = ["일", "월", "화", "수", "목", "금", "토"]
+        if ok and regs and len(regs) >= 6:
+            year, month, day = regs[0], regs[1], regs[2]
+            weekday = regs[3]
+            hour, minute = regs[4], regs[5]
+            second = regs[6] if len(regs) > 6 else 0
+            wname = _WDAY[weekday] if 0 <= weekday <= 6 else "?"
+            self._log.log_info(
+                f"[RTC] {year}-{month:02d}-{day:02d} ({wname}) {hour:02d}:{minute:02d}:{second:02d}"
+            )
+        else:
+            self._log.log_info(f"[RTC] 읽기 실패: {err}")
+
+    def _on_di_result(self, ok: bool, bits: list | None, relay_states: list | None, vbits: list | None, err: str | None):
+        self._main_poll_inflight = False
         if ok and bits is not None:
             for i in range(min(8, len(bits))):
                 self._di_leds[i].set_di_state(bool(bits[i]))  # 1=입력 있음(빨강), 0=없음(파랑)
             for i in range(len(bits), 8):
                 self._di_leds[i].set_di_state(False)
-            self._log.log_tagged("[MAIN]", "FC04", 0, 14, "OK")
+            self._apply_relay_state_leds(relay_states)
+            self._apply_vbit_checks_from_hw(vbits)
+            bits_log = list(bits[:8])
+            relay_log = list(relay_states[:4]) if isinstance(relay_states, list) else []
+            vbits_log = list(vbits[:4]) if isinstance(vbits, list) else []
+            sig = (tuple(bits_log), tuple(relay_log), tuple(vbits_log))
+            if sig != self._last_main_read_sig:
+                self._last_main_read_sig = sig
+                self._log.log_info(f"[MAIN][READ_DI] bits={bits_log} relay_states={relay_log} vbits={vbits_log}")
         else:
-            for led in self._di_leds:
-                led.set_di_state(None)  # 미확인 = 회색
+            # 간헐 통신 실패 1회로 상태가 사라져 보이지 않도록 마지막 정상값을 유지한다.
             msg = err or "No response/timeout"
-            self._log.log_tagged("[MAIN]", "FC04", 0, 14, "Fail", msg)
+            self._log.log_tagged("[MAIN]", "FC04", 0, MAIN_FC04_DI_VBIT_COUNT, "Fail", msg)
             self._show_0xaa_mode_hint_if_needed(msg)
             if msg and ("No response" in msg or "0 received" in msg):
                 self._log.log_info("힌트: 메인보드 빌드에서 ENABLE_PC_TEST_AA_STREAM=0, USE_PC_TEST_UART1_SLAVE=1 인지 확인하세요.")

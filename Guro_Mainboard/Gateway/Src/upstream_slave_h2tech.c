@@ -17,6 +17,11 @@
 #include "app_config.h"
 #include "modbus_table.h"
 #include "modbus_master.h"
+#include "board_rtc.h"
+#include "main_auto_link.h"
+#include "main.h"
+#include <stdio.h>
+#include <string.h>
 
 #define EX_ILLEGAL_FUNCTION  0x01
 #define EX_ILLEGAL_DATA_ADDR 0x02
@@ -53,6 +58,40 @@
 /* FC04 input register diagnostics (service extension) */
 #define UPSTREAM_DIAG_IR_START      4000u
 #define UPSTREAM_DIAG_IR_COUNT      32u
+/* RTC block: 4x0891..0897 (PDU 890..896) */
+#define UPSTREAM_RTC_REG_START      890u
+#define UPSTREAM_RTC_REG_COUNT      7u
+
+#if ENABLE_MB_FC04_MAIN_DEBUG
+static void log_fc04_main_snapshot(uint16_t di_now, uint16_t do_now, const uint16_t *regs)
+{
+    extern UART_HandleTypeDef huart1;
+    if (!regs) return;
+    /* Unified debug values for DI_03 <-> REG4 <-> RELAY3 mapping verification */
+    int di3 = (di_now & (1u << 2)) ? 1 : 0;          /* DI_03 == bitmap bit2 */
+    int reg4 = regs[4] ? 1 : 0;                      /* FC04 MAP_MAIN regs[4] == DI_03 */
+    int relay3 = (regs[11] & (1u << 2)) ? 1 : 0;     /* reg11 bit2 == RELAY3 actual */
+    int relay3_gpio = (HAL_GPIO_ReadPin(RELAY3_EN_GPIO_Port, RELAY3_EN_Pin) == GPIO_PIN_SET) ? 1 : 0;
+
+    /* User-requested direct printf diagnostics (enable only when needed). */
+    (void)printf("RELAY3 GPIO=%d\r\n", relay3_gpio);
+    (void)printf("DI3=%d REG4=%d RELAY3=%d\r\n", di3, reg4, relay3);
+
+    char buf[220];
+    int n = snprintf(
+        buf, sizeof(buf),
+        "[MB][FC04][MAIN] di_now=0x%02X do_now=0x%02X regs2_9=[%u,%u,%u,%u,%u,%u,%u,%u] reg11=0x%02X\r\n",
+        (unsigned)(di_now & 0xFFu),
+        (unsigned)(do_now & 0xFFu),
+        (unsigned)regs[2], (unsigned)regs[3], (unsigned)regs[4], (unsigned)regs[5],
+        (unsigned)regs[6], (unsigned)regs[7], (unsigned)regs[8], (unsigned)regs[9],
+        (unsigned)(regs[11] & 0xFFu)
+    );
+    if (n > 0) {
+        (void)HAL_UART_Transmit(&huart1, (uint8_t *)buf, (uint16_t)n, 100);
+    }
+}
+#endif
 
 static uint32_t baudrate_from_code(uint16_t code)
 {
@@ -367,14 +406,39 @@ static int handle_fc04(uint16_t start_addr, uint16_t count, const void *p_agg,
 {
     const aggregated_status_t *agg = (const aggregated_status_t *)p_agg;
 
+    if (start_addr >= UPSTREAM_RTC_REG_START
+        && start_addr < (uint16_t)(UPSTREAM_RTC_REG_START + UPSTREAM_RTC_REG_COUNT)) {
+        if (count == 0u
+            || (uint32_t)start_addr + (uint32_t)count
+                > (uint32_t)UPSTREAM_RTC_REG_START + (uint32_t)UPSTREAM_RTC_REG_COUNT) {
+            response[0] = 0x84;
+            response[1] = EX_ILLEGAL_DATA_ADDR;
+            return 2;
+        }
+        if (resp_max < (uint16_t)(2u + count * 2u)) return -1;
+        uint16_t rtc_regs[UPSTREAM_RTC_REG_COUNT] = {0};
+        (void)BoardRtc_ReadWordRegs(rtc_regs);
+        response[0] = 0x04;
+        response[1] = (uint8_t)(count * 2u);
+        {
+            uint16_t off = (uint16_t)(start_addr - UPSTREAM_RTC_REG_START);
+            for (uint16_t i = 0; i < count; i++) {
+                uint16_t v = rtc_regs[off + i];
+                response[2u + i * 2u] = (uint8_t)(v >> 8);
+                response[2u + i * 2u + 1u] = (uint8_t)(v & 0xFFu);
+            }
+        }
+        return (int)(2u + count * 2u);
+    }
+
     /* Unified Rule v1.1 FC04 map (0-based)
-     * - Mainboard: 0..13 (14 regs)
+     * - Mainboard: 0..23 (14 regs + reserve + virtual bits)
      * - HPSB copy: 100..115 (16 regs: 0..15)
      * - LPSB(2) copy: 200..213 (14 regs: 0..13)
      * - LPSB(4) copy: 300..313 (14 regs: 0..13)
      * - LPSB(8) copy: 400..413 (14 regs: 0..13)
      */
-    enum { MAP_MAIN_SIZE = 14u, MAP_HPSB_SIZE = 16u, MAP_LPSB_SIZE = 14u, MAP_MAX_SIZE = 16u };
+    enum { MAP_MAIN_SIZE = 24u, MAP_HPSB_SIZE = 16u, MAP_LPSB_SIZE = 14u, MAP_MAX_SIZE = 24u };
     uint16_t base = 0xFFFFu;
     enum { MAP_MAIN, MAP_HPSB, MAP_LPSB2, MAP_LPSB4, MAP_LPSB8 } which = MAP_MAIN;
 
@@ -485,20 +549,32 @@ static int handle_fc04(uint16_t start_addr, uint16_t count, const void *p_agg,
     if (resp_max < (uint16_t)(2u + count * 2u)) return -1;
 
     uint16_t regs[MAP_MAX_SIZE] = {0};
+    uint16_t di_now = 0u;
+    uint16_t do_now = 0u;
 
     switch (which) {
     case MAP_MAIN:
         regs[0] = (agg && agg->error_flags == 0u) ? 1u : 0u;
         regs[1] = agg ? agg->error_flags : 0u;
-        for (uint16_t i = 0; i < 8u; i++) {
-            regs[2u + i] = (agg && (agg->main_di & (1u << i))) ? 1u : 0u;
+        /* DI/DO는 집계 스냅샷 대신 실시간 GPIO bitmap을 사용해 UI 표시 지연/불일치 방지 */
+        {
+            di_now = IO_Main_ReadDI_Bitmap();
+            for (uint16_t i = 0; i < 8u; i++) {
+                regs[2u + i] = (di_now & (1u << i)) ? 1u : 0u;
+            }
         }
         regs[10] = (uint16_t)BSP_ReadPC_LED_IN();
-        /* Mainboard local relay states (bitmap bits0..3 = Relay1..4) */
-        regs[11] = agg ? (uint16_t)(agg->main_do & 0x0Fu) : 0u;
+        /* Mainboard local relay states (bitmap bits0..3 = Relay1..4), 실시간 GPIO read */
+        do_now = IO_Main_ReadDO_Bitmap();
+        regs[11] = (uint16_t)(do_now & 0x0Fu);
         /* Env (SHTC3): temp_c_x10 (signed), rh_x10 (unsigned). If sensor error -> -32768 / 0xFFFF. */
         regs[12] = agg ? (uint16_t)agg->env_temp_cx10 : (uint16_t)0x8000u;
         regs[13] = agg ? agg->env_rh_x10 : 0xFFFFu;
+        for (uint16_t r = 14u; r < 20u; r++) regs[r] = 0u;
+        regs[20] = MainAutoLink_GetVirtEnableWord(0u);
+        regs[21] = MainAutoLink_GetVirtEnableWord(1u);
+        regs[22] = MainAutoLink_GetVirtEnableWord(2u);
+        regs[23] = MainAutoLink_GetVirtEnableWord(3u);
         break;
     case MAP_HPSB:
         regs[0] = agg ? (agg->hpsb_status_reg ? 1u : 0u) : 0u;
@@ -570,6 +646,12 @@ static int handle_fc04(uint16_t start_addr, uint16_t count, const void *p_agg,
         regs[13] = agg ? agg->lpsb3_current_st[2] : 0u;
         break;
     }
+
+#if ENABLE_MB_FC04_MAIN_DEBUG
+    if (which == MAP_MAIN) {
+        log_fc04_main_snapshot(di_now, do_now, regs);
+    }
+#endif
 
     response[0] = 0x04;
     response[1] = (uint8_t)(count * 2u);
@@ -849,7 +931,17 @@ static int handle_fc05(uint16_t start_addr, const uint8_t *write_data,
      * coil6 = RESET  → pulse PC_RESET_EN
      */
     if (start_addr <= 3u) {
+        MainAutoLink_OnManualRelay((uint8_t)start_addr);
         IO_Main_WriteDO((MainDoChannel_t)start_addr, value ? 1u : 0u);
+        response[0] = 0x05;
+        response[1] = (uint8_t)(start_addr >> 8);
+        response[2] = (uint8_t)(start_addr & 0xFFu);
+        response[3] = value ? 0xFFu : 0u;
+        response[4] = 0u;
+        return 5;
+    }
+    if (start_addr >= 20u && start_addr <= 23u) {
+        MainAutoLink_OnVirtualCoil((uint8_t)(start_addr - 20u), value ? 1u : 0u);
         response[0] = 0x05;
         response[1] = (uint8_t)(start_addr >> 8);
         response[2] = (uint8_t)(start_addr & 0xFFu);
@@ -1033,13 +1125,36 @@ int UpstreamSlave_HandleRequest(uint8_t fc, uint16_t start_addr, uint16_t count,
         return handle_fc04(start_addr, count, p_agg, response, resp_max);
     case 0x05:
         return handle_fc05(start_addr, write_data, response, resp_max);
-    /* Unified Rule v1.2: Write = FC05 ONLY. FC06/FC15/FC16 금지. */
+    /* Unified Rule v1.2: Write = FC05 primary, FC16 reserved for RTC block. */
     case 0x06:
     case 0x0F:
-    case 0x10:
         response[0] = (uint8_t)(fc | 0x80u);
         response[1] = EX_ILLEGAL_FUNCTION;
         return 2;
+    case 0x10:
+        if (start_addr != UPSTREAM_RTC_REG_START || count != UPSTREAM_RTC_REG_COUNT || !write_data) {
+            response[0] = 0x90u;
+            response[1] = EX_ILLEGAL_DATA_ADDR;
+            return 2;
+        }
+        {
+            uint16_t rtc_regs[UPSTREAM_RTC_REG_COUNT];
+            for (uint16_t i = 0; i < UPSTREAM_RTC_REG_COUNT; i++) {
+                rtc_regs[i] = (uint16_t)(((uint16_t)write_data[i * 2u] << 8)
+                    | (uint16_t)write_data[i * 2u + 1u]);
+            }
+            if (BoardRtc_WriteWordRegs(rtc_regs) != 0) {
+                response[0] = 0x90u;
+                response[1] = EX_ILLEGAL_DATA_VAL;
+                return 2;
+            }
+            response[0] = 0x10u;
+            response[1] = (uint8_t)(start_addr >> 8);
+            response[2] = (uint8_t)(start_addr & 0xFFu);
+            response[3] = (uint8_t)(count >> 8);
+            response[4] = (uint8_t)(count & 0xFFu);
+            return 5;
+        }
     default:
         response[0] = (uint8_t)(fc | 0x80);
         response[1] = EX_ILLEGAL_FUNCTION;

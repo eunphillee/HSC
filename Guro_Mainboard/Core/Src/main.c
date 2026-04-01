@@ -35,6 +35,8 @@
 #include "wwdg_service.h"
 #include "system_config.h"
 #include "system_sync.h"
+#include "board_rtc.h"
+#include "main_auto_link.h"
 #include <stdio.h>
 #include <string.h>
 /* USER CODE END Includes */
@@ -58,6 +60,8 @@
 I2C_HandleTypeDef hi2c1;
 I2C_HandleTypeDef hi2c3;
 
+RTC_HandleTypeDef hrtc;
+
 UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart2;
 
@@ -75,6 +79,7 @@ static void MX_I2C1_Init(void);
 static void MX_I2C3_Init(void);
 static void MX_USART1_UART_Init(void);
 static void MX_USART2_UART_Init(void);
+static void MX_RTC_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -245,7 +250,9 @@ int main(void)
   MX_I2C3_Init();
   MX_USART1_UART_Init();
   MX_USART2_UART_Init();
+  MX_RTC_Init();
   /* USER CODE BEGIN 2 */
+  BoardRtc_Init();
   /* EEPROM 설정 로드: 실패 또는 검증 실패 시 기본값 저장 후 적용 */
   {
     system_config_t cfg;
@@ -281,6 +288,7 @@ int main(void)
 #if USE_PC_TEST_UART1_SLAVE && !ENABLE_PC_TEST_AA_STREAM
   UpstreamSlaveUart1_Init();
 #endif
+  MainAutoLink_Init();
   LED_Status_Init();
 #if ENABLE_PC_TEST_AA_STREAM
   PcTestAA_Init();
@@ -338,6 +346,7 @@ int main(void)
 
     /* 1ms 주기 기반 스케줄러/업무 처리 */
     LED_Status_Tick_1ms();
+    MainAutoLink_Tick();
     AppScheduler_Update();
 
 #if ENABLE_PC_TEST_AA_STREAM
@@ -393,12 +402,14 @@ void SystemClock_Config(void)
 {
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
   RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+  RCC_PeriphCLKInitTypeDef PeriphClkInitStruct = {0};
 
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE|RCC_OSCILLATORTYPE_LSE;
   RCC_OscInitStruct.HSEState = RCC_HSE_ON;
+  RCC_OscInitStruct.LSEState = RCC_LSE_ON;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
   RCC_OscInitStruct.PLL.PLLM = 8;
@@ -420,6 +431,12 @@ void SystemClock_Config(void)
   RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV2;
 
   if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  PeriphClkInitStruct.PeriphClockSelection = RCC_PERIPHCLK_RTC;
+  PeriphClkInitStruct.RTCClockSelection = RCC_RTCCLKSOURCE_LSE;
+  if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInitStruct) != HAL_OK)
   {
     Error_Handler();
   }
@@ -490,6 +507,41 @@ static void MX_I2C3_Init(void)
   /* USER CODE BEGIN I2C3_Init 2 */
 
   /* USER CODE END I2C3_Init 2 */
+
+}
+
+/**
+  * @brief RTC Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_RTC_Init(void)
+{
+
+  /* USER CODE BEGIN RTC_Init 0 */
+
+  /* USER CODE END RTC_Init 0 */
+
+  /* USER CODE BEGIN RTC_Init 1 */
+
+  /* USER CODE END RTC_Init 1 */
+
+  /** Initialize RTC Only
+  */
+  hrtc.Instance = RTC;
+  hrtc.Init.HourFormat = RTC_HOURFORMAT_24;
+  hrtc.Init.AsynchPrediv = 127;
+  hrtc.Init.SynchPrediv = 255;
+  hrtc.Init.OutPut = RTC_OUTPUT_DISABLE;
+  hrtc.Init.OutPutPolarity = RTC_OUTPUT_POLARITY_HIGH;
+  hrtc.Init.OutPutType = RTC_OUTPUT_TYPE_OPENDRAIN;
+  if (HAL_RTC_Init(&hrtc) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN RTC_Init 2 */
+
+  /* USER CODE END RTC_Init 2 */
 
 }
 

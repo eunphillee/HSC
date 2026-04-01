@@ -14,6 +14,9 @@ MAIN_DI_COUNT = 8
 # FC05 write single coil MAIN_DO_REG → bits 0..3 = RELAY1_EN..RELAY4_EN
 MAIN_DO_REG = 2101
 MAIN_DO_COUNT = 4
+MAIN_VBIT_COIL_BASE = 20
+MAIN_VBIT_COUNT = 4
+MAIN_FC04_DI_VBIT_COUNT = 24
 
 # ---- PC control GPIO (4x2120..2122) ----
 # FC05 write coil: value=1 → 100ms HIGH pulse, value=0 → LOW
@@ -62,6 +65,11 @@ SUB_LPSB_COIL_BASE = 901   # FC05 addr 901..909 = LPSB2/4/8(=slave 2/4/8) SSR1..
 SUB_LPSB_COIL_COUNT = 9    # 901..903=slave2, 904..906=slave4, 907..909=slave8
 # error_flags (FC03 2112): bit0=AGG_ERR_COMM_HPSB, bit1=AGG_ERR_COMM_LPSB
 ERROR_FLAGS_REG = 2112
+
+# ---- Mainboard RTC (FC04/FC16) ----
+# 4x0891..0897 -> PDU 890..896
+MAIN_RTC_REG_START = 890
+MAIN_RTC_REG_COUNT = 7
 
 
 # ---- H2Tech 문서 주소(1x/4x) -> Modbus PDU 0-based offset 변환 ----

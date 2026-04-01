@@ -62,6 +62,11 @@ from .address_map import (
     SUB_LPSB_COIL_BASE,
     SUB_LPSB_COIL_COUNT,
     ERROR_FLAGS_REG,
+    MAIN_VBIT_COIL_BASE,
+    MAIN_VBIT_COUNT,
+    MAIN_FC04_DI_VBIT_COUNT,
+    MAIN_RTC_REG_START,
+    MAIN_RTC_REG_COUNT,
 )
 
 
@@ -344,33 +349,75 @@ class ModbusClient:
                 self._raw_serial.timeout = prev_timeout
             return out
 
-    def read_di_bitmap(self) -> tuple[bool, list[int] | None, str | None]:
-        """Unified Rule: Mainboard DI bitmap via FC04 mainboard reg2..9 (8 bits)."""
+    def read_di_bitmap(self) -> tuple[bool, list[int] | None, list[int] | None, list[int] | None, str | None]:
+        """Mainboard FC04 0/24 read: DI(reg2..9), relay_bitmap(reg11 bits0..3), VBIT(reg20..23)."""
         with self._lock:
             ok, err = self._ensure_socket_open()
             if not ok:
-                return False, None, err or "Not connected"
-            # FC04 mainboard map: reg2..9 = DI1..DI8 (0/1)
+                return False, None, None, None, err or "Not connected"
+            # FC04 mainboard map: reg2..9 = DI1..DI8, reg11 = relay actual bitmap, reg20..23 = VBIT
+            last_err: str | None = None
+            for attempt in range(2):  # 간헐 timeout/noise 완화: 최대 1회 재시도
+                try:
+                    if self._request_logger:
+                        self._request_logger(self._slave_id, "FC04", 0, MAIN_FC04_DI_VBIT_COUNT)
+                    rr = self._client.read_input_registers(
+                        address=0,
+                        count=MAIN_FC04_DI_VBIT_COUNT,
+                        unit=self._slave_id,
+                    )
+                    if self._response_logger:
+                        self._response_logger(not rr.isError(), _response_exception_code(rr))
+                    if rr.isError():
+                        last_err = format_modbus_error(resp=rr)
+                        continue
+                    regs = list(rr.registers) if rr.registers else [0] * MAIN_FC04_DI_VBIT_COUNT
+                    regs = (regs + [0] * MAIN_FC04_DI_VBIT_COUNT)[:MAIN_FC04_DI_VBIT_COUNT]
+                    bits = [1 if regs[2 + i] else 0 for i in range(MAIN_DI_COUNT)]
+                    relay_bitmap = regs[11] if len(regs) > 11 else 0
+                    relay_states = [(relay_bitmap >> i) & 1 for i in range(4)]
+                    vbits = [1 if regs[20 + i] else 0 for i in range(MAIN_VBIT_COUNT)]
+                    return True, bits, relay_states, vbits, None
+                except Exception as e:
+                    if self._response_logger:
+                        self._response_logger(False, None)
+                    last_err = format_modbus_error(exc=e)
+                    if attempt == 0:
+                        continue
+            return False, None, None, None, (last_err or "No response/timeout")
+
+    def write_mb_virtual_bit(self, ch: int, onoff: bool) -> tuple[bool, str | None]:
+        if ch < 0 or ch >= MAIN_VBIT_COUNT:
+            return False, "Invalid virtual bit index 0..3"
+        return self.write_single_coil(MAIN_VBIT_COIL_BASE + ch, onoff, unit=None)
+
+    def read_board_time(self) -> tuple[bool, list[int] | None, str | None]:
+        return self.read_input_registers(MAIN_RTC_REG_START, MAIN_RTC_REG_COUNT, unit=None)
+
+    def write_board_time(self, values: list[int]) -> tuple[bool, str | None]:
+        if len(values) != MAIN_RTC_REG_COUNT:
+            return False, f"RTC values length must be {MAIN_RTC_REG_COUNT}"
+        with self._lock:
+            ok, err = self._ensure_socket_open()
+            if not ok:
+                return False, err or "Not connected"
             try:
                 if self._request_logger:
-                    self._request_logger(self._slave_id, "FC04", 0, 14)
-                rr = self._client.read_input_registers(
-                    address=0,
-                    count=14,
+                    self._request_logger(self._slave_id, "FC16", MAIN_RTC_REG_START, MAIN_RTC_REG_COUNT)
+                wr = self._client.write_registers(
+                    address=MAIN_RTC_REG_START,
+                    values=[int(v) & 0xFFFF for v in values],
                     unit=self._slave_id,
                 )
                 if self._response_logger:
-                    self._response_logger(not rr.isError(), _response_exception_code(rr))
-                if rr.isError():
-                    return False, None, format_modbus_error(resp=rr)
-                regs = list(rr.registers) if rr.registers else [0] * 14
-                regs = (regs + [0] * 14)[:14]
-                bits = [1 if regs[2 + i] else 0 for i in range(MAIN_DI_COUNT)]
-                return True, bits, None
+                    self._response_logger(not wr.isError(), _response_exception_code(wr))
+                if wr.isError():
+                    return False, format_modbus_error(resp=wr)
+                return True, None
             except Exception as e:
                 if self._response_logger:
                     self._response_logger(False, None)
-                return False, None, format_modbus_error(exc=e)
+                return False, format_modbus_error(exc=e)
 
     def read_pc_led_in(self) -> tuple[bool, bool | None, str | None]:
         """Unified Rule: Mainboard PC_LED_IN via FC04 mainboard map reg10 (addr=10, count=1)."""

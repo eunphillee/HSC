@@ -7,7 +7,7 @@ from PyQt6.QtCore import QObject, QThread, pyqtSignal, Qt
 
 class MainboardWorker(QObject):
     """Runs in a separate thread; performs Mainboard Modbus I/O and emits results."""
-    di_result = pyqtSignal(bool, object, object)   # ok, bits[8], err
+    di_result = pyqtSignal(bool, object, object, object, object)   # ok, bits[8], relay_states[4], vbits[4], err
     pc_led_result = pyqtSignal(bool, object, object)  # ok, state, err
     env_result = pyqtSignal(bool, object, object)     # ok, (temp_c, rh_pct), err
     write_result = pyqtSignal(bool, object)       # ok, err
@@ -25,6 +25,7 @@ class MainboardWorker(QObject):
     doc_fc04_result = pyqtSignal(bool, object, object)  # ok, regs or None, err
     doc_fc05_result = pyqtSignal(bool, object)          # ok, err
     doc_fc15_result = pyqtSignal(bool, object)          # ok, err
+    rtc_result = pyqtSignal(bool, object, object)       # ok, regs[7] or None, err
 
     def __init__(self, client):
         super().__init__()
@@ -32,10 +33,10 @@ class MainboardWorker(QObject):
 
     def on_request_read_di(self):
         if not self._client.connected:
-            self.di_result.emit(False, None, "Not connected")
+            self.di_result.emit(False, None, None, None, "Not connected")
             return
-        ok, bits, err = self._client.read_di_bitmap()
-        self.di_result.emit(ok, bits, err)
+        ok, bits, relay_states, vbits, err = self._client.read_di_bitmap()
+        self.di_result.emit(ok, bits, relay_states, vbits, err)
 
     def on_request_read_pc_led(self):
         if not self._client.connected:
@@ -51,11 +52,38 @@ class MainboardWorker(QObject):
         ok, val, err = self._client.read_env_shtc3()
         self.env_result.emit(ok, val, err)
 
+    def on_request_read_rtc(self):
+        if not self._client.connected:
+            self.rtc_result.emit(False, None, "Not connected")
+            return
+        ok, regs, err = self._client.read_board_time()
+        self.rtc_result.emit(ok, regs, err)
+
+    def on_request_set_rtc(self):
+        import datetime
+        if not self._client.connected:
+            self.write_result.emit(False, "Not connected")
+            return
+        now = datetime.datetime.now()
+        # Python weekday(): 0=Mon..6=Sun → Board: 0=Sun,1=Mon..6=Sat
+        board_weekday = (now.weekday() + 1) % 7
+        values = [now.year, now.month, now.day, board_weekday,
+                  now.hour, now.minute, now.second]
+        ok, err = self._client.write_board_time(values)
+        self.write_result.emit(ok, err)
+
     def on_request_write_relay(self, ch: int, onoff: bool):
         if not self._client.connected:
             self.write_result.emit(False, "Not connected")
             return
         ok, err = self._client.write_relay(ch, onoff)
+        self.write_result.emit(ok, err)
+
+    def on_request_write_virtual_bit(self, ch: int, onoff: bool):
+        if not self._client.connected:
+            self.write_result.emit(False, "Not connected")
+            return
+        ok, err = self._client.write_mb_virtual_bit(ch, onoff)
         self.write_result.emit(ok, err)
 
     def on_request_write_pc_on_en(self, onoff: bool):
