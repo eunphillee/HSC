@@ -45,6 +45,17 @@
    HSC\PC_Test_Tool\dist\HSC_PC_Test_Tool.exe
    ```
 
+**`build_windows.bat` 더블 클릭 시 깜빡이고 바로 닫힐 때**
+
+- 예전 배치 파일은 오류가 나도 창이 즉시 닫혀 원인을 볼 수 없었습니다. 최신 `scripts\build_windows.bat`은 실패 시 **메시지 후 `pause`**로 창이 유지됩니다.
+- **Python 미설치 / PATH 없음:** [python.org](https://www.python.org/downloads/)에서 3.11+ 설치 시 **“Add python.exe to PATH”** 반드시 체크. 또는 `py -3` 런처가 동작하는지 확인.
+- **폴더 구조:** `build_windows.bat`은 `PC_Test_Tool\scripts\` 안에 있어야 하며, 상위에 `main.py`가 있어야 합니다. zip만 풀었을 때 `HSC\PC_Test_Tool\` 전체가 같이 있는지 확인하세요.
+- 그래도 안 되면 **명령 프롬프트**를 연 뒤 수동 실행:
+  ```bat
+  cd /d C:\경로\HSC\PC_Test_Tool
+  scripts\build_windows.bat
+  ```
+
 ### 2.3 배포 전 확인 (권장)
 
 - 같은 PC 또는 다른 Windows PC에서 `HSC_PC_Test_Tool.exe`만 복사해 **더블클릭으로 기동**되는지 확인
