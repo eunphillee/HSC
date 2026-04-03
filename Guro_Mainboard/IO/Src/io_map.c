@@ -29,7 +29,9 @@ static const struct { uint16_t pin; GPIO_TypeDef *port; } main_do_map[MAIN_DO_CO
 uint8_t IO_Main_ReadDI(MainDiChannel_t ch)
 {
     if (ch >= MAIN_DI_COUNT) return 0;
-    return (HAL_GPIO_ReadPin(main_di_map[ch].port, main_di_map[ch].pin) == GPIO_PIN_SET) ? 1 : 0;
+    /* 옵토커플러 active-low: 24V 인가(입력 있음) → GPIO LOW(RESET) = 1
+     *                        open(입력 없음)    → GPIO HIGH(SET)   = 0 */
+    return (HAL_GPIO_ReadPin(main_di_map[ch].port, main_di_map[ch].pin) == GPIO_PIN_RESET) ? 1 : 0;
 }
 
 void IO_Main_WriteDO(MainDoChannel_t ch, uint8_t value)

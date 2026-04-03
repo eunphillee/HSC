@@ -144,4 +144,16 @@
 #define ENABLE_MB_FC04_MAIN_DEBUG  0
 #endif
 
+/* EEPROM 출력 상태(NVM) 진단 로그:
+ *  a) NotifySubCoil 호출·저장 결과
+ *  b) OutputStateNvm_Save 성공/실패 단계
+ *  c) OutputStateNvm_Load 결과 (valid_a/b, seq, block, defaults)
+ *  d) RestoreSubBoardsIfNeeded comm_ok 전환
+ *  e) restore_sub_board coil 별 want/cur 비교
+ * 주의: PC Modbus 통신 중 켜면 응답 프레임이 깨질 수 있습니다.
+ *       별도 시리얼(SWO/RTT/UART2 브리지) 또는 PC 미연결 상태에서만 사용하세요. */
+#ifndef OUTPUT_STATE_NVM_DEBUG_LOG
+#define OUTPUT_STATE_NVM_DEBUG_LOG  0  /* 검증 후 0으로 되돌릴 것 (PC 통신 중 로그가 Modbus 응답과 섞임) */
+#endif
+
 #endif /* APP_CONFIG_H */

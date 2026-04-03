@@ -19,6 +19,7 @@
 #include "modbus_master.h"
 #include "board_rtc.h"
 #include "main_auto_link.h"
+#include "output_state_nvm.h"
 #include "main.h"
 #include <stdio.h>
 #include <string.h>
@@ -557,6 +558,8 @@ static int handle_fc04(uint16_t start_addr, uint16_t count, const void *p_agg,
         regs[0] = (agg && agg->error_flags == 0u) ? 1u : 0u;
         regs[1] = agg ? agg->error_flags : 0u;
         /* DI/DO는 집계 스냅샷 대신 실시간 GPIO bitmap을 사용해 UI 표시 지연/불일치 방지 */
+        /* IO_Main_ReadDI가 active-low 보정을 적용하므로 (입력 있음=1, 없음=0)
+         * 여기서는 추가 반전 없이 그대로 전송. */
         {
             di_now = IO_Main_ReadDI_Bitmap();
             for (uint16_t i = 0; i < 8u; i++) {
@@ -933,6 +936,8 @@ static int handle_fc05(uint16_t start_addr, const uint8_t *write_data,
     if (start_addr <= 3u) {
         MainAutoLink_OnManualRelay((uint8_t)start_addr);
         IO_Main_WriteDO((MainDoChannel_t)start_addr, value ? 1u : 0u);
+        /* PC가 직접 릴레이 상태를 변경한 경우에만 EEPROM 저장 (AutoLink 경로는 저장 안 함) */
+        OutputStateNvm_NotifyMainRelay((uint8_t)start_addr, value ? 1u : 0u);
         response[0] = 0x05;
         response[1] = (uint8_t)(start_addr >> 8);
         response[2] = (uint8_t)(start_addr & 0xFFu);

@@ -60,8 +60,9 @@ int EEPROM_Write(uint16_t addr, const uint8_t *buf, uint16_t len)
 	return 0;
 }
 
-#define EEPROM_SELFTEST_BASE  0x40u   /* outside config A/B (0x00~0x3F) */
-#define EEPROM_SELFTEST_SIZE  16u     /* 4 patterns × 4 bytes or similar */
+/* 셀프테스트 영역: output_state_nvm Block A/B(0x40~0x7F)와 겹치지 않도록 0x80 이후 사용 */
+#define EEPROM_SELFTEST_BASE  0x80u   /* free area: 0x80~0xFF (SystemConfig/NVM 외부) */
+#define EEPROM_SELFTEST_SIZE  16u
 
 int EEPROM_SelfTest(void)
 {

@@ -37,6 +37,8 @@
 #include "system_sync.h"
 #include "board_rtc.h"
 #include "main_auto_link.h"
+#include "output_state_nvm.h"
+#include "eeprom_24c02.h"
 #include <stdio.h>
 #include <string.h>
 /* USER CODE END Includes */
@@ -49,12 +51,52 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 
+/* EEPROM 단순 read/write 테스트 주소.
+ * 레이아웃: 0x00~0x3F SystemConfig, 0x40~0x7F output_state_nvm A/B → 0xA0 이후 안전 */
+#define EEPROM_BOOT_TEST_ADDR  0xA0u
+#define EEPROM_BOOT_TEST_VAL   100u   /* 0x64 */
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
 
 /* USER CODE END PM */
+
+/* USER CODE BEGIN 0 */
+/**
+ * @brief EEPROM 단순 read/write 부팅 테스트.
+ *        주소 0xA0에 100(0x64)을 쓰고 즉시 읽어 일치 여부를 UART1로 출력.
+ *        output_state_nvm/SystemConfig 영역(0x00~0x7F)과 겹치지 않음.
+ *        이 함수는 부팅 1회만 호출하고 필요 없으면 호출부를 주석 처리하면 됩니다.
+ */
+static void Eeprom_RunBootTest(void)
+{
+    extern UART_HandleTypeDef huart1;
+
+    uint8_t w = EEPROM_BOOT_TEST_VAL;
+    uint8_t r = 0u;
+    int wr = EEPROM_Write(EEPROM_BOOT_TEST_ADDR, &w, 1u);
+    int rd = EEPROM_Read (EEPROM_BOOT_TEST_ADDR, &r, 1u);
+
+    char buf[96];
+    int n;
+
+    n = snprintf(buf, sizeof(buf),
+                 "[EEPROM-TEST] WR ret=%d val=%u\r\n", wr, (unsigned)w);
+    if (n > 0) (void)HAL_UART_Transmit(&huart1, (uint8_t *)buf, (uint16_t)n, 100);
+
+    n = snprintf(buf, sizeof(buf),
+                 "[EEPROM-TEST] RD ret=%d val=%u\r\n", rd, (unsigned)r);
+    if (n > 0) (void)HAL_UART_Transmit(&huart1, (uint8_t *)buf, (uint16_t)n, 100);
+
+    int pass = (wr == 0) && (rd == 0) && (r == EEPROM_BOOT_TEST_VAL);
+    n = snprintf(buf, sizeof(buf),
+                 "[EEPROM-TEST] addr=0x%02X %s\r\n",
+                 (unsigned)EEPROM_BOOT_TEST_ADDR, pass ? "PASS" : "FAIL");
+    if (n > 0) (void)HAL_UART_Transmit(&huart1, (uint8_t *)buf, (uint16_t)n, 100);
+}
+/* USER CODE END 0 */
 
 /* Private variables ---------------------------------------------------------*/
 I2C_HandleTypeDef hi2c1;
@@ -260,6 +302,11 @@ int main(void)
       SystemConfig_SetDefaults(&cfg);
       SystemConfig_Save(&cfg);
     }
+    /* 출력 상태 로드(HPSB/LPSB 복원용). Mainboard RELAY1~4는 EEPROM으로 GPIO 복원하지 않음(항상 0 시작). */
+    {
+      output_state_nvm_t out_state;
+      (void)OutputStateNvm_Load(&out_state);
+    }
 #if USE_PC_TEST_UART1_SLAVE
     /* PC 테스트 툴은 9600 고정. EEPROM baud와 무관하게 UART1=9600으로 통신 보장. */
     huart1.Init.BaudRate = 9600;
@@ -275,6 +322,10 @@ int main(void)
   WwdgService_Init(&hwwdg);
   AppScheduler_Init();
   ModbusMaster_Init();
+  /* 부팅 즉시 모든 하위보드 1회 poll 요청: PC 미연결 상태에서도 comm_ok 확정 후 NVM 복원이 동작하도록 함.
+   * poll 성공 → comm_ok=1 → OutputStateNvm_RestoreSubBoardsIfNeeded가 복원 실행. */
+  ModbusMaster_RequestOnDemandPoll((uint16_t)SLAVE_ID_HPSB  | (uint16_t)SLAVE_ID_LPSB1 |
+                                   (uint16_t)SLAVE_ID_LPSB2 | (uint16_t)SLAVE_ID_LPSB3);
   AggregatedStatus_Clear(&aggregated_status);
   SystemSync_Init();
 #if !MB_UART2_ASCII_BRIDGE_TEST
@@ -661,6 +712,7 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
+  /* RELAY1~4_EN: 부팅 직후 모두 Low (GPIO Init 직후 ODR 설정). */
   HAL_GPIO_WritePin(GPIOE, RELAY3_EN_Pin|RELAY4_EN_Pin|RELAY1_EN_Pin|RELAY2_EN_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */

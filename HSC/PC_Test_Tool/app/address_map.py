@@ -66,6 +66,27 @@ SUB_LPSB_COIL_COUNT = 9    # 901..903=slave2, 904..906=slave4, 907..909=slave8
 # error_flags (FC03 2112): bit0=AGG_ERR_COMM_HPSB, bit1=AGG_ERR_COMM_LPSB
 ERROR_FLAGS_REG = 2112
 
+# ---- NVM 진단 (FC04 start=4000, count=47) ----
+# regs[offset] 기준 (start=4000이므로 실제 addr = 4000 + offset)
+NVM_DIAG_REG_START   = 4000   # FC04 시작 주소
+NVM_DIAG_REG_COUNT   = 47     # 최대 읽기 개수
+NVM_DIAG_LOADED      = 4032   # g_loaded: 1=EEPROM load 성공
+NVM_DIAG_DIRTY       = 4033   # eeprom_dirty: 0=동기화, 1=EEPROM 미반영(Save 실패)
+NVM_DIAG_SEQUENCE    = 4034   # 저장 횟수 (Save OK 마다 +1)
+NVM_DIAG_HPSB_R1     = 4035   # HPSB relay1 저장값
+NVM_DIAG_HPSB_R2     = 4036
+NVM_DIAG_HPSB_R3     = 4037
+NVM_DIAG_L2_SSR1     = 4038   # LPSB(slave=2) SSR1 저장값
+NVM_DIAG_L2_SSR2     = 4039
+NVM_DIAG_L2_SSR3     = 4040   # ← LPSB2 SSR3 확인 포인트
+NVM_DIAG_L4_SSR1     = 4041   # LPSB(slave=4) SSR1 저장값
+NVM_DIAG_L4_SSR2     = 4042
+NVM_DIAG_L4_SSR3     = 4043   # ← LPSB4 SSR3 확인 포인트
+NVM_DIAG_L8_SSR1     = 4044   # LPSB(slave=8) SSR1 저장값
+NVM_DIAG_L8_SSR2     = 4045
+NVM_DIAG_L8_SSR3     = 4046   # ← LPSB8 SSR3 확인 포인트
+NVM_DIAG_SYNC_FAULT  = 4047   # sync fault 비트맵 (bit0..2=HPSB, 3..5=LPSB2, 6..8=LPSB4, 9..11=LPSB8)
+
 # ---- Mainboard RTC (FC04/FC16) ----
 # 4x0891..0897 -> PDU 890..896
 MAIN_RTC_REG_START = 890

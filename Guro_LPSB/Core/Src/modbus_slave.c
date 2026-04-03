@@ -119,9 +119,16 @@ static void process_frame(void)
       return;
     }
     uint16_t regs[14];
-    const uint16_t pkpk1 = LPSB_ADC_GetStoredPkpk(0);
+    /* Silk-screen 변경: 사용자 기준 SSR1/ADC1 ↔ SSR3/ADC3 교체.
+     * 물리 채널(0=PA3,1=PA4,2=PA5)은 그대로이고,
+     * 사용자·Modbus·PC 표시 번호 체계에서 1번↔3번이 바뀐다.
+     *   사용자 SSR1/ADC1 ← 물리 ch2(기존 3번)
+     *   사용자 SSR2/ADC2 ← 물리 ch1(변경 없음)
+     *   사용자 SSR3/ADC3 ← 물리 ch0(기존 1번)
+     */
+    const uint16_t pkpk1 = LPSB_ADC_GetStoredPkpk(2); /* 사용자 ADC1 ← 물리 ch2 */
     const uint16_t pkpk2 = LPSB_ADC_GetStoredPkpk(1);
-    const uint16_t pkpk3 = LPSB_ADC_GetStoredPkpk(2);
+    const uint16_t pkpk3 = LPSB_ADC_GetStoredPkpk(0); /* 사용자 ADC3 ← 물리 ch0 */
     /* Current state rule (tool/현장 규칙): pkpk >= 30 → ON(1), pkpk < 30 → OFF(0) */
     const uint16_t cur1 = (pkpk1 >= 30u) ? 1u : 0u;
     const uint16_t cur2 = (pkpk2 >= 30u) ? 1u : 0u;
@@ -129,12 +136,12 @@ static void process_frame(void)
 
     regs[0]  = 1u; /* alive/status */
     regs[1]  = 0u; /* error code (reserved) */
-    regs[2]  = (uint16_t)(LPSB_SSR_Get(0) ? 1u : 0u);
+    regs[2]  = (uint16_t)(LPSB_SSR_Get(2) ? 1u : 0u); /* 사용자 SSR1 ← 물리 ch2 */
     regs[3]  = (uint16_t)(LPSB_SSR_Get(1) ? 1u : 0u);
-    regs[4]  = (uint16_t)(LPSB_SSR_Get(2) ? 1u : 0u);
-    regs[5]  = LPSB_ADC_GetStoredAvg(0);
+    regs[4]  = (uint16_t)(LPSB_SSR_Get(0) ? 1u : 0u); /* 사용자 SSR3 ← 물리 ch0 */
+    regs[5]  = LPSB_ADC_GetStoredAvg(2); /* 사용자 ADC1 ← 물리 ch2 */
     regs[6]  = LPSB_ADC_GetStoredAvg(1);
-    regs[7]  = LPSB_ADC_GetStoredAvg(2);
+    regs[7]  = LPSB_ADC_GetStoredAvg(0); /* 사용자 ADC3 ← 물리 ch0 */
     regs[8]  = pkpk1;
     regs[9]  = pkpk2;
     regs[10] = pkpk3;
@@ -165,7 +172,9 @@ static void process_frame(void)
       return;
     }
     uint8_t on = (val == 0xFF00u) ? 1u : 0u;
-    LPSB_SSR_Set((uint8_t)addr, on);
+    /* Silk-screen 변경: 사용자 coil 0(SSR1) ↔ 2(SSR3) 교체 → 물리 채널 역순 적용 */
+    uint8_t phy_ch = (addr == 0u) ? 2u : (addr == 2u) ? 0u : (uint8_t)addr;
+    LPSB_SSR_Set(phy_ch, on);
     LPSB_Debug_Log("[LPSB] FC05 coil write\r\n");
     send_response(rx_buf, 6);
   }

@@ -11,7 +11,6 @@
 #include "modbus_master.h"
 #include "main.h"
 #include "bsp_gpio.h"
-
 #define PULSE_MS_DOOR  300u
 #define PULSE_MS_PC_IO 500u
 
@@ -157,27 +156,27 @@ int Gateway_Action_WriteSubCoil(uint8_t slave_id, uint16_t coil_index, uint8_t v
     ModbusMasterFc05Err_t err;
     if (slave_id != 1 && slave_id != 2 && slave_id != 4 && slave_id != 8) return -1;
     if (coil_index >= MODBUS_COIL_COUNT) return -1;
+
     Gateway_LogWriteMapped(slave_id, coil_index, value);
     Gateway_LogUart2TxStart(slave_id, coil_index, value ? 1 : 0);
     int ret = ModbusMaster_WriteCoil(s, coil_index, value ? 1 : 0);
     err = ModbusMaster_GetLastFc05Error();
+
     if (ret == 0) {
-        /* ACK received: definite success */
+        /* ACK: 확정 성공 → coil/InputReg 이미지 갱신 (actual 낙관적 반영) */
         ModbusTable_SetCoil(s, coil_index, value ? 1 : 0);
-        /* Immediately mirror SSR/Relay state into input_reg_img (reg2..4 = coil0..2).
-         * Prevents stale data being returned to PC before the next on-demand FC04 poll.
-         * FC04 map (HPSB & LPSB): reg2=ch1, reg3=ch2, reg4=ch3 state. */
         ModbusTable_SetInputReg(s, 2u + coil_index, value ? 1u : 0u);
         return 0;
     }
     if (err == MODBUS_MASTER_FC05_ERR_TIMEOUT || err == MODBUS_MASTER_FC05_ERR_INVALID_RESP) {
-        /* LPSB may not always echo FC05 but physically executes the command.
-         * Optimistic update: mirror into both coil and input_reg images. */
+        /* TIMEOUT/INVALID: LPSB가 무응답이지만 물리 실행 가능성 있음 → 낙관적 갱신.
+         * SyncTargetActual가 2초 후 actual을 확인하여 불일치 시 재시도. */
         ModbusTable_SetCoil(s, coil_index, value ? 1 : 0);
         ModbusTable_SetInputReg(s, 2u + coil_index, value ? 1u : 0u);
         return 0;
     }
-    /* EXCEPTION (0x04 etc.): subboard explicitly rejected – report failure */
+    /* EXCEPTION: 하위보드가 명시적으로 거부 → actual 이미지 갱신 안 함.
+     * target은 이미 저장됨 → SyncTargetActual가 재시도 후 fault 판정. */
     s_downstream_write_fail = 1;
     return -1;
 }
