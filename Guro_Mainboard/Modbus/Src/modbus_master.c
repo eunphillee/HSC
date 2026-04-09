@@ -37,6 +37,8 @@ static uint8_t      rx_buf[MODBUS_RTU_RX_BUF_SIZE];
 static uint16_t     rx_len;
 static uint8_t      last_slave_responded;
 static uint8_t      comm_ok[SLAVE_ID_COUNT]; /* 0 = HPSB, 1 = LPSB */
+/* 슬레이브별 마지막 성공 poll 수신 시각 (HAL_GetTick 기준). keep-alive skip 판정에 사용. */
+static uint32_t     s_last_poll_tick[SLAVE_ID_COUNT];
 /* While a gateway write (FC05) is in progress, stop poll from consuming UART2 RX bytes. */
 static volatile uint8_t s_write_in_progress;
 static volatile uint8_t s_uart2_locked_for_txn;
@@ -46,6 +48,13 @@ static volatile ModbusMasterFc05Err_t s_last_fc05_err = MODBUS_MASTER_FC05_ERR_N
 
 static void uart2_mb_log(const char *msg);
 static void uart2_mb_log_hex(const char *prefix, const uint8_t *buf, uint16_t len);
+
+static const char *s_fc05_tx_reason = "UNKNOWN";
+
+void ModbusMaster_SetFc05TxReason(const char *reason)
+{
+    s_fc05_tx_reason = (reason && reason[0] != '\0') ? reason : "UNKNOWN";
+}
 static void uart2_mb_lock_rx_it(void);
 static void uart2_mb_unlock_rx_it(void);
 
@@ -529,6 +538,7 @@ static void parse_response(void)
                 s_sub_fail_rx_len_tbl[idx] = rx_len;
             }
         }
+        s_last_poll_tick[SLAVE_TO_INDEX(e.slave_id)] = HAL_GetTick();
         LED_Status_OnSubRS485Activity();
         {
             char b[80];
@@ -713,6 +723,8 @@ void ModbusMaster_RequestOnDemandPoll(uint16_t slave_mask)
 
 int ModbusMaster_WriteCoil(SlaveId_t slave, uint16_t coil_addr, uint8_t value)
 {
+    const char *fc05_reason = s_fc05_tx_reason;
+    s_fc05_tx_reason = "UNKNOWN";
     s_last_fc05_err = MODBUS_MASTER_FC05_ERR_NONE;
     s_write_in_progress = 1;
     state = MST_IDLE; /* cancel any in-flight poll transaction */
@@ -736,10 +748,12 @@ int ModbusMaster_WriteCoil(SlaveId_t slave, uint16_t coil_addr, uint8_t value)
     uart2_drain_stale_rx_window(FC05_STALE_RX_DRAIN_MS);
     {
         uint16_t coil_value_raw = (uint16_t)((pdu[4] << 8) | pdu[5]);
-        char b[128];
+        char b[160];
         int n = snprintf(b, sizeof(b),
-                         "[MB->HPSB] tx slave=%u fc=05 coil=%u value_raw=0x%04X\r\n",
-                         (unsigned)target_slave, (unsigned)coil_addr, (unsigned)coil_value_raw);
+                         "[MB->HPSB] tx slave=%u fc=05 coil=%u val=%u raw=0x%04X reason=%s\r\n",
+                         (unsigned)target_slave, (unsigned)coil_addr,
+                         (unsigned)((value == 1u) ? 1u : 0u), (unsigned)coil_value_raw,
+                         fc05_reason);
         if (n > 0) uart2_mb_log(b);
     }
     uart2_mb_log_hex("MB->HPSB tx raw", pdu, (uint16_t)(len + 2u));
@@ -875,4 +889,10 @@ uint8_t ModbusMaster_IsCommOk(SlaveId_t slave)
 {
     if (!IS_VALID_SLAVE_ID(slave)) return 0;
     return comm_ok[SLAVE_TO_INDEX(slave)];
+}
+
+uint32_t ModbusMaster_GetLastPollTick(SlaveId_t slave)
+{
+    if (!IS_VALID_SLAVE_ID(slave)) return 0u;
+    return s_last_poll_tick[SLAVE_TO_INDEX(slave)];
 }

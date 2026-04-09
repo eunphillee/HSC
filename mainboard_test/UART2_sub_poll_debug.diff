@@ -1,0 +1,272 @@
+diff --git a/Guro_Mainboard/Application/Inc/app_config.h b/Guro_Mainboard/Application/Inc/app_config.h
+index c8d4ec9..779e65a 100644
+--- a/Guro_Mainboard/Application/Inc/app_config.h
++++ b/Guro_Mainboard/Application/Inc/app_config.h
+@@ -74,4 +74,9 @@
+ #define SYSCFG_MODBUS_DEBUG_LOG  0
+ #endif
+ 
++/* UART2 하위 폴링(HPSB/LPSB): poll start, OK(포트/전류 요약), timeout/CRC fail 로그. 1=UART1 출력 */
++#ifndef MODBUS_MASTER_DEBUG_LOG
++#define MODBUS_MASTER_DEBUG_LOG  0
++#endif
++
+ #endif /* APP_CONFIG_H */
+diff --git a/Guro_Mainboard/Application/Inc/led_status.h b/Guro_Mainboard/Application/Inc/led_status.h
+index 8c8371c..a9c298c 100644
+--- a/Guro_Mainboard/Application/Inc/led_status.h
++++ b/Guro_Mainboard/Application/Inc/led_status.h
+@@ -19,6 +19,9 @@ void LED_Status_OnDIChanged(void);
+ void LED_Status_OnDOChanged(void);
+ void LED_Status_OnRS485Activity(void);
+ 
++/** UART2 하위 RS485(Sub board polling) activity → LED4 펄스 */
++void LED_Status_OnSubRS485Activity(void);
++
+ /** UART1 Modbus Slave: pulse LED3 (DO) when response sent (for PC test visibility). */
+ void LED_Status_OnUart1SlaveTx(void);
+ 
+diff --git a/Guro_Mainboard/Application/Src/led_status.c b/Guro_Mainboard/Application/Src/led_status.c
+index 357ce91..757faa8 100644
+--- a/Guro_Mainboard/Application/Src/led_status.c
++++ b/Guro_Mainboard/Application/Src/led_status.c
+@@ -15,6 +15,7 @@
+ #define DI_EVT_PULSE_MS      80u
+ #define DO_EVT_PULSE_MS      80u
+ #define RS485_PULSE_MS       30u
++#define SUB_RS485_PULSE_MS   40u   /* LED4: UART2 하위 폴링 TX/RX 시 */
+ #define UART1_SLAVE_TX_PULSE_MS  30u  /* LED3 pulse when UART1 slave sends response */
+ #define UART1_RX_EVT_PULSE_MS    50u  /* LED4: UART1 receive event (any byte) */
+ #define UART1_CRCOK_PULSE_MS     50u  /* LED3: CRC OK frame received */
+@@ -37,6 +38,7 @@ static uint32_t last_tick;
+ static uint16_t di_evt_timer_ms;
+ static uint16_t do_evt_timer_ms;
+ static uint16_t rs485_timer_ms;
++static uint16_t sub_rs485_timer_ms;  /* LED4: 하위 RS485 (UART2) activity */
+ static uint16_t uart1_rx_evt_timer_ms;  /* LED4: UART1 raw receive event */
+ static uint16_t uart1_crc_ok_timer_ms;  /* LED3: CRC OK frame received */
+ static uint16_t uart1_tx_resp_timer_ms; /* LED2: response send (before Transmit) */
+@@ -58,6 +60,7 @@ void LED_Status_Init(void)
+ 	di_evt_timer_ms = 0;
+ 	do_evt_timer_ms = 0;
+ 	rs485_timer_ms = 0;
++	sub_rs485_timer_ms = 0;
+ 	uart1_rx_evt_timer_ms = 0;
+ 	uart1_crc_ok_timer_ms = 0;
+ 	uart1_tx_resp_timer_ms = 0;
+@@ -125,6 +128,10 @@ void LED_Status_Tick_1ms(void)
+ 			if (rs485_timer_ms <= elapsed) rs485_timer_ms = 0;
+ 			else rs485_timer_ms -= (uint16_t)elapsed;
+ 		}
++		if (sub_rs485_timer_ms > 0) {
++			if (sub_rs485_timer_ms <= elapsed) sub_rs485_timer_ms = 0;
++			else sub_rs485_timer_ms -= (uint16_t)elapsed;
++		}
+ 		if (uart1_rx_evt_timer_ms > 0) {
+ 			if (uart1_rx_evt_timer_ms <= elapsed) uart1_rx_evt_timer_ms = 0;
+ 			else uart1_rx_evt_timer_ms -= (uint16_t)elapsed;
+@@ -154,7 +161,7 @@ void LED_Status_Tick_1ms(void)
+ 	/* ----- LED2=DI/RS485/UART1 TX resp/PC_TEST_AA, LED3=DO/UART1 CRCOK/PC_TEST_AA TxOk, LED4=UART1 RX evt/PC_TEST_AA TxErr ----- */
+ 	if (di_evt_timer_ms > 0 || rs485_timer_ms > 0 || uart1_tx_resp_timer_ms > 0 || pc_test_aa_led_timer_ms > 0) LED_DI_ON(); else LED_DI_OFF();
+ 	if (do_evt_timer_ms > 0 || uart1_crc_ok_timer_ms > 0 || pc_test_aa_tx_ok_timer_ms > 0) LED_DO_ON(); else LED_DO_OFF();
+-	if (uart1_rx_evt_timer_ms > 0 || pc_test_aa_tx_err_timer_ms > 0) LED_RS485_ON(); else LED_RS485_OFF();  /* LED4: 수신 있을 때만 50ms 펄스 */
++	if (uart1_rx_evt_timer_ms > 0 || pc_test_aa_tx_err_timer_ms > 0 || sub_rs485_timer_ms > 0) LED_RS485_ON(); else LED_RS485_OFF();  /* LED4: UART1 rx / PC_TEST err / 하위 RS485 */
+ 	LED_PWR_ON();
+ }
+ 
+@@ -173,6 +180,11 @@ void LED_Status_OnRS485Activity(void)
+ 	rs485_timer_ms = RS485_PULSE_MS;
+ }
+ 
++void LED_Status_OnSubRS485Activity(void)
++{
++	sub_rs485_timer_ms = SUB_RS485_PULSE_MS;
++}
++
+ void LED_Status_OnUart1SlaveTx(void)
+ {
+ 	do_evt_timer_ms = UART1_SLAVE_TX_PULSE_MS;
+diff --git a/Guro_Mainboard/Modbus/Inc/modbus_master.h b/Guro_Mainboard/Modbus/Inc/modbus_master.h
+index 9f377ea..f1836f6 100644
+--- a/Guro_Mainboard/Modbus/Inc/modbus_master.h
++++ b/Guro_Mainboard/Modbus/Inc/modbus_master.h
+@@ -24,6 +24,11 @@ int ModbusMaster_WriteHoldingReg(SlaveId_t slave, uint16_t reg_addr, uint16_t va
+ uint8_t ModbusMaster_GetLastSlaveResponded(void);
+ uint8_t ModbusMaster_IsCommOk(SlaveId_t slave);
+ 
++/* Optional debug log (UART2 하위 폴링): MODBUS_MASTER_DEBUG_LOG=1 시 구현체에서 UART 출력 */
++void ModbusMaster_LogSubPollStart(uint8_t slave_id);
++void ModbusMaster_LogSubPollOk(uint8_t slave_id);
++void ModbusMaster_LogSubPollFail(uint8_t slave_id, const char *reason);
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/Guro_Mainboard/Modbus/Src/modbus_master.c b/Guro_Mainboard/Modbus/Src/modbus_master.c
+index 8dd6dea..5d0f415 100644
+--- a/Guro_Mainboard/Modbus/Src/modbus_master.c
++++ b/Guro_Mainboard/Modbus/Src/modbus_master.c
+@@ -7,6 +7,7 @@
+ #include "modbus_cfg.h"
+ #include "main.h"
+ #include "led_status.h"
++#include "app_config.h"
+ #include <string.h>
+ 
+ extern UART_HandleTypeDef huart2;  /* Modbus Master = Subboard = USART2 */
+@@ -59,7 +60,10 @@ static void send_request(void)
+     set_de_tx();
+     HAL_UART_Transmit(&MODBUS_UART, tx_buf, (uint16_t)(pdu_len + 2), 100);
+     set_de_rx();
+-    LED_Status_OnRS485Activity();
++    LED_Status_OnSubRS485Activity();
++#if MODBUS_MASTER_DEBUG_LOG
++    ModbusMaster_LogSubPollStart((uint8_t)e.slave_id);
++#endif
+     rx_len = 0;
+     response_deadline = HAL_GetTick() + MODBUS_RESPONSE_TIMEOUT_MS;
+     state = MST_WAIT_RESPONSE;
+@@ -110,7 +114,15 @@ static void parse_response(void)
+     if (ok == 0) {
+         last_slave_responded = slave;
+         comm_ok[SLAVE_TO_INDEX(e.slave_id)] = 1;
+-        LED_Status_OnRS485Activity();
++        LED_Status_OnSubRS485Activity();
++#if MODBUS_MASTER_DEBUG_LOG
++        ModbusMaster_LogSubPollOk(slave);
++#endif
++    } else {
++#if MODBUS_MASTER_DEBUG_LOG
++        const char *reason = (rx_len >= 4 && ModbusRTU_CRC16Check(rx_buf, rx_len) != 0) ? "CRC fail" : "parse fail";
++        ModbusMaster_LogSubPollFail(slave, reason);
++#endif
+     }
+     state = MST_IDLE;
+ }
+@@ -144,8 +156,12 @@ void ModbusMaster_Poll(void)
+         case MST_WAIT_RESPONSE:
+             if (HAL_GetTick() >= response_deadline) {
+                 PollEntry_t te;
+-                if (ModbusTable_GetPollEntry(poll_index, &te) == 0)
++                if (ModbusTable_GetPollEntry(poll_index, &te) == 0) {
+                     comm_ok[SLAVE_TO_INDEX(te.slave_id)] = 0;
++#if MODBUS_MASTER_DEBUG_LOG
++                    ModbusMaster_LogSubPollFail((uint8_t)te.slave_id, "timeout");
++#endif
++                }
+                 state = MST_IDLE;
+                 poll_index++;
+                 if (poll_index >= POLL_TABLE_SIZE)
+@@ -158,6 +174,13 @@ void ModbusMaster_Poll(void)
+                 (void)exp_slave;
+                 uint8_t fc = rx_buf[1];
+                 if (fc & 0x80) {
++                    PollEntry_t te;
++                    if (ModbusTable_GetPollEntry(poll_index, &te) == 0) {
++                        comm_ok[SLAVE_TO_INDEX(te.slave_id)] = 0;
++#if MODBUS_MASTER_DEBUG_LOG
++                        ModbusMaster_LogSubPollFail((uint8_t)te.slave_id, "exception");
++#endif
++                    }
+                     state = MST_IDLE;
+                     poll_index++;
+                     if (poll_index >= POLL_TABLE_SIZE) poll_index = 0;
+@@ -195,7 +218,7 @@ int ModbusMaster_WriteCoil(SlaveId_t slave, uint16_t coil_addr, uint8_t value)
+     set_de_tx();
+     HAL_StatusTypeDef s = HAL_UART_Transmit(&MODBUS_UART, pdu, (uint16_t)(len + 2), 100);
+     set_de_rx();
+-    if (s == HAL_OK) LED_Status_OnRS485Activity();
++    if (s == HAL_OK) LED_Status_OnSubRS485Activity();
+     return (s == HAL_OK) ? 0 : -1;
+ }
+ 
+@@ -207,7 +230,7 @@ int ModbusMaster_WriteHoldingReg(SlaveId_t slave, uint16_t reg_addr, uint16_t va
+     set_de_tx();
+     HAL_StatusTypeDef s = HAL_UART_Transmit(&MODBUS_UART, pdu, (uint16_t)(len + 2), 100);
+     set_de_rx();
+-    if (s == HAL_OK) LED_Status_OnRS485Activity();
++    if (s == HAL_OK) LED_Status_OnSubRS485Activity();
+     return (s == HAL_OK) ? 0 : -1;
+ }
+ 
+
+diff --git a/Guro_Mainboard/Application/Src/modbus_master_log.c b/Guro_Mainboard/Application/Src/modbus_master_log.c
+new file mode 100644
+index 0000000..0000000
+--- /dev/null
++++ b/Guro_Mainboard/Application/Src/modbus_master_log.c
+@@ -0,0 +1,74 @@
++/**
++ * @file modbus_master_log.c
++ * @brief UART2 하위 폴링(HPSB/LPSB) 디버그 로그: MODBUS_MASTER_DEBUG_LOG=1 시 UART1로 출력.
++ */
++#include "app_config.h"
++#include "modbus_master.h"
++#include "modbus_table.h"
++#include "io_map.h"
++#include "main.h"
++#include <stdio.h>
++#include <string.h>
++
++#if MODBUS_MASTER_DEBUG_LOG
++
++static const char *slave_name(uint8_t slave_id)
++{
++    switch (slave_id) {
++        case 1: return "HPSB";
++        case 2: return "LPSB1";
++        case 3: return "LPSB2";
++        case 4: return "LPSB3";
++        default: return "?";
++    }
++}
++
++static void uart_send(const char *msg)
++{
++    size_t len = strlen(msg);
++    if (len > 0)
++        (void)HAL_UART_Transmit(&huart1, (const uint8_t *)msg, (uint16_t)len, 100);
++}
++
++void ModbusMaster_LogSubPollStart(uint8_t slave_id)
++{
++    char buf[64];
++    int n = snprintf(buf, sizeof(buf), "SUB POLL start slave=%u (%s)\r\n", (unsigned)slave_id, slave_name(slave_id));
++    if (n > 0) uart_send(buf);
++}
++
++void ModbusMaster_LogSubPollOk(uint8_t slave_id)
++{
++    SlaveId_t s = (SlaveId_t)slave_id;
++    if (s < SLAVE_ID_FIRST || s > SLAVE_ID_LAST) return;
++
++    uint8_t coils = 0;
++    uint8_t discrete = 0;
++    for (int i = 0; i < 8; i++) {
++        if (ModbusTable_GetCoil(s, (uint16_t)i)) coils |= (1u << i);
++        if (ModbusTable_GetDiscrete(s, (uint16_t)i)) discrete |= (1u << i);
++    }
++    uint16_t r1 = ModbusTable_GetInputReg(s, 1);
++    uint16_t r2 = ModbusTable_GetInputReg(s, 2);
++    uint16_t r3 = ModbusTable_GetInputReg(s, 3);
++
++    char buf[96];
++    int n = snprintf(buf, sizeof(buf), "SUB slave=%u OK coils=0x%02X dis=0x%02X raw=[%u,%u,%u]\r\n",
++                    (unsigned)slave_id, coils, discrete, (unsigned)r1, (unsigned)r2, (unsigned)r3);
++    if (n > 0) uart_send(buf);
++}
++
++void ModbusMaster_LogSubPollFail(uint8_t slave_id, const char *reason)
++{
++    char buf[80];
++    int n = snprintf(buf, sizeof(buf), "SUB slave=%u fail: %s\r\n", (unsigned)slave_id, reason ? reason : "?");
++    if (n > 0) uart_send(buf);
++}
++
++#else
++
++void ModbusMaster_LogSubPollStart(uint8_t slave_id) { (void)slave_id; }
++void ModbusMaster_LogSubPollOk(uint8_t slave_id) { (void)slave_id; }
++void ModbusMaster_LogSubPollFail(uint8_t slave_id, const char *reason) { (void)slave_id; (void)reason; }
++
++#endif /* MODBUS_MASTER_DEBUG_LOG */

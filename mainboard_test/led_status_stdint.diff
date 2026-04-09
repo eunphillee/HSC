@@ -1,0 +1,12 @@
+diff --git a/Application/Inc/led_status.h b/Application/Inc/led_status.h
+--- a/Application/Inc/led_status.h
++++ b/Application/Inc/led_status.h
+@@ -5,6 +5,8 @@
+  */
+ #ifndef LED_STATUS_H
+ #define LED_STATUS_H
++
++#include <stdint.h>
+ 
+ #ifdef __cplusplus
+ extern "C" {

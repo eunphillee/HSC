@@ -24,6 +24,9 @@ void Gateway_Action_StartPulsePC_ON_EN(void);
 /** Start 100ms HIGH pulse on PC_RESET_EN (PC0). Call Gateway_Action_Update() from main loop to clear. */
 void Gateway_Action_StartPulsePC_RESET_EN(void);
 
+/** 다음 `Gateway_Action_WriteSubCoil` 한 번에 부여할 로그용 reason (예: PC_USER, RESTORE). 미설정 시 UNKNOWN. */
+void Gateway_WriteSubCoil_SetNextReason(const char *reason);
+
 /** Write sub-board coil (HPSB=1, LPSB1=2, LPSB2=4, LPSB3=8). Called when PC sends FC05 to Mainboard. */
 int Gateway_Action_WriteSubCoil(uint8_t slave_id, uint16_t coil_index, uint8_t value);
 

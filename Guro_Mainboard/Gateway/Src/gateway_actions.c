@@ -11,6 +11,8 @@
 #include "modbus_master.h"
 #include "main.h"
 #include "bsp_gpio.h"
+#include "app_config.h"
+#include <stdio.h>
 #define PULSE_MS_DOOR  300u
 #define PULSE_MS_PC_IO 500u
 
@@ -35,6 +37,13 @@ typedef struct {
 } PendingSubCoilWrite_t;
 
 static volatile PendingSubCoilWrite_t s_pending_subcoil_write;
+
+static const char *s_write_sub_reason = "UNKNOWN";
+
+void Gateway_WriteSubCoil_SetNextReason(const char *reason)
+{
+    s_write_sub_reason = (reason && reason[0] != '\0') ? reason : "UNKNOWN";
+}
 
 void Gateway_Action_PulseMainDoor1(uint16_t pulse_ms)
 {
@@ -71,6 +80,7 @@ void Gateway_Action_PulseOutputByOnOffIndex(uint8_t onoff_index_1based, uint16_t
     uint8_t cur = ModbusTable_GetCoil(slave_id, coil_index);
     uint8_t next = cur ? 0 : 1;
     /* Write downstream first; update local image only on success */
+    ModbusMaster_SetFc05TxReason("INTERNAL");
     int ret = ModbusMaster_WriteCoil(slave_id, coil_index, next);
     if (ret == 0)
         ModbusTable_SetCoil(slave_id, coil_index, next);
@@ -121,6 +131,7 @@ void Gateway_Action_Update(void)
             uint8_t sid = s_pending_subcoil_write.slave_id;
             uint16_t coil = s_pending_subcoil_write.coil_index;
             uint8_t val = s_pending_subcoil_write.value;
+            Gateway_WriteSubCoil_SetNextReason("PENDING");
             int ret = Gateway_Action_WriteSubCoil(sid, coil, val);
             if (ret == 0) {
                 s_pending_subcoil_write.valid = 0u;
@@ -154,11 +165,26 @@ int Gateway_Action_WriteSubCoil(uint8_t slave_id, uint16_t coil_index, uint8_t v
 {
     SlaveId_t s = (SlaveId_t)slave_id;
     ModbusMasterFc05Err_t err;
+    const char *reason;
     if (slave_id != 1 && slave_id != 2 && slave_id != 4 && slave_id != 8) return -1;
     if (coil_index >= MODBUS_COIL_COUNT) return -1;
 
+    reason = s_write_sub_reason;
+    s_write_sub_reason = "UNKNOWN";
+
+#if GATEWAY_WRITE_DEBUG_LOG
+    {
+        char wb[120];
+        int wn = snprintf(wb, sizeof(wb), "[WRITE_SUB] reason=%s sid=%u coil=%u val=%u\r\n",
+                          reason, (unsigned)slave_id, (unsigned)coil_index,
+                          (unsigned)(value ? 1u : 0u));
+        if (wn > 0) (void)printf("%s", wb);
+    }
+#endif
+
     Gateway_LogWriteMapped(slave_id, coil_index, value);
     Gateway_LogUart2TxStart(slave_id, coil_index, value ? 1 : 0);
+    ModbusMaster_SetFc05TxReason(reason);
     int ret = ModbusMaster_WriteCoil(s, coil_index, value ? 1 : 0);
     err = ModbusMaster_GetLastFc05Error();
 

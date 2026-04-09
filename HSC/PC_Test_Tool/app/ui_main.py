@@ -39,6 +39,15 @@ from .address_map import (
     SUB_LPSB_COIL_BASE,
     MAIN_ENV_REG,
     MAIN_FC04_DI_VBIT_COUNT,
+    NVM_DIAG_REG_START,
+    NVM_DIAG_REG_COUNT,
+    NVM_DIAG_LOADED,
+    NVM_DIAG_DIRTY,
+    NVM_DIAG_SEQUENCE,
+    NVM_DIAG_LAST_SAVE_RESULT,
+    NVM_DIAG_LAST_LOAD_RESULT,
+    NVM_DIAG_RESTORE_TRY_MASK,
+    NVM_DIAG_RESTORE_OK_MASK,
 )
 
 from PyQt6.QtWidgets import QTabWidget
@@ -63,6 +72,10 @@ def _format_sense_channel(sense: list, base: int, ch: int) -> str:
     ion = "ON" if cur else "OFF"
     return f"AVG:{avg} PKPK:{pk} I:{ion}"
 
+
+# FC05 성공 후 EEPROM DIAG read 지연 (ms).
+# 낮추면 응답이 빠르지만 Modbus 버스 충돌 위험. 높이면 충돌은 줄지만 응답이 느림.
+DIAG_READ_DELAY_MS: int = 150
 
 DARK_QSS = """
 QMainWindow, QWidget { background-color: #1e1e1e; }
@@ -243,6 +256,8 @@ class MainWindow(QMainWindow):
         self._hpsb_adc_log_timer.setInterval(2000)    # 2s CONTROL MONITORING 주기
         self._hpsb_adc_log_timer.timeout.connect(self._on_hpsb_adc_log_tick)
         self._hpsb_adc_log_timer.stop()
+        # Auto poll(2s)에서 트리거된 sub read 결과일 때만 HPSB/LPSB ADC 2줄 로그를 출력.
+        self._auto_poll_adc_log_pending: bool = False
         # Direct LPSB: 상태값 ADC 자동 폴링 (500ms) + 별도 1초 로그 타이머
         self._lpsb_adc_poll_timer = QTimer(self)
         self._lpsb_adc_poll_timer.setInterval(500)    # 500ms 폴링 (화면 갱신)
@@ -257,6 +272,11 @@ class MainWindow(QMainWindow):
         self._op_state: str = "IDLE"
         self._monitor_target: str = "none"  # "hpsb" | "lpsb" | "none"
         self._monitor_retry_count: int = 0   # OUTPUT_MONITORING 재시도 횟수 (최대 2회)
+        # 명령(commanded) ON/OFF 상태 — widget isChecked()와 독립적으로 FC05 성공/실패로만 갱신.
+        # _on_hpsb_adc_log_tick의 모니터링 종료 판정에 이 값을 사용해 UI 상태 버그로 인한
+        # 오류 종료를 방지한다.
+        self._hpsb_relay_commanded: list[bool] = [False, False, False]
+        self._lpsb_ssr_commanded: list[bool] = [False, False, False]
         # LPSB 2s 모니터링 로그 타이머 (OUTPUT_MONITORING 시에만 활성)
         self._lpsb_log_timer = QTimer(self)
         self._lpsb_log_timer.setInterval(2000)        # 2s OUTPUT MONITORING 주기
@@ -287,6 +307,14 @@ class MainWindow(QMainWindow):
         self._main_poll_timer.setInterval(300)
         self._main_poll_timer.timeout.connect(self._on_main_poll_tick)
         self._main_poll_inflight = False
+        # Mainboard FC04(0,24) 실패 연속 시 UI/시리얼 부하 완화를 위한 적응형 백오프
+        self._main_poll_fail_streak = 0
+        self._main_poll_default_ms = 300
+        self._main_poll_slow_ms = 600
+        self._main_poll_max_ms = 1000
+        self._last_main_poll_fail_log_ts = 0.0
+        # DIAG read 동시 실행 방지 플래그: FC05 연속 write 시 중복 DIAG 시퀀스 차단
+        self._diag_read_in_progress: bool = False
         # RTC read 10회 반복 타이머
         self._rtc_read_timer = QTimer(self)
         self._rtc_read_timer.setInterval(500)
@@ -732,7 +760,7 @@ class MainWindow(QMainWindow):
         self._log_edit = QPlainTextEdit()
         self._log_edit.setReadOnly(True)
         self._log_edit.setMinimumHeight(200)
-        self._log_edit.setFont(QFont("Consolas", 10))
+        self._log_edit.setFont(QFont("Menlo", 10))
         self._log_edit.setMaximumBlockCount(self._log_max_lines)
         row_log_opt = QHBoxLayout()
         row_log_opt.addWidget(QLabel("Level:"))
@@ -1089,7 +1117,7 @@ class MainWindow(QMainWindow):
         self._monitor_retry_count = 0
         self._set_op_state("OUTPUT_MONITORING")
         self._log.log_info("[STATE] → OUTPUT MONITORING (HPSB+LPSB, 모든 출력 OFF 시 자동 중단)")
-        self._hpsb_adc_log_timer.start()
+        self._sync_hpsb_adc_log_timer()
 
     def _log_hpsb_monitoring_state(self):
         """HPSB 상태를 규격 포맷으로 로그 출력 (OUTPUT_MONITORING 전용 단일 상태 줄)."""
@@ -1203,12 +1231,11 @@ class MainWindow(QMainWindow):
             return False
 
     def _sync_hpsb_adc_log_timer(self):
-        """OUTPUT_MONITORING 상태에서만 2s 주기 통합 모니터링 타이머 동작.
-        monitor_target == "hpsb" 또는 "both" 모두 허용."""
+        """Auto poll(2s) ON + Mainboard routing일 때만 2초 ADC 로그 타이머 동작."""
         should_run = bool(
             self._client.connected
-            and self._op_state == "OUTPUT_MONITORING"
-            and self._monitor_target in ("hpsb", "both")
+            and self._sub_auto_poll
+            and self._direct_mode == "none"
         )
         if should_run and not self._hpsb_adc_log_timer.isActive():
             self._hpsb_adc_log_timer.start()
@@ -1235,26 +1262,11 @@ class MainWindow(QMainWindow):
             self.request_read_sub.emit()
 
     def _on_hpsb_adc_log_tick(self):
-        """2s OUTPUT MONITORING (HPSB+LPSB 통합): FC04 read 요청 → result 핸들러에서 두 줄 로그 출력.
-        HPSB Relay / LPSB SSR 중 하나라도 ON 상태인 동안 계속 실행, 모두 OFF 되면 자동 IDLE 복귀.
-        """
-        if not (self._client.connected and self._op_state == "OUTPUT_MONITORING" and self._monitor_target == "both"):
+        """2초마다 Auto poll 경로의 sub read를 트리거하고, 응답 시 ADC 2줄 로그를 출력한다."""
+        if not (self._client.connected and self._sub_auto_poll and self._direct_mode == "none"):
             self._hpsb_adc_log_timer.stop()
             return
-        # HPSB Relay + LPSB SSR 모두 OFF → 모니터링 중단
-        try:
-            any_hpsb_on = any(bool(b.isChecked()) for b in self._hpsb_btns)
-        except Exception:
-            any_hpsb_on = False
-        try:
-            any_lpsb_on = any(bool(b.isChecked()) for b in self._lpsb_ssr_btns)
-        except Exception:
-            any_lpsb_on = any(bool(s) for s in self._lpsb_ssr_state)
-        if not (any_hpsb_on or any_lpsb_on):
-            self._hpsb_adc_log_timer.stop()
-            self._log.log_info("[STATE] → IDLE (모든 출력 OFF → 모니터링 중단)")
-            self._set_op_state("IDLE")
-            return
+        self._auto_poll_adc_log_pending = True
         self._request_hpsb_adc_refresh_if_needed()
 
     def _allow_log_line(self, line: str) -> bool:
@@ -1426,6 +1438,10 @@ class MainWindow(QMainWindow):
             else:
                 # Mainboard routing: 300ms 자동 폴링 시작
                 self._main_poll_inflight = False
+                self._main_poll_fail_streak = 0
+                self._last_main_poll_fail_log_ts = 0.0
+                self._diag_read_in_progress = False
+                self._main_poll_timer.setInterval(self._main_poll_default_ms)
                 self._main_poll_timer.start()
                 self._log.log_info("→ Mainboard 상태 자동 polling 시작 (300ms: DI / Relay 실제 상태 / Virtual Bit)")
         else:
@@ -1435,7 +1451,11 @@ class MainWindow(QMainWindow):
             self._env_poll_timer.stop()
             self._sub_poll_timer.stop()
             self._main_poll_timer.stop()
+            self._main_poll_timer.setInterval(self._main_poll_default_ms)
             self._main_poll_inflight = False
+            self._main_poll_fail_streak = 0
+            self._last_main_poll_fail_log_ts = 0.0
+            self._diag_read_in_progress = False
             self._sub_auto_poll = False
             self._chk_auto_poll.setChecked(False)
             self._status_badge.setText("Disconnected")
@@ -1642,6 +1662,12 @@ class MainWindow(QMainWindow):
     def _on_di_result(self, ok: bool, bits: list | None, relay_states: list | None, vbits: list | None, err: str | None):
         self._main_poll_inflight = False
         if ok and bits is not None:
+            # 통신 회복 시 fail streak/백오프를 즉시 원복
+            if self._main_poll_fail_streak != 0:
+                self._main_poll_fail_streak = 0
+            if self._main_poll_timer.interval() != self._main_poll_default_ms:
+                self._main_poll_timer.setInterval(self._main_poll_default_ms)
+                self._log.log_info(f"[MAIN] poll interval recovered: {self._main_poll_default_ms}ms")
             for i in range(min(8, len(bits))):
                 self._di_leds[i].set_di_state(bool(bits[i]))  # 1=입력 있음(빨강), 0=없음(파랑)
             for i in range(len(bits), 8):
@@ -1658,7 +1684,23 @@ class MainWindow(QMainWindow):
         else:
             # 간헐 통신 실패 1회로 상태가 사라져 보이지 않도록 마지막 정상값을 유지한다.
             msg = err or "No response/timeout"
-            self._log.log_tagged("[MAIN]", "FC04", 0, MAIN_FC04_DI_VBIT_COUNT, "Fail", msg)
+            self._main_poll_fail_streak += 1
+            # 연속 실패 시 polling 주기를 단계적으로 완화해 UI 버벅임/포트 부하를 줄인다.
+            new_interval = self._main_poll_default_ms
+            if self._main_poll_fail_streak >= 3:
+                new_interval = self._main_poll_slow_ms
+            if self._main_poll_fail_streak >= 8:
+                new_interval = self._main_poll_max_ms
+            if self._main_poll_timer.interval() != new_interval:
+                self._main_poll_timer.setInterval(new_interval)
+                self._log.log_info(
+                    f"[MAIN] poll interval backoff: {new_interval}ms (fail_streak={self._main_poll_fail_streak})"
+                )
+            # 동일 실패 로그 폭주 방지(2초 쓰로틀)
+            now_ts = time.monotonic()
+            if (now_ts - self._last_main_poll_fail_log_ts) >= 2.0:
+                self._last_main_poll_fail_log_ts = now_ts
+                self._log.log_tagged("[MAIN]", "FC04", 0, MAIN_FC04_DI_VBIT_COUNT, "Fail", msg)
             self._show_0xaa_mode_hint_if_needed(msg)
             if msg and ("No response" in msg or "0 received" in msg):
                 self._log.log_info("힌트: 메인보드 빌드에서 ENABLE_PC_TEST_AA_STREAM=0, USE_PC_TEST_UART1_SLAVE=1 인지 확인하세요.")
@@ -1695,14 +1737,14 @@ class MainWindow(QMainWindow):
                 self._lbl_env_flags.setText(f"Flags: 0x{int(flags) & 0xFFFF:04X}")
             except Exception:
                 pass
-            self._log.log_tagged("[MAIN]", "FC04", 0, 14, "OK")
+            self._log.log_tagged("[MAIN]", "FC04", 0, 17, "OK")
         else:
             msg = err or "No response/timeout"
             try:
                 self._lbl_env_status.setText("Status: (read fail)")
             except Exception:
                 pass
-            self._log.log_tagged("[MAIN]", "FC04", 0, 14, "Fail", msg)
+            self._log.log_tagged("[MAIN]", "FC04", 0, 17, "Fail", msg)
             self._show_0xaa_mode_hint_if_needed(msg)
         if self._op_state == "READ_ONCE":
             self._set_op_state("IDLE")
@@ -1710,17 +1752,23 @@ class MainWindow(QMainWindow):
     def _on_write_result(self, ok: bool, err: str | None):
         tag = self._last_log_tag
         if ok:
+            did_fc05_success = False
             if self._pending_hpsb_ui_write is not None:
                 idx = int(self._pending_hpsb_ui_write.get("idx", -1))
                 target = bool(self._pending_hpsb_ui_write.get("target", False))
                 self._apply_hpsb_write_ui(idx, target)
                 self._pending_hpsb_ui_write = None
+                did_fc05_success = True
+                if 0 <= idx < len(self._hpsb_relay_commanded):
+                    self._hpsb_relay_commanded[idx] = bool(target)
                 self._log.log_info(f"[UI] HPSB RELAY{idx + 1} write success -> {'ON' if target else 'OFF'}")
                 # Relay ON → OUTPUT_MONITORING 시작, 모두 OFF → IDLE
+                # commanded 상태 기준으로 판단 (widget isChecked()는 피드백으로 바뀔 수 있음)
+                any_relay_on = any(self._hpsb_relay_commanded)
                 try:
-                    any_relay_on = any(bool(b.isChecked()) for b in self._hpsb_btns)
+                    any_relay_on = any_relay_on or any(bool(b.isChecked()) for b in self._hpsb_btns)
                 except Exception:
-                    any_relay_on = target
+                    pass
                 if any_relay_on:
                     self._start_output_monitoring("hpsb")
                 else:
@@ -1731,23 +1779,74 @@ class MainWindow(QMainWindow):
                 if 0 <= idx < len(self._lpsb_ssr_state):
                     self._lpsb_ssr_state[idx] = target
                 self._pending_lpsb_ui_write = None
+                did_fc05_success = True
+                if 0 <= idx < len(self._lpsb_ssr_commanded):
+                    self._lpsb_ssr_commanded[idx] = bool(target)
                 self._log.log_info(f"[UI] LPSB SSR{idx + 1} write success -> {'ON' if target else 'OFF'}")
                 # SSR ON → OUTPUT_MONITORING 시작, 모두 OFF → IDLE
+                any_ssr_on = any(self._lpsb_ssr_commanded)
                 try:
-                    any_ssr_on = any(bool(s) for s in self._lpsb_ssr_state)
+                    any_ssr_on = any_ssr_on or any(bool(s) for s in self._lpsb_ssr_state)
                 except Exception:
-                    any_ssr_on = target
+                    pass
                 if any_ssr_on:
                     self._start_output_monitoring("lpsb")
                 else:
                     self._set_op_state("IDLE")
             self._log.log_tagged(tag, "Write", "FC05/06", "-", "Response: OK")
+            # FC05 성공 직후 NVM 진단 read:
+            # - OUTPUT_MONITORING 중이면 이미 polling 중이므로 DIAG read 불필요 → 스킵.
+            # - 다른 DIAG 시퀀스가 진행 중이면(_diag_read_in_progress=True) 중복 시작 방지.
+            # - DIAG_READ_DELAY_MS 지연 후 실행해 Modbus 버스 여유 확보.
+            # - 지연 동안 상태가 OUTPUT_MONITORING으로 바뀌었으면 그때도 스킵.
+            # - 타이머를 직접 stop/start하지 않고, 지연 중에는 이미 이벤트루프가 블록되지 않으므로
+            #   main_poll_timer는 DIAG read의 blocking 호출 시간만큼만 자연스럽게 지연됨.
+            #   (명시적 stop/start는 연속 write 시 main_poll_was_active=False 캡처 → 타이머 누수 위험)
+            if did_fc05_success and self._op_state != "OUTPUT_MONITORING":
+                if self._diag_read_in_progress:
+                    self._log.log_info("[EEPROM] DIAG read skipped (previous sequence in progress)")
+                else:
+                    self._diag_read_in_progress = True
+
+                    def _read_diag_once(try_idx: int = 0) -> None:
+                        # 지연 후 상태 재확인: 그 사이 OUTPUT_MONITORING이 시작됐으면 스킵
+                        if try_idx == 0 and self._op_state == "OUTPUT_MONITORING":
+                            self._log.log_info("[EEPROM] DIAG read skipped (OUTPUT_MONITORING active)")
+                            self._diag_read_in_progress = False
+                            return
+                        will_retry = False
+                        try:
+                            ok_d, regs_d, err_d = self._client.read_input_registers(
+                                NVM_DIAG_REG_START, NVM_DIAG_REG_COUNT, unit=None
+                            )
+                            if ok_d and regs_d and len(regs_d) >= NVM_DIAG_REG_COUNT:
+                                self._log_eeprom_diag_from_regs(regs_d)
+                                return
+                            if try_idx == 0:
+                                QTimer.singleShot(250, lambda: _read_diag_once(1))
+                                will_retry = True
+                                return
+                            self._log.log_info(f"[EEPROM] DIAG read fail: {err_d or 'no regs'}")
+                        except Exception as e:
+                            if try_idx == 0:
+                                QTimer.singleShot(250, lambda: _read_diag_once(1))
+                                will_retry = True
+                            else:
+                                self._log.log_info(f"[EEPROM] DIAG exception={type(e).__name__}: {e}")
+                        finally:
+                            if not will_retry:
+                                self._diag_read_in_progress = False
+
+                    QTimer.singleShot(DIAG_READ_DELAY_MS, lambda: _read_diag_once(0))
         else:
             was_hpsb_pending = self._pending_hpsb_ui_write is not None
             was_lpsb_pending = self._pending_lpsb_ui_write is not None
             if self._pending_hpsb_ui_write is not None:
                 idx = int(self._pending_hpsb_ui_write.get("idx", -1))
+                prev_state = bool(self._pending_hpsb_ui_write.get("prev", False))
                 self._rollback_hpsb_write_ui()
+                if 0 <= idx < len(self._hpsb_relay_commanded):
+                    self._hpsb_relay_commanded[idx] = prev_state
                 self._log.log_info(f"[UI] HPSB RELAY{idx + 1} write fail -> UI rollback")
             if self._pending_lpsb_ui_write is not None:
                 idx = int(self._pending_lpsb_ui_write.get("idx", -1))
@@ -1770,8 +1869,11 @@ class MainWindow(QMainWindow):
                 self._log.log_info(f"[UI] 통신 실패: LPSB SSR 제어 실패: {msg}")
             # FC05 fail 시 Mainboard diag(4x4000..)를 1회 읽어 실패 slave/reason/rx_len을 바로 표시
             try:
-                ok_d, regs_d, err_d = self._client.read_input_registers(4000, 32, unit=None)
-                if ok_d and regs_d and len(regs_d) >= 32:
+                ok_d, regs_d, err_d = self._client.read_input_registers(
+                    NVM_DIAG_REG_START, NVM_DIAG_REG_COUNT, unit=None
+                )
+                if ok_d and regs_d and len(regs_d) >= NVM_DIAG_REG_COUNT:
+                    self._log_eeprom_diag_from_regs(regs_d)
                     def _reason_text(v: int) -> str:
                         v = int(v) & 0xFFFF
                         return {
@@ -2163,6 +2265,7 @@ class MainWindow(QMainWindow):
         else:
             if self._hpsb_probe_inflight:
                 return
+            self._auto_poll_adc_log_pending = True
             self._hpsb_probe_inflight = True
             self.request_read_sub.emit()
 
@@ -2221,9 +2324,40 @@ class MainWindow(QMainWindow):
             self._sub_poll_timer.stop()
             self._sync_current_log_timer()
 
+    def _log_eeprom_diag_from_regs(self, regs_d: list[int]) -> None:
+        def at(addr: int) -> int:
+            return int(regs_d[addr - NVM_DIAG_REG_START]) & 0xFFFF
+
+        loaded = at(NVM_DIAG_LOADED)
+        dirty = at(NVM_DIAG_DIRTY)
+        seq = at(NVM_DIAG_SEQUENCE)
+        save_r = at(NVM_DIAG_LAST_SAVE_RESULT)
+        load_r = at(NVM_DIAG_LAST_LOAD_RESULT)
+        mask_try = at(NVM_DIAG_RESTORE_TRY_MASK)
+        mask_ok = at(NVM_DIAG_RESTORE_OK_MASK) if len(regs_d) >= NVM_DIAG_REG_COUNT else 0
+
+        self._log.log_info(f"[EEPROM] LOAD {'OK' if load_r == 0 else 'ERR'} seq={seq} loaded={loaded}")
+        self._log.log_info(f"[EEPROM] SAVE {'OK' if save_r == 0 else 'ERR'} seq={seq} dirty={dirty}")
+        self._log.log_info(
+            f"[EEPROM] RESTORE TRY mask=0x{mask_try:04X} "
+            f"(HPSB={'Y' if (mask_try & 0x1) else 'N'}, "
+            f"LPSB2={'Y' if (mask_try & 0x2) else 'N'}, "
+            f"LPSB4={'Y' if (mask_try & 0x4) else 'N'}, "
+            f"LPSB8={'Y' if (mask_try & 0x8) else 'N'})"
+        )
+        self._log.log_info(
+            f"[EEPROM] RESTORE OK mask=0x{mask_ok:04X} "
+            f"(HPSB={'Y' if (mask_ok & 0x1) else 'N'}, "
+            f"LPSB2={'Y' if (mask_ok & 0x2) else 'N'}, "
+            f"LPSB4={'Y' if (mask_ok & 0x4) else 'N'}, "
+            f"LPSB8={'Y' if (mask_ok & 0x8) else 'N'})"
+        )
+
     def _on_sub_data_result(self, ok: bool, sense: list | None, coils: list | None, flags: int | None, raw: dict | None, err: str | None):
         AGG_ERR_COMM_HPSB = 1
         AGG_ERR_COMM_LPSB = 2
+        emit_adc_log = bool(getattr(self, "_auto_poll_adc_log_pending", False))
+        self._auto_poll_adc_log_pending = False
         self._hpsb_probe_inflight = False
         self._lpsb_adc_poll_inflight = False
         # comm bad 시 진단(4000..)을 너무 자주 읽지 않도록 레이트리밋
@@ -2272,14 +2406,18 @@ class MainWindow(QMainWindow):
         coils = coils or [False] * 14
         flags = flags if flags is not None else 0
         # HPSB: RELAY1~3 상태 → 왼쪽 색상(빨강/파랑), 버튼 체크, AVG/PKPK/CURRENT 표시
+        # OUTPUT_MONITORING 중에는 버튼 체크 상태를 피드백으로 덮어쓰지 않는다.
+        # (coils[i]는 전류 피드백 기반이라 부하 미연결 시 0 = OFF로 오인될 수 있음)
         pending_idx = -1
         if self._pending_hpsb_ui_write is not None:
             pending_idx = int(self._pending_hpsb_ui_write.get("idx", -1))
+        monitoring_active = (getattr(self, "_op_state", "IDLE") == "OUTPUT_MONITORING")
         for i in range(3):
             on = i < len(coils) and coils[i]
             if i != pending_idx:
                 self._hpsb_strips[i].set_state(on)
-                self._hpsb_btns[i].setChecked(on)
+                if not monitoring_active:
+                    self._hpsb_btns[i].setChecked(on)
         # HPSB v1.1: sense[0..2]=AVG, [3..5]=PKPK, [6..8]=CUR
         try:
             avg = [int(sense[0]), int(sense[1]), int(sense[2])]
@@ -2307,8 +2445,11 @@ class MainWindow(QMainWindow):
             if hpsb_comm_bad:
                 # 추가 진단: Mainboard FC04 diag(4000..)에서 마지막 서브폴링 실패 원인 조회
                 try:
-                    ok_d, regs_d, err_d = self._client.read_input_registers(4000, 32, unit=None)
-                    if ok_d and regs_d and len(regs_d) >= 32:
+                    ok_d, regs_d, err_d = self._client.read_input_registers(
+                        NVM_DIAG_REG_START, NVM_DIAG_REG_COUNT, unit=None
+                    )
+                    if ok_d and regs_d and len(regs_d) >= NVM_DIAG_REG_COUNT:
+                        self._log_eeprom_diag_from_regs(regs_d)
                         def _reason_text(v: int) -> str:
                             v = int(v) & 0xFFFF
                             return {
@@ -2389,8 +2530,11 @@ class MainWindow(QMainWindow):
                 if now_ms == 0 or (now_ms - int(getattr(self, "_diag_last_ms", 0))) >= 2000:
                     self._diag_last_ms = now_ms
                     try:
-                        ok_d, regs_d, err_d = self._client.read_input_registers(4000, 32, unit=None)
-                        if ok_d and regs_d and len(regs_d) >= 32:
+                        ok_d, regs_d, err_d = self._client.read_input_registers(
+                            NVM_DIAG_REG_START, NVM_DIAG_REG_COUNT, unit=None
+                        )
+                        if ok_d and regs_d and len(regs_d) >= NVM_DIAG_REG_COUNT:
+                            self._log_eeprom_diag_from_regs(regs_d)
                             def _reason_text(v: int) -> str:
                                 v = int(v) & 0xFFFF
                                 return {
@@ -2486,8 +2630,8 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         if self._op_state == "OUTPUT_MONITORING":
-            # OUTPUT_MONITORING 중: HPSB + LPSB 두 줄 동시 출력, retry count 리셋
             self._monitor_retry_count = 0
+        if emit_adc_log and self._sub_auto_poll and self._direct_mode == "none":
             self._log_hpsb_monitoring_state()
             self._log_lpsb_monitoring_state()
         else:

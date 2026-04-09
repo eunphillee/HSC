@@ -26,6 +26,7 @@ typedef enum {
 } ModbusMasterFc05Err_t;
 
 /* Optional: request write (queued or immediate). Use enum addresses. */
+void ModbusMaster_SetFc05TxReason(const char *reason);
 int ModbusMaster_WriteCoil(SlaveId_t slave, uint16_t coil_addr, uint8_t value);
 int ModbusMaster_WriteHoldingReg(SlaveId_t slave, uint16_t reg_addr, uint16_t value);
 ModbusMasterFc05Err_t ModbusMaster_GetLastFc05Error(void);
@@ -55,6 +56,13 @@ void ModbusMaster_SetPollEnableMask(uint16_t slave_id_mask);
 
 /* On-demand poll: PC 요청 시 지정 slave(들)를 1회 polling 요청 (기본 IDLE, 요청 기반 통신 정책) */
 void ModbusMaster_RequestOnDemandPoll(uint16_t slave_mask);
+
+/**
+ * 슬레이브의 마지막 성공 poll 수신 시각 반환 (HAL_GetTick 기준).
+ * 아직 한 번도 성공 poll이 없으면 0 반환.
+ * keep-alive에서 "최근 poll이 있었으면 skip" 판정에 사용한다.
+ */
+uint32_t ModbusMaster_GetLastPollTick(SlaveId_t slave);
 
 /* Optional debug log (UART2 하위 폴링): MODBUS_MASTER_DEBUG_LOG=1 시 UART1 출력. PC 통신과 분리해 별도 시리얼로 확인 권장. */
 void ModbusMaster_LogSubPollStart(uint8_t slave_id);

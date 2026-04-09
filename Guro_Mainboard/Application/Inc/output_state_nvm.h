@@ -86,6 +86,23 @@ int OutputStateNvm_SetSubCoilTarget(uint8_t slave_id, uint16_t coil_index, uint8
  */
 void OutputStateNvm_RestoreSubBoardsIfNeeded(void);
 
+/** Poll 이후 InputReg 피드백으로 RESTORE_OK_MASK 갱신 (TRY 완료 슬레이브만). */
+void OutputStateNvm_UpdateRestoreOkFromFeedback(void);
+
+/**
+ * 메인 루프에서 주기적으로 호출 (1~2초 간격 권장).
+ * ON 상태 출력이 있는 슬레이브에 대해 on-demand poll 요청을 발행해
+ * HPSB/LPSB의 통신 watchdog이 만료되지 않도록 유지한다.
+ */
+void OutputStateNvm_KeepAliveIfNeeded(void);
+
+/**
+ * 메인 루프에서 주기적으로 호출 (5초 간격 권장).
+ * EEPROM 저장 실패(g_eeprom_dirty=1) 시 재시도한다.
+ * I2C 일시적 오류로 저장이 누락되면 전원 사이클 후 상태가 초기화되는 것을 방지.
+ */
+void OutputStateNvm_FlushIfDirty(void);
+
 /**
  * [주기 동기화] target(g_state) vs actual(FC04 InputReg) 비교.
  * 불일치 채널은 FC05 재시도. OUTPUT_STATE_SYNC_MAX_RETRY 연속 실패 시 fault 마킹.
@@ -112,6 +129,18 @@ int OutputStateNvm_IsEepromDirty(void);
 
 /** 현재 EEPROM 저장 횟수(sequence). 부팅 직후 EEPROM에 저장된 seq가 반환됨. */
 uint16_t OutputStateNvm_GetSequence(void);
+
+/** 마지막 Save 결과: 0=OK, 1=ERR */
+uint16_t OutputStateNvm_GetLastSaveResult(void);
+
+/** 마지막 Load 결과: 0=OK, 1=ERR */
+uint16_t OutputStateNvm_GetLastLoadResult(void);
+
+/** 복원 시도(1패스) 완료 마스크: bit0=HPSB, bit1=LPSB2, bit2=LPSB4, bit3=LPSB8 */
+uint16_t OutputStateNvm_GetRestoreDoneMask(void);
+
+/** InputReg(2..4)가 want와 일치할 때만 set: 동일 비트 */
+uint16_t OutputStateNvm_GetRestoreOkMask(void);
 
 #ifdef __cplusplus
 }

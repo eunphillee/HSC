@@ -350,12 +350,12 @@ class ModbusClient:
             return out
 
     def read_di_bitmap(self) -> tuple[bool, list[int] | None, list[int] | None, list[int] | None, str | None]:
-        """Mainboard FC04 0/24 read: DI(reg2..9), relay_bitmap(reg11 bits0..3), VBIT(reg20..23)."""
+        """Mainboard FC04 0/24 read: DI(reg2..9), relay(reg11..14), VBIT(reg20..23)."""
         with self._lock:
             ok, err = self._ensure_socket_open()
             if not ok:
                 return False, None, None, None, err or "Not connected"
-            # FC04 mainboard map: reg2..9 = DI1..DI8, reg11 = relay actual bitmap, reg20..23 = VBIT
+            # FC04 mainboard map: reg2..9 = DI1..DI8, reg11..14 = relay1..4 actual, reg20..23 = VBIT
             last_err: str | None = None
             for attempt in range(2):  # 간헐 timeout/noise 완화: 최대 1회 재시도
                 try:
@@ -374,8 +374,7 @@ class ModbusClient:
                     regs = list(rr.registers) if rr.registers else [0] * MAIN_FC04_DI_VBIT_COUNT
                     regs = (regs + [0] * MAIN_FC04_DI_VBIT_COUNT)[:MAIN_FC04_DI_VBIT_COUNT]
                     bits = [1 if regs[2 + i] else 0 for i in range(MAIN_DI_COUNT)]
-                    relay_bitmap = regs[11] if len(regs) > 11 else 0
-                    relay_states = [(relay_bitmap >> i) & 1 for i in range(4)]
+                    relay_states = [1 if regs[11 + i] else 0 for i in range(4)]
                     vbits = [1 if regs[20 + i] else 0 for i in range(MAIN_VBIT_COUNT)]
                     return True, bits, relay_states, vbits, None
                 except Exception as e:
@@ -447,7 +446,7 @@ class ModbusClient:
 
     def read_env_shtc3(self) -> tuple[bool, tuple[float, float, int] | None, str | None]:
         """Env Sensor(SHTC3) via Mainboard FC04 local map.
-        - FC04 addr=0 count=14 응답에서 reg12=temp_c_x10(s16), reg13=rh_x10(u16)로 제공.
+        - FC04 addr=0 count=17 응답에서 reg15=temp_c_x10(s16), reg16=rh_x10(u16)로 제공.
         - 센서 에러/미연결은 보드가 -32768 / 0xFFFF로 채움. 이 경우도 통신 성공으로 처리한다.
         Returns (ok, (temp_c, rh_pct, flags_u16), err).
         """
@@ -457,27 +456,27 @@ class ModbusClient:
                 return False, None, err or "Not connected"
             try:
                 if self._request_logger:
-                    self._request_logger(self._slave_id, "FC04", 0, 14)
+                    self._request_logger(self._slave_id, "FC04", 0, 17)
                 rr = self._client.read_input_registers(
                     address=0,
-                    count=14,
+                    count=17,
                     unit=self._slave_id,
                 )
                 if self._response_logger:
                     self._response_logger(not rr.isError(), _response_exception_code(rr))
                 if rr.isError():
                     return False, None, format_modbus_error(resp=rr)
-                regs = list(rr.registers) if rr.registers else [0] * 14
-                regs = (regs + [0] * 14)[:14]
+                regs = list(rr.registers) if rr.registers else [0] * 17
+                regs = (regs + [0] * 17)[:17]
 
                 # flags from reg1 (u16)
                 flags = int(regs[1]) & 0xFFFF
 
-                # temp reg12 is signed 16-bit (cx10)
-                t_raw = int(regs[12]) & 0xFFFF
+                # temp reg15 is signed 16-bit (cx10)
+                t_raw = int(regs[15]) & 0xFFFF
                 if t_raw & 0x8000:
                     t_raw -= 0x10000
-                rh_raw = int(regs[13]) & 0xFFFF
+                rh_raw = int(regs[16]) & 0xFFFF
 
                 # Sentinel: -32768 / 0xFFFF -> N/A
                 if t_raw == -32768 or rh_raw == 0xFFFF:

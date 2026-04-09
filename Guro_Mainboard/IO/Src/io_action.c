@@ -3,6 +3,7 @@
 
 int IoAction_WriteSubCoil(uint8_t slave_id, uint16_t coil_index, uint8_t value)
 {
+    Gateway_WriteSubCoil_SetNextReason("IO_ACTION");
     return Gateway_Action_WriteSubCoil(slave_id, coil_index, value);
 }
 

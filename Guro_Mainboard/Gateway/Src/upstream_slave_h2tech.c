@@ -58,7 +58,7 @@
 #define UPSTREAM_SYSCFG_REG_COUNT  3u
 /* FC04 input register diagnostics (service extension) */
 #define UPSTREAM_DIAG_IR_START      4000u
-#define UPSTREAM_DIAG_IR_COUNT      32u
+#define UPSTREAM_DIAG_IR_COUNT      40u
 /* RTC block: 4x0891..0897 (PDU 890..896) */
 #define UPSTREAM_RTC_REG_START      890u
 #define UPSTREAM_RTC_REG_COUNT      7u
@@ -71,7 +71,7 @@ static void log_fc04_main_snapshot(uint16_t di_now, uint16_t do_now, const uint1
     /* Unified debug values for DI_03 <-> REG4 <-> RELAY3 mapping verification */
     int di3 = (di_now & (1u << 2)) ? 1 : 0;          /* DI_03 == bitmap bit2 */
     int reg4 = regs[4] ? 1 : 0;                      /* FC04 MAP_MAIN regs[4] == DI_03 */
-    int relay3 = (regs[11] & (1u << 2)) ? 1 : 0;     /* reg11 bit2 == RELAY3 actual */
+    int relay3 = regs[13] ? 1 : 0;                    /* reg13 == MAIN_RELAY_03 */
     int relay3_gpio = (HAL_GPIO_ReadPin(RELAY3_EN_GPIO_Port, RELAY3_EN_Pin) == GPIO_PIN_SET) ? 1 : 0;
 
     /* User-requested direct printf diagnostics (enable only when needed). */
@@ -81,12 +81,12 @@ static void log_fc04_main_snapshot(uint16_t di_now, uint16_t do_now, const uint1
     char buf[220];
     int n = snprintf(
         buf, sizeof(buf),
-        "[MB][FC04][MAIN] di_now=0x%02X do_now=0x%02X regs2_9=[%u,%u,%u,%u,%u,%u,%u,%u] reg11=0x%02X\r\n",
+        "[MB][FC04][MAIN] di_now=0x%02X do_now=0x%02X regs2_9=[%u,%u,%u,%u,%u,%u,%u,%u] rly=[%u,%u,%u,%u]\r\n",
         (unsigned)(di_now & 0xFFu),
         (unsigned)(do_now & 0xFFu),
         (unsigned)regs[2], (unsigned)regs[3], (unsigned)regs[4], (unsigned)regs[5],
         (unsigned)regs[6], (unsigned)regs[7], (unsigned)regs[8], (unsigned)regs[9],
-        (unsigned)(regs[11] & 0xFFu)
+        (unsigned)regs[11], (unsigned)regs[12], (unsigned)regs[13], (unsigned)regs[14]
     );
     if (n > 0) {
         (void)HAL_UART_Transmit(&huart1, (uint8_t *)buf, (uint16_t)n, 100);
@@ -493,6 +493,14 @@ static int handle_fc04(uint16_t start_addr, uint16_t count, const void *p_agg,
                 regs[w++] = (uint16_t)len;               /* rx_len */
             }
         }
+        /* 4032~4038: NVM diagnostics */
+        regs[32] = OutputStateNvm_Get() ? 1u : 0u;            /* NVM_LOADED */
+        regs[33] = (uint16_t)OutputStateNvm_IsEepromDirty();  /* NVM_DIRTY */
+        regs[34] = OutputStateNvm_GetSequence();              /* NVM_SEQ */
+        regs[35] = OutputStateNvm_GetLastSaveResult();        /* LAST_SAVE_RESULT */
+        regs[36] = OutputStateNvm_GetLastLoadResult();        /* LAST_LOAD_RESULT */
+        regs[37] = OutputStateNvm_GetRestoreDoneMask();       /* RESTORE_TRY_MASK */
+        regs[38] = OutputStateNvm_GetRestoreOkMask();         /* RESTORE_OK_MASK */
 
         response[0] = 0x04;
         response[1] = (uint8_t)(count * 2u);
@@ -567,13 +575,16 @@ static int handle_fc04(uint16_t start_addr, uint16_t count, const void *p_agg,
             }
         }
         regs[10] = (uint16_t)BSP_ReadPC_LED_IN();
-        /* Mainboard local relay states (bitmap bits0..3 = Relay1..4), 실시간 GPIO read */
+        /* Mainboard local relay states (source of truth = 실시간 DO read) */
         do_now = IO_Main_ReadDO_Bitmap();
-        regs[11] = (uint16_t)(do_now & 0x0Fu);
-        /* Env (SHTC3): temp_c_x10 (signed), rh_x10 (unsigned). If sensor error -> -32768 / 0xFFFF. */
-        regs[12] = agg ? (uint16_t)agg->env_temp_cx10 : (uint16_t)0x8000u;
-        regs[13] = agg ? agg->env_rh_x10 : 0xFFFFu;
-        for (uint16_t r = 14u; r < 20u; r++) regs[r] = 0u;
+        regs[11] = (do_now & (1u << 0)) ? 1u : 0u; /* MAIN_RELAY_01 */
+        regs[12] = (do_now & (1u << 1)) ? 1u : 0u; /* MAIN_RELAY_02 */
+        regs[13] = (do_now & (1u << 2)) ? 1u : 0u; /* MAIN_RELAY_03 */
+        regs[14] = (do_now & (1u << 3)) ? 1u : 0u; /* MAIN_RELAY_04 */
+        /* Env (SHTC3): moved to reg15/16. temp_c_x10 signed, rh_x10 unsigned. */
+        regs[15] = agg ? (uint16_t)agg->env_temp_cx10 : (uint16_t)0x8000u;
+        regs[16] = agg ? agg->env_rh_x10 : 0xFFFFu;
+        for (uint16_t r = 17u; r < 20u; r++) regs[r] = 0u;
         regs[20] = MainAutoLink_GetVirtEnableWord(0u);
         regs[21] = MainAutoLink_GetVirtEnableWord(1u);
         regs[22] = MainAutoLink_GetVirtEnableWord(2u);
@@ -1042,6 +1053,17 @@ static int handle_fc05(uint16_t start_addr, const uint8_t *write_data,
         }
 #endif
     }
+    if (e->action == H2_ACT_WRITE_SUB_COIL && e->h2_dec >= 899u && e->h2_dec <= 910u) {
+#if GATEWAY_WRITE_DEBUG_LOG
+        uint16_t off = (uint16_t)(e->h2_dec - 899u);
+        static const uint8_t sid_pc[] = { 1u, 2u, 4u, 8u };
+        uint8_t sid = sid_pc[off / 3u];
+        uint16_t sub_coil = (uint16_t)(off % 3u);
+        (void)printf("[PC_REQ] sid=%u coil=%u val=%u\r\n",
+                     (unsigned)sid, (unsigned)sub_coil, value ? 1u : 0u);
+#endif
+        Gateway_WriteSubCoil_SetNextReason("PC_USER");
+    }
     if (!H2Map_ApplyWrite(e, value, PULSE_MS_DEFAULT)) {
 #if FC05_GW_STEP_LOG
         Gateway_LogFc05StepLocalException04();
@@ -1060,12 +1082,14 @@ static int handle_fc05(uint16_t start_addr, const uint8_t *write_data,
 #if FC05_GW_STEP_LOG
     Gateway_LogFc05StepBeforeSendNormalToPc();
 #endif
-    /* FC05 성공 후 해당 slave 상태를 즉시 갱신하도록 on-demand poll 요청 */
-    if (e->action == H2_ACT_WRITE_SUB_COIL && e->h2_dec >= 899u && e->h2_dec <= 910u) {
-        uint16_t offset = (uint16_t)(e->h2_dec - 899u);
-        static const uint8_t sid_poll[] = { 1u, 2u, 4u, 8u };
-        uint8_t poll_sid = sid_poll[offset / 3u];
-        ModbusMaster_RequestOnDemandPoll((uint16_t)poll_sid);
+    /* FC05 sub-coil(주소 898~909) 성공 후: 즉시 poll + NVM 저장 */
+    if (e->action == H2_ACT_WRITE_SUB_COIL && start_addr >= 898u && start_addr <= 909u) {
+        uint16_t offset = (uint16_t)(start_addr - 898u);
+        static const uint8_t sid_map[] = { 1u, 2u, 4u, 8u };
+        uint8_t sid = sid_map[offset / 3u];
+        uint16_t sub_coil = (uint16_t)(offset % 3u);
+        ModbusMaster_RequestOnDemandPoll((uint16_t)sid);
+        (void)OutputStateNvm_SetSubCoilTarget(sid, sub_coil, value ? 1u : 0u);
     }
     response[0] = 0x05;
     response[1] = (uint8_t)(start_addr >> 8);
@@ -1096,6 +1120,17 @@ __attribute__((unused)) static int handle_fc15(uint16_t start_addr, uint16_t cou
             return 2;
         }
         bool value = (write_data[i / 8u] >> (i % 8u)) & 1u;
+        if (e->action == H2_ACT_WRITE_SUB_COIL && e->h2_dec >= 899u && e->h2_dec <= 910u) {
+#if GATEWAY_WRITE_DEBUG_LOG
+            uint16_t off = (uint16_t)(e->h2_dec - 899u);
+            static const uint8_t sid_pc[] = { 1u, 2u, 4u, 8u };
+            uint8_t sid = sid_pc[off / 3u];
+            uint16_t sub_coil = (uint16_t)(off % 3u);
+            (void)printf("[PC_REQ] sid=%u coil=%u val=%u\r\n",
+                         (unsigned)sid, (unsigned)sub_coil, value ? 1u : 0u);
+#endif
+            Gateway_WriteSubCoil_SetNextReason("PC_USER");
+        }
         if (!H2Map_ApplyWrite(e, value, PULSE_MS_DEFAULT)) {
             response[0] = 0x8F;
             response[1] = EX_ILLEGAL_DATA_ADDR;

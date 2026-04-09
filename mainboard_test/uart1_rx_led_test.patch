@@ -1,0 +1,151 @@
+--- a/Guro_Mainboard/Application/Inc/app_config.h
++++ b/Guro_Mainboard/Application/Inc/app_config.h
+@@ -26,6 +26,17 @@
+ #ifndef RS485_DE_ACTIVE_HIGH
+ #define RS485_DE_ACTIVE_HIGH  1
+ #endif
+ 
++/* Force PB1(RS485_DE_RE) at boot and during operation: RX only or TX only (for receive test).
++ * FORCE_RS485_RX=1: PB1 kept in RX (set_de_rx only; set_de_tx is no-op). Default 1.
++ * FORCE_RS485_TX=1: PB1 kept in TX (set_de_tx only; set_de_rx is no-op). */
++#ifndef FORCE_RS485_RX
++#define FORCE_RS485_RX  1
++#endif
++#ifndef FORCE_RS485_TX
++#define FORCE_RS485_TX  0
++#endif
++
+ #endif /* APP_CONFIG_H */
+ 
+--- a/Guro_Mainboard/Application/Inc/led_status.h
++++ b/Guro_Mainboard/Application/Inc/led_status.h
+@@ -19,6 +19,9 @@ void LED_Status_OnRS485Activity(void);
+ /** UART1 Modbus Slave: pulse LED3 (DO) when response sent (for PC test visibility). */
+ void LED_Status_OnUart1SlaveTx(void);
+ 
++/** UART1 raw receive event (≥1 byte): pulse LED4 for 50ms; use to confirm "receive present" before Modbus. */
++void LED_Status_OnUart1RxEvent(void);
++
+ #ifdef __cplusplus
+ }
+ #endif
+--- a/Guro_Mainboard/Application/Src/led_status.c
++++ b/Guro_Mainboard/Application/Src/led_status.c
+@@ -17,6 +17,7 @@
+ #define RS485_PULSE_MS       30u
+ #define UART1_SLAVE_TX_PULSE_MS  30u  /* LED3 pulse when UART1 slave sends response */
++#define UART1_RX_EVT_PULSE_MS    50u  /* LED4 pulse on UART1 receive event (any byte), for receive test */
+ 
+ /* LED01~04: all LOW active (LOW=ON, HIGH=OFF) */
+ #define LED_PWR_ON()    HAL_GPIO_WritePin(LED01_GPIO_Port, LED01_Pin, GPIO_PIN_RESET)
+@@ -31,6 +32,7 @@
+ static uint16_t di_evt_timer_ms;
+ static uint16_t do_evt_timer_ms;
+ static uint16_t rs485_timer_ms;
++static uint16_t uart1_rx_evt_timer_ms;  /* LED4: UART1 raw receive event (no Modbus/CRC) */
+ 
+ /* DI: debounce state */
+ static uint16_t di_last_raw;
+@@ -45,6 +47,7 @@ void LED_Status_Init(void)
+ 	do_evt_timer_ms = 0;
+ 	rs485_timer_ms = 0;
++	uart1_rx_evt_timer_ms = 0;
+ 	di_last_raw = IO_Main_ReadDI_Bitmap();
+ 	di_stable = di_last_raw;
+ 	di_debounce_count = 0;
+@@ -105,9 +108,15 @@ void LED_Status_Tick_1ms(void)
+ 	if (rs485_timer_ms > 0) {
+ 		if (rs485_timer_ms <= elapsed) rs485_timer_ms = 0;
+ 		else rs485_timer_ms -= (uint16_t)elapsed;
+ 	}
++	if (uart1_rx_evt_timer_ms > 0) {
++		if (uart1_rx_evt_timer_ms <= elapsed) uart1_rx_evt_timer_ms = 0;
++		else uart1_rx_evt_timer_ms -= (uint16_t)elapsed;
++	}
+ 
+ 	/* ----- Output state ----- */
+ 	if (di_evt_timer_ms > 0) LED_DI_ON(); else LED_DI_OFF();
+ 	if (do_evt_timer_ms > 0) LED_DO_ON(); else LED_DO_OFF();
+-	if (rs485_timer_ms > 0) LED_RS485_ON(); else LED_RS485_OFF();
++	if (rs485_timer_ms > 0 || uart1_rx_evt_timer_ms > 0) LED_RS485_ON(); else LED_RS485_OFF();
+ }
+@@ -130,3 +139,8 @@ void LED_Status_OnUart1SlaveTx(void)
+ {
+ 	do_evt_timer_ms = UART1_SLAVE_TX_PULSE_MS;
+ }
++
++/** UART1 raw receive event (≥1 byte): pulse LED4 for 50ms (receive test, before CRC/Modbus). */
++void LED_Status_OnUart1RxEvent(void)
++{
++	uart1_rx_evt_timer_ms = UART1_RX_EVT_PULSE_MS;
++}
+--- a/Guro_Mainboard/Application/Src/upstream_slave_uart1.c
++++ b/Guro_Mainboard/Application/Src/upstream_slave_uart1.c
+@@ -21,13 +21,15 @@
+ 
+ extern UART_HandleTypeDef huart1;
+ 
+-/* Mode A (RS485_DE_ACTIVE_HIGH=1): TX=SET, RX=RESET. Mode B (=0): TX=RESET, RX=SET. */
++#if RS485_DE_ACTIVE_HIGH
++static void set_pin_tx(void) { HAL_GPIO_WritePin(RS485_DE_GPIO_Port, RS485_DE_Pin, GPIO_PIN_SET); }
++static void set_pin_rx(void) { HAL_GPIO_WritePin(RS485_DE_GPIO_Port, RS485_DE_Pin, GPIO_PIN_RESET); }
++#else
++static void set_pin_tx(void) { HAL_GPIO_WritePin(RS485_DE_GPIO_Port, RS485_DE_Pin, GPIO_PIN_RESET); }
++static void set_pin_rx(void) { HAL_GPIO_WritePin(RS485_DE_GPIO_Port, RS485_DE_Pin, GPIO_PIN_SET); }
++#endif
++
++#if FORCE_RS485_RX
++static void set_de_tx(void) { (void)0; }  /* keep RX: PB1 fixed for receive test */
++static void set_de_rx(void) { set_pin_rx(); }
++#elif FORCE_RS485_TX
++static void set_de_tx(void) { set_pin_tx(); }
++static void set_de_rx(void) { (void)0; }  /* keep TX */
++#else
++static void set_de_tx(void) { set_pin_tx(); }
++static void set_de_rx(void) { set_pin_rx(); }
++#endif
++
+-#if RS485_DE_ACTIVE_HIGH
+-static void set_de_tx(void) { HAL_GPIO_WritePin(RS485_DE_GPIO_Port, RS485_DE_Pin, GPIO_PIN_SET); }
+-static void set_de_rx(void) { HAL_GPIO_WritePin(RS485_DE_GPIO_Port, RS485_DE_Pin, GPIO_PIN_RESET); }
+-#else
+-static void set_de_tx(void) { HAL_GPIO_WritePin(RS485_DE_GPIO_Port, RS485_DE_Pin, GPIO_PIN_RESET); }
+-static void set_de_rx(void) { HAL_GPIO_WritePin(RS485_DE_GPIO_Port, RS485_DE_Pin, GPIO_PIN_SET); }
+-#endif
+-
++
+ static uint8_t rx_buf[RX_BUF_SIZE];
+ static uint8_t rx_ring[RING_SIZE];
+@@ -105,8 +120,10 @@ static void process_modbus_frame(const uint8_t *frame, size_t frame_len, const ag
+ void UpstreamSlaveUart1_Init(void)
+ {
+ 	rx_ring_len = 0;
+ 	last_rx_tick = 0;
+@@ -118,6 +135,10 @@ void UpstreamSlaveUart1_Init(void)
+ 	tx_resp_count = 0;
+ 	last_log_tick = HAL_GetTick();
+ 	set_de_rx();   /* Boot: always RX first (PB1=RX); FORCE_RS485_TX=1 then overrides below */
++#if FORCE_RS485_TX
++	set_de_tx();   /* Optional: fix PB1=TX for test */
++#endif
+ 	(void)HAL_UARTEx_ReceiveToIdle_IT(&huart1, rx_buf, RX_BUF_SIZE);
+ }
+ 
+@@ -127,6 +148,8 @@ void UpstreamSlaveUart1_RxEventCallback(uint16_t Size)
+ {
+ 	if (Size == 0 || Size > RX_BUF_SIZE) return;
++	/* Indicate "at least 1 byte received" (before CRC/Modbus) for receive test */
++	LED_Status_OnUart1RxEvent();
+ 	uint32_t now = HAL_GetTick();
+ 	if ((uint16_t)(rx_ring_len + Size) <= RING_SIZE) {
+ 		memcpy(rx_ring + rx_ring_len, rx_buf, (size_t)Size);
+--- a/Guro_Mainboard/PC_TEST_UART1_SLAVE_CHANGES.md
++++ b/Guro_Mainboard/PC_TEST_UART1_SLAVE_CHANGES.md
+@@ -40,6 +40,7 @@
+ ## 검증
+ - STM32CubeIDE에서 Guro_Mainboard 빌드 → 0 errors / 0 warnings 목표.
+ - 보드 다운로드 후 PC를 **Mainboard UART1 RS485 포트**에 연결, PC_Test_Tool에서 Slave ID=9, 9600, Read DI(FC03 addr=2100 cnt=2) 등 실행 시 **RX OK** 또는 **RX EXC** 수신 확인.
++- **UART1 수신 존재 여부 확인**: PC툴에서 TX FC03(addr=2100, cnt=2) 전송 시 어댑터 TX LED가 깜빡이면, 메인보드 **LED4가 50ms 펄스로 깜빡이면** UART1 수신이 들어온 것(물리층 통과). LED4가 전혀 안 깜빡이면 물리/트랜시버/커넥터/A·B·GND 문제로 확정.
+ 
+ ---
+ 

@@ -138,7 +138,7 @@
 #endif
 
 /* FC04 MAP_MAIN 디버그 로그:
- * 1 = [MB][FC04][MAIN] di/do bitmap + regs[2..9] + reg11 출력
+ * 1 = [MB][FC04][MAIN] DI regs[2..9] + relay regs[11..14] 출력
  * 0 = 비활성(기본) */
 #ifndef ENABLE_MB_FC04_MAIN_DEBUG
 #define ENABLE_MB_FC04_MAIN_DEBUG  0

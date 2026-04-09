@@ -70,7 +70,7 @@
  *        output_state_nvm/SystemConfig 영역(0x00~0x7F)과 겹치지 않음.
  *        이 함수는 부팅 1회만 호출하고 필요 없으면 호출부를 주석 처리하면 됩니다.
  */
-static void Eeprom_RunBootTest(void)
+__attribute__((unused)) static void Eeprom_RunBootTest(void)
 {
     extern UART_HandleTypeDef huart1;
 
@@ -417,6 +417,32 @@ int main(void)
 #endif
 #if MODBUS_MASTER_POLL_ENABLE
       ModbusMaster_Poll();
+      OutputStateNvm_RestoreSubBoardsIfNeeded();
+      OutputStateNvm_UpdateRestoreOkFromFeedback();
+      OutputStateNvm_KeepAliveIfNeeded();
+      OutputStateNvm_FlushIfDirty();
+/* [STATE_MB] 로그는 MODBUS_MASTER_DEBUG_LOG=1 시에만 출력.
+       * 기본 0 상태에서 이 printf가 UART1(PC Modbus 라인)에 섞이면
+       * 모든 FC04 응답 프레임이 깨져 No Response / Unable to decode response 발생. */
+#if MODBUS_MASTER_DEBUG_LOG
+      {
+        static uint32_t s_state_mb_last_tick;
+        uint32_t tnow = HAL_GetTick();
+        if (s_state_mb_last_tick == 0u)
+          s_state_mb_last_tick = tnow;
+        if ((uint32_t)(tnow - s_state_mb_last_tick) >= 1000u) {
+          s_state_mb_last_tick = tnow;
+          (void)printf("[STATE_MB] relay1=%u relay2=%u relay3=%u (HPSB)\r\n",
+                       ModbusTable_GetCoil(SLAVE_ID_HPSB, 0) ? 1u : 0u,
+                       ModbusTable_GetCoil(SLAVE_ID_HPSB, 1) ? 1u : 0u,
+                       ModbusTable_GetCoil(SLAVE_ID_HPSB, 2) ? 1u : 0u);
+          (void)printf("[STATE_MB] ssr1=%u ssr2=%u ssr3=%u (LPSB)\r\n",
+                       ModbusTable_GetCoil(SLAVE_ID_LPSB1, 0) ? 1u : 0u,
+                       ModbusTable_GetCoil(SLAVE_ID_LPSB1, 1) ? 1u : 0u,
+                       ModbusTable_GetCoil(SLAVE_ID_LPSB1, 2) ? 1u : 0u);
+        }
+      }
+#endif
 #endif
     }
 #endif
