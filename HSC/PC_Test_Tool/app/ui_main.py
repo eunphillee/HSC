@@ -277,6 +277,13 @@ class MainWindow(QMainWindow):
         # 오류 종료를 방지한다.
         self._hpsb_relay_commanded: list[bool] = [False, False, False]
         self._lpsb_ssr_commanded: list[bool] = [False, False, False]
+        # Bootstrap sync: connect 직후 1회 sub read로 실제 출력 상태를 복원한 뒤 polling 시작.
+        # "idle" → "syncing"(connect 후 sub read 요청) → "done"(복원 완료 or 포기)
+        self._bootstrap_sync_state: str = "idle"
+        self._bootstrap_sync_retry: int = 0
+        # LPSB 전체 보드별 SSR 상태 캐시: [0]=LPSB2, [1]=LPSB4, [2]=LPSB8 각 3채널.
+        # 선택 보드와 무관하게 항상 업데이트 → 보드 전환 시 _last_coils 없어도 즉시 복원.
+        self._lpsb_ssr_state_all: list[list[bool]] = [[False, False, False] for _ in range(3)]
         # LPSB 2s 모니터링 로그 타이머 (OUTPUT_MONITORING 시에만 활성)
         self._lpsb_log_timer = QTimer(self)
         self._lpsb_log_timer.setInterval(2000)        # 2s OUTPUT MONITORING 주기
@@ -1436,14 +1443,12 @@ class MainWindow(QMainWindow):
                 else:
                     self._log.log_info("→ [DIRECT] 보드→PC 수신: 이 툴에서 raw 수신 미지원. 터미널에서 screen ... 9600 로 확인하세요.")
             else:
-                # Mainboard routing: 300ms 자동 폴링 시작
+                # Mainboard routing: bootstrap sync(실제 출력 복원) → main polling 순서로 진행
                 self._main_poll_inflight = False
                 self._main_poll_fail_streak = 0
                 self._last_main_poll_fail_log_ts = 0.0
                 self._diag_read_in_progress = False
-                self._main_poll_timer.setInterval(self._main_poll_default_ms)
-                self._main_poll_timer.start()
-                self._log.log_info("→ Mainboard 상태 자동 polling 시작 (300ms: DI / Relay 실제 상태 / Virtual Bit)")
+                self._start_bootstrap_sync()
         else:
             self._log.set_raw_line_only(False)
             self._raw_poll_timer.stop()
@@ -1456,6 +1461,7 @@ class MainWindow(QMainWindow):
             self._main_poll_fail_streak = 0
             self._last_main_poll_fail_log_ts = 0.0
             self._diag_read_in_progress = False
+            self._bootstrap_sync_state = "idle"
             self._sub_auto_poll = False
             self._chk_auto_poll.setChecked(False)
             self._status_badge.setText("Disconnected")
@@ -1465,6 +1471,78 @@ class MainWindow(QMainWindow):
             # relay 상태 LED 초기화
             for led in getattr(self, "_relay_state_leds", []):
                 led.set_di_state(None)
+
+    # ------------------------------------------------------------------
+    # Bootstrap sync: connect 직후 실제 출력 상태 1회 복원
+    # 흐름: _start_bootstrap_sync → _do_bootstrap_sync_read → (sub read)
+    #       → _on_sub_data_result(bootstrap 분기) → _apply_bootstrap_state
+    #       → _finish_bootstrap_sync → main_poll_timer.start()
+    # ------------------------------------------------------------------
+    def _start_bootstrap_sync(self):
+        """Connect 직후 1회 sub read로 실제 출력 상태를 복원한 뒤 main polling을 시작."""
+        self._bootstrap_sync_state = "syncing"
+        self._bootstrap_sync_retry = 0
+        self._log.log_info("[SYNC] 초기 상태 동기화 시작 (HPSB·LPSB 실제 출력 상태 복원 중...)")
+        QTimer.singleShot(200, self._do_bootstrap_sync_read)
+
+    def _do_bootstrap_sync_read(self):
+        """Bootstrap 단계에서 sub read 1회 요청. inflight 중이면 100ms 후 재시도."""
+        if not self._client.connected or self._direct_mode == "hpsb":
+            self._finish_bootstrap_sync(success=False)
+            return
+        if self._bootstrap_sync_state != "syncing":
+            return
+        if not getattr(self, "_hpsb_probe_inflight", False):
+            self._hpsb_probe_inflight = True
+            self.request_read_sub.emit()
+        else:
+            QTimer.singleShot(100, self._do_bootstrap_sync_read)
+
+    def _apply_bootstrap_state(self, coils: list, raw: dict | None):
+        """Bootstrap sub read 성공 후 실제 출력 상태를 내부 모델 및 UI에 반영."""
+        # HPSB relay commanded 상태 복원
+        for i in range(3):
+            on = i < len(coils) and bool(coils[i])
+            self._hpsb_relay_commanded[i] = on
+
+        # LPSB 전체 보드(2/4/8) SSR 상태 캐시 + commanded 복원
+        for board_idx in range(3):
+            base_c = 3 + board_idx * 3
+            for ssr_i in range(3):
+                on_b = (base_c + ssr_i < len(coils)) and bool(coils[base_c + ssr_i])
+                self._lpsb_ssr_state_all[board_idx][ssr_i] = on_b
+
+        # 현재 선택 보드의 commanded·state 동기화
+        sel = getattr(self, "_selected_lpsb_index", 0)
+        self._lpsb_ssr_commanded = list(self._lpsb_ssr_state_all[sel])
+        self._lpsb_ssr_state = list(self._lpsb_ssr_state_all[sel])
+
+        # 출력 ON 여부 판단 → 필요시 OUTPUT_MONITORING 자동 진입
+        any_hpsb = any(self._hpsb_relay_commanded)
+        any_lpsb = any(any(board) for board in self._lpsb_ssr_state_all)
+        if any_hpsb or any_lpsb:
+            self._log.log_info(
+                f"[SYNC] 출력 ON 복원 → "
+                f"HPSB={[int(x) for x in self._hpsb_relay_commanded]} | "
+                f"LPSB2={[int(x) for x in self._lpsb_ssr_state_all[0]]} "
+                f"LPSB4={[int(x) for x in self._lpsb_ssr_state_all[1]]} "
+                f"LPSB8={[int(x) for x in self._lpsb_ssr_state_all[2]]}"
+            )
+            self._start_output_monitoring("hpsb" if any_hpsb else "lpsb")
+        else:
+            self._log.log_info("[SYNC] 모든 출력 OFF 확인 → IDLE 유지")
+
+    def _finish_bootstrap_sync(self, success: bool):
+        """Bootstrap sync 완료(또는 재시도 포기) 후 main polling을 시작."""
+        self._bootstrap_sync_state = "done"
+        if success:
+            self._log.log_info("[SYNC] 초기 상태 동기화 완료 → Mainboard polling 시작")
+        else:
+            self._log.log_info("[SYNC] 초기 동기화 실패 → polling 강제 시작")
+        if not self._main_poll_timer.isActive():
+            self._main_poll_timer.setInterval(self._main_poll_default_ms)
+            self._main_poll_timer.start()
+        self._log.log_info("→ Mainboard 상태 자동 polling 시작 (300ms: DI / Relay 실제 상태 / Virtual Bit)")
 
     def _refresh_ports(self):
         try:
@@ -1980,16 +2058,26 @@ class MainWindow(QMainWindow):
             b.setChecked(i == idx)
             b.setStyleSheet("background-color: #1976D2; color: white;" if i == idx else "")
         sense = getattr(self, "_last_sense", None)
-        coils = getattr(self, "_last_coils", None)
-        if sense and coils and len(sense) >= SUB_SENSE_COUNT and len(coils) >= 12:
-            base_s = _lpsb_sense_base_from_selection(idx)
-            base_c = 3 + idx * 3
-            for i in range(3):
-                on = base_c + i < len(coils) and coils[base_c + i]
-                self._lpsb_ssr_state[i] = bool(on)
-                self._lpsb_strips[i].set_state(on)
-                self._lpsb_ssr_btns[i].setChecked(on)
+        base_s = _lpsb_sense_base_from_selection(idx)
+        # _lpsb_ssr_state_all 캐시가 있으면 _last_coils 없이도 즉시 복원 가능
+        ssr_cached = self._lpsb_ssr_state_all[idx] if idx < len(self._lpsb_ssr_state_all) else None
+        if ssr_cached is None:
+            coils = getattr(self, "_last_coils", None)
+        for i in range(3):
+            if ssr_cached is not None:
+                on = bool(ssr_cached[i])
+            else:
+                base_c = 3 + idx * 3
+                coils = getattr(self, "_last_coils", None)
+                on = bool(coils and (base_c + i) < len(coils) and coils[base_c + i])
+            self._lpsb_ssr_state[i] = on
+            self._lpsb_strips[i].set_state(on)
+            self._lpsb_ssr_btns[i].setChecked(on)
+            if sense and len(sense) >= SUB_SENSE_COUNT:
                 self._lpsb_current_labels[i].setText(_format_sense_channel(sense, base_s, i))
+        # 현재 선택 보드의 commanded 상태도 동기화 (모니터링 종료 판정 정확도 향상)
+        if ssr_cached is not None:
+            self._lpsb_ssr_commanded = list(ssr_cached)
         # LPSB 선택에 따라 SSR 버튼 활성/비활성도 갱신
         self._update_lpsb_ssr_button_state()
         self._log_lpsb_selection_state("lpsb_select")
@@ -2363,7 +2451,22 @@ class MainWindow(QMainWindow):
         # comm bad 시 진단(4000..)을 너무 자주 읽지 않도록 레이트리밋
         if not hasattr(self, "_diag_last_ms"):
             self._diag_last_ms = 0
+        # Bootstrap sync 경로 판단 (함수 전체에서 is_bootstrap 참조)
+        is_bootstrap = (self._bootstrap_sync_state == "syncing")
         if not ok:
+            # Bootstrap 재시도: 최대 3회 후 포기하고 main poll 시작
+            if is_bootstrap:
+                self._bootstrap_sync_retry += 1
+                if self._bootstrap_sync_retry < 3:
+                    self._log.log_info(
+                        f"[SYNC] 초기 동기화 읽기 실패 (retry {self._bootstrap_sync_retry}/3): {err or 'sub read fail'}"
+                    )
+                    QTimer.singleShot(500, self._do_bootstrap_sync_read)
+                    return
+                else:
+                    self._log.log_info("[SYNC] 초기 동기화 3회 실패 → 포기하고 polling 시작")
+                    self._finish_bootstrap_sync(success=False)
+                    # 일반 fail 처리도 계속 수행
             if self._pending_hpsb_write is not None:
                 self._log.log_info(f"[MB->HPSB] read-first probe fail -> write skipped ({err or 'sub read fail'})")
                 self._pending_hpsb_write = None
@@ -2629,6 +2732,15 @@ class MainWindow(QMainWindow):
                     self._update_lpsb_ssr_button_state()
         except Exception:
             pass
+        # LPSB 전체 보드 SSR 상태를 항상 캐시 (보드 전환 시 즉시 복원용)
+        try:
+            for _bi in range(3):
+                _bc = 3 + _bi * 3
+                for _si in range(3):
+                    _on = (_bc + _si < len(coils)) and bool(coils[_bc + _si])
+                    self._lpsb_ssr_state_all[_bi][_si] = _on
+        except Exception:
+            pass
         if self._op_state == "OUTPUT_MONITORING":
             self._monitor_retry_count = 0
         if emit_adc_log and self._sub_auto_poll and self._direct_mode == "none":
@@ -2640,6 +2752,10 @@ class MainWindow(QMainWindow):
         if self._op_state == "READ_ONCE":
             self._set_op_state("IDLE")
         self._sync_hpsb_adc_log_timer()
+        # Bootstrap sync 완료 처리: 실제 출력 상태 복원 후 monitoring 판단 + main poll 시작
+        if is_bootstrap:
+            self._apply_bootstrap_state(coils, raw)
+            self._finish_bootstrap_sync(success=True)
         if self._pending_hpsb_write is not None:
             addr, value = self._pending_hpsb_write
             self._pending_hpsb_write = None
