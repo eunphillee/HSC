@@ -645,6 +645,59 @@ class ModbusClient:
                     self._response_logger(False, None)
                 return False, None, format_modbus_error(exc=e)
 
+    def read_full_state(self) -> tuple[bool, dict | None, str | None]:
+        """
+        Mainboard FC04 5-block unified read (single source of truth).
+
+        Returns (ok, state_dict, err) where state_dict has keys:
+          'main':  regs[0..23]  – FC04 addr=0   count=24  (DI/relay/vbits/env)
+          'hpsb':  regs[0..15]  – FC04 addr=100 count=16  (HPSB sense + coil states)
+          'lpsb1': regs[0..13]  – FC04 addr=200 count=14  (LPSB2/slave=2)
+          'lpsb2': regs[0..13]  – FC04 addr=300 count=14  (LPSB4/slave=4)
+          'lpsb3': regs[0..13]  – FC04 addr=400 count=14  (LPSB8/slave=8)
+
+        Replaces read_di_bitmap + read_sub_sense + read_sub_coil_status in one pass.
+        Also updates _last_sub_raw for backward compat.
+        """
+        with self._lock:
+            ok, err = self._ensure_socket_open()
+            if not ok:
+                return False, None, err or "Not connected"
+
+            def _rd(addr: int, count: int) -> list[int]:
+                if self._request_logger:
+                    self._request_logger(self._slave_id, "FC04", addr, count)
+                r = self._client.read_input_registers(
+                    address=addr, count=count, unit=self._slave_id
+                )
+                if self._response_logger:
+                    self._response_logger(not r.isError(), _response_exception_code(r))
+                if r.isError():
+                    raise RuntimeError(format_modbus_error(resp=r))
+                out = list(r.registers) if r.registers else []
+                out = (out + [0] * count)[:count]
+                return [x & 0xFFFF for x in out]
+
+            try:
+                state = {
+                    "main":  _rd(0,   24),
+                    "hpsb":  _rd(100, 16),
+                    "lpsb1": _rd(200, 14),
+                    "lpsb2": _rd(300, 14),
+                    "lpsb3": _rd(400, 14),
+                }
+                self._last_sub_raw = {
+                    "hpsb_100_115":  list(state["hpsb"]),
+                    "lpsb1_200_213": list(state["lpsb1"]),
+                    "lpsb2_300_313": list(state["lpsb2"]),
+                    "lpsb3_400_413": list(state["lpsb3"]),
+                }
+                return True, state, None
+            except Exception as e:
+                if self._response_logger:
+                    self._response_logger(False, None)
+                return False, None, format_modbus_error(exc=e)
+
     def read_sub_alarms(self) -> tuple[bool, list[bool] | None, str | None]:
         """FC02 not allowed per Unified Rule v1.2 (FC04 read only). Always returns error."""
         return False, None, "FC02 not allowed (Unified Rule v1.2: FC04 read only)"

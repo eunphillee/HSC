@@ -4,6 +4,8 @@ Worker thread: runs Mainboard Modbus read/write so UI does not block.
 import time
 from PyQt6.QtCore import QObject, QThread, pyqtSignal, Qt
 
+from .address_map import SUB_SENSE_COUNT
+
 
 class MainboardWorker(QObject):
     """Runs in a separate thread; performs Mainboard Modbus I/O and emits results."""
@@ -132,21 +134,61 @@ class MainboardWorker(QObject):
         self.sniff_result.emit(buf)
 
     def on_request_read_sub(self):
-        """Read HPSB/LPSB: sense(40), coil status(14), error_flags + raw blocks. Emit sub_data_result."""
+        """
+        Unified full state read via Mainboard FC04 (5 blocks in one pass).
+        Emits di_result (DI/relay/vbits) then sub_data_result (HPSB/LPSB sense/coils).
+        Replaces the old read_sub_sense + read_sub_coil_status + read_error_flags pattern.
+        """
         if not self._client.connected:
+            self.di_result.emit(False, None, None, None, "Not connected")
             self.sub_data_result.emit(False, None, None, None, None, "Not connected")
             return
-        ok_s, sense, err_s = self._client.read_sub_sense()
-        raw = self._client.get_last_sub_raw_copy() if ok_s else None
-        ok_c, coils, err_c = self._client.read_sub_coil_status()
-        ok_f, flags, err_f = self._client.read_error_flags()
-        if not ok_s:
-            self.sub_data_result.emit(False, None, None, None, None, err_s or "sense fail")
+
+        ok, state, err = self._client.read_full_state()
+        if not ok:
+            self.di_result.emit(False, None, None, None, err)
+            self.sub_data_result.emit(False, None, None, None, None, err or "read fail")
             return
-        if not ok_c:
-            self.sub_data_result.emit(False, sense, None, (flags if ok_f else None), raw, err_c or "coil fail")
-            return
-        self.sub_data_result.emit(True, sense, coils, (flags if ok_f else 0), raw, None)
+
+        # ---- DI / relay / vbits from main block (addr=0..23) ----
+        main = state["main"]
+        bits = [1 if main[2 + i] else 0 for i in range(8)]
+        relay_states = [1 if main[11 + i] else 0 for i in range(4)]
+        vbits = [1 if main[20 + i] else 0 for i in range(4)]
+        self.di_result.emit(True, bits, relay_states, vbits, None)
+
+        # ---- sense array (SUB_SENSE_COUNT=40) from HPSB/LPSB blocks ----
+        hpsb  = state["hpsb"]
+        lpsb1 = state["lpsb1"]
+        lpsb2 = state["lpsb2"]
+        lpsb3 = state["lpsb3"]
+        sense = [0] * SUB_SENSE_COUNT
+        # HPSB v1.1: AVG(reg6..8), PKPK(reg9..11), CUR(reg12..14)
+        for ch in range(3):
+            sense[0 + ch] = hpsb[6 + ch]
+            sense[3 + ch] = hpsb[9 + ch]
+            sense[6 + ch] = hpsb[12 + ch]
+
+        def _fill_lpsb(base: int, regs: list) -> None:
+            for ch in range(3):
+                sense[base + ch]     = regs[5 + ch]   # AVG
+                sense[base + 3 + ch] = regs[8 + ch]   # PKPK
+                sense[base + 6 + ch] = regs[11 + ch]  # CUR
+
+        _fill_lpsb(9,  lpsb1)
+        _fill_lpsb(18, lpsb2)
+        _fill_lpsb(27, lpsb3)
+
+        # ---- coil status (14 elements) ----
+        coils = [False] * 14
+        coils[0] = bool(hpsb[2]);  coils[1] = bool(hpsb[3]);  coils[2] = bool(hpsb[4])
+        coils[3] = bool(lpsb1[2]); coils[4] = bool(lpsb1[3]); coils[5] = bool(lpsb1[4])
+        coils[6] = bool(lpsb2[2]); coils[7] = bool(lpsb2[3]); coils[8] = bool(lpsb2[4])
+        coils[9] = bool(lpsb3[2]); coils[10] = bool(lpsb3[3]); coils[11] = bool(lpsb3[4])
+
+        flags = main[1] & 0xFFFF
+        raw = self._client.get_last_sub_raw_copy()
+        self.sub_data_result.emit(True, sense, coils, flags, raw, None)
 
     def on_request_read_direct_hpsb_adc(self):
         """HPSB 다이렉트: FC04 slave_id=1, start=0, count=16 (Unified Rule v1.1 HPSB map)."""

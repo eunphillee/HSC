@@ -309,16 +309,18 @@ class MainWindow(QMainWindow):
         self._direct_diag_timer = QTimer(self)
         self._direct_diag_timer.setInterval(3000)  # 3초마다 수신 0이면 안내
         self._direct_diag_timer.timeout.connect(self._on_direct_diag_tick)
-        # Mainboard 상태 자동 polling: 300ms (DI / relay 실제 상태 / virtual bit)
+        # 통합 unified polling: 1000ms (DI+relay+HPSB/LPSB 전체를 FC04 5블록으로 1회 처리)
+        # 기존 300ms DI 폴링 + 2s 서브 폴링을 단일 1s 루프로 통합.
         self._main_poll_timer = QTimer(self)
-        self._main_poll_timer.setInterval(300)
+        self._main_poll_timer.setInterval(1000)
         self._main_poll_timer.timeout.connect(self._on_main_poll_tick)
         self._main_poll_inflight = False
-        # Mainboard FC04(0,24) 실패 연속 시 UI/시리얼 부하 완화를 위한 적응형 백오프
+        self._in_unified_mb_poll: bool = False   # 통합 poll 진행 중 로그 억제 플래그
+        # 실패 연속 시 UI/시리얼 부하 완화를 위한 적응형 백오프
         self._main_poll_fail_streak = 0
-        self._main_poll_default_ms = 300
-        self._main_poll_slow_ms = 600
-        self._main_poll_max_ms = 1000
+        self._main_poll_default_ms = 1000
+        self._main_poll_slow_ms = 2000
+        self._main_poll_max_ms = 3000
         self._last_main_poll_fail_log_ts = 0.0
         # DIAG read 동시 실행 방지 플래그: FC05 연속 write 시 중복 DIAG 시퀀스 차단
         self._diag_read_in_progress: bool = False
@@ -991,6 +993,10 @@ class MainWindow(QMainWindow):
         # OUTPUT_MONITORING 중에는 상세 통신 로그를 모두 억제
         if getattr(self, "_op_state", "IDLE") == "OUTPUT_MONITORING":
             return
+        # 통합 unified poll 진행 중: 5개 FC04 read 요청/응답 로그 모두 억제
+        if getattr(self, "_in_unified_mb_poll", False):
+            self._suppress_main_fc04_rsp_log = True
+            return
         now = time.monotonic()
         is_direct_lpsb_fc04_poll = bool(
             self._direct_mode == "lpsb"
@@ -998,7 +1004,7 @@ class MainWindow(QMainWindow):
             and func == "FC04"
             and self._lpsb_adc_poll_running
         )
-        # Mainboard 300ms 자동 poll (FC04 addr=0 cnt=24): TX/RX 로그 완전 억제
+        # (레거시) Mainboard DI 단독 poll (FC04 addr=0 cnt=24): TX/RX 로그 완전 억제
         is_main_fc04_poll = bool(
             self._direct_mode == "none"
             and func == "FC04"
@@ -1049,9 +1055,12 @@ class MainWindow(QMainWindow):
         if getattr(self, "_op_state", "IDLE") == "OUTPUT_MONITORING":
             return
         now = time.monotonic()
-        # Mainboard 자동 poll 응답 로그 완전 억제
+        # 통합 unified poll 또는 기존 DI 단독 poll 응답 억제
+        # (unified poll은 5개 응답이 오지만 _in_unified_mb_poll=False 시점에 suppression 해제됨)
         if getattr(self, "_suppress_main_fc04_rsp_log", False):
-            self._suppress_main_fc04_rsp_log = False
+            # unified poll 중이면 플래그 유지 (다음 응답도 억제); 아니면 1회 억제 후 해제
+            if not getattr(self, "_in_unified_mb_poll", False):
+                self._suppress_main_fc04_rsp_log = False
             return
         throttle_direct_lpsb_fc04 = bool(
             self._last_req_route == "direct-lpsb" and self._lpsb_adc_poll_running
@@ -1269,12 +1278,13 @@ class MainWindow(QMainWindow):
             self.request_read_sub.emit()
 
     def _on_hpsb_adc_log_tick(self):
-        """2초마다 Auto poll 경로의 sub read를 트리거하고, 응답 시 ADC 2줄 로그를 출력한다."""
+        """2초마다 ADC 로그 플래그를 세트. 통합 1s 폴링이 실제 읽기를 처리하므로 별도 read 요청 없음."""
         if not (self._client.connected and self._sub_auto_poll and self._direct_mode == "none"):
             self._hpsb_adc_log_timer.stop()
             return
+        # 통합 unified poll(1000ms)이 항상 sub read를 수행하므로 여기서는 로그 플래그만 세트.
+        # 다음 unified poll 사이클에서 _auto_poll_adc_log_pending=True를 확인하고 ADC 로그 출력.
         self._auto_poll_adc_log_pending = True
-        self._request_hpsb_adc_refresh_if_needed()
 
     def _allow_log_line(self, line: str) -> bool:
         if "[PC-TOOL]" in line:
@@ -1542,7 +1552,7 @@ class MainWindow(QMainWindow):
         if not self._main_poll_timer.isActive():
             self._main_poll_timer.setInterval(self._main_poll_default_ms)
             self._main_poll_timer.start()
-        self._log.log_info("→ Mainboard 상태 자동 polling 시작 (300ms: DI / Relay 실제 상태 / Virtual Bit)")
+        self._log.log_info("→ 통합 Mainboard polling 시작 (1000ms: DI / Relay / HPSB / LPSB 전체 상태)")
 
     def _refresh_ports(self):
         try:
@@ -1700,15 +1710,18 @@ class MainWindow(QMainWindow):
             self._log.log_info(f"[UI][RELAY_LED] relay_states={list(sig)}")
 
     def _on_main_poll_tick(self):
-        """300ms 자동 polling: Mainboard routing 모드 + 연결 상태일 때만."""
+        """통합 1000ms polling: FC04 5블록(main+HPSB+LPSB1/2/3)을 한 번에 읽어 DI·relay·HPSB·LPSB 전부 갱신."""
         if self._direct_mode != "none":
             return
         if not self._client.connected:
             return
-        if self._main_poll_inflight:
+        # DI inflight 또는 sub read inflight 중이면 스킵 (중복 요청 방지)
+        if self._main_poll_inflight or getattr(self, "_hpsb_probe_inflight", False):
             return
         self._main_poll_inflight = True
-        self.request_read_di.emit()
+        self._hpsb_probe_inflight = True
+        self._in_unified_mb_poll = True   # 요청·응답 로그 억제 시작
+        self.request_read_sub.emit()      # worker: read_full_state → di_result + sub_data_result
 
     # ---- RTC 핸들러 ----
     def _on_read_rtc_btn(self):
@@ -1739,6 +1752,8 @@ class MainWindow(QMainWindow):
 
     def _on_di_result(self, ok: bool, bits: list | None, relay_states: list | None, vbits: list | None, err: str | None):
         self._main_poll_inflight = False
+        self._in_unified_mb_poll = False        # 통합 poll 로그 억제 해제
+        self._suppress_main_fc04_rsp_log = False  # 남은 억제 플래그도 클리어
         if ok and bits is not None:
             # 통신 회복 시 fail streak/백오프를 즉시 원복
             if self._main_poll_fail_streak != 0:
@@ -2345,17 +2360,17 @@ class MainWindow(QMainWindow):
                     self._lpsb_adc_poll_inflight = False
 
     def _on_sub_poll_tick(self):
-        """2초 주기: Direct LPSB면 FC04(ADC) 읽기, 아니면 기존 HPSB/LPSB sub read."""
+        """2초 주기 서브 폴 타이머.
+        - Direct LPSB: FC04(ADC) 직접 읽기 (unified poll 범위 밖)
+        - Mainboard routing: 통합 1s 폴링이 이미 읽기를 담당하므로 ADC 로그 플래그만 세트.
+        """
         if not self._client.connected:
             return
         if self._direct_mode == "lpsb":
             self.request_read_direct_lpsb_adc.emit()
         else:
-            if self._hpsb_probe_inflight:
-                return
+            # MB routing: unified poll(1000ms)이 sub read를 처리 → 여기서는 로그 플래그만
             self._auto_poll_adc_log_pending = True
-            self._hpsb_probe_inflight = True
-            self.request_read_sub.emit()
 
     def _sync_current_log_timer(self):
         """
@@ -2501,9 +2516,9 @@ class MainWindow(QMainWindow):
             if self._op_state == "READ_ONCE":
                 self._set_op_state("IDLE")
             return
-        # 성공 시에도 Auto poll이 "살아있음"을 로그로 확인 가능하게 1줄 남긴다.
-        # (OUTPUT_MONITORING 중에는 이 상세 로그를 억제하고 상태 줄만 출력)
-        if self._op_state != "OUTPUT_MONITORING":
+        # 성공 OK 로그: OUTPUT_MONITORING 중 또는 통합 poll 자동 주기에서는 억제
+        # (ADC 로그는 _auto_poll_adc_log_pending 플래그가 True일 때만 별도 출력됨)
+        if self._op_state not in ("OUTPUT_MONITORING",) and not getattr(self, "_in_unified_mb_poll", False):
             self._log.log_tagged("[HPSB][LPSB2][LPSB4][LPSB8]", "FC04", SUB_SENSE_REG, "sub", "OK")
         sense = sense or [0] * SUB_SENSE_COUNT
         coils = coils or [False] * 14
