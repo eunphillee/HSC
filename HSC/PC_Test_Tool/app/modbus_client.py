@@ -523,17 +523,19 @@ class ModbusClient:
         return self.write_single_coil(6, onoff, unit=None)
 
     def read_sub_sense(self) -> tuple[bool, list[int] | None, str | None]:
-        """Unified Rule: Mainboard routing 상태를 FC04로 읽어서 UI의 sense 레이아웃(길이=SUB_SENSE_COUNT=40)에 맞춰 변환."""
+        """Unified Rule v1.3: FC04 addr=24 count=58 (packed map) → sense array (SUB_SENSE_COUNT=40)."""
         with self._lock:
             ok, err = self._ensure_socket_open()
             if not ok:
                 return False, None, err or "Not connected"
             try:
-                # Mainboard FC04 read blocks:
-                # - HPSB copy: 100..115 (v1.1: 16 regs)
-                # - LPSB1 copy: 200..213
-                # - LPSB2 copy: 300..313
-                # - LPSB3 copy: 400..413
+                # Unified Rule v1.3: FC04 addr=24 count=58
+                # Packed layout:
+                #   24..33 : alive/status  (HPSB=24, LPSB2=28, LPSB4=29, LPSB8=30)
+                #   34..45 : coils         (HPSB r0-2 at 34-36; LPSB2/4/8 s0-2 at 37-45)
+                #   46..57 : AVG           (HPSB a0-2 at 46-48; LPSB2/4/8 at 49-57)
+                #   58..69 : PKPK          (same board/channel order)
+                #   70..81 : CUR           (same board/channel order)
                 def rd(addr: int, count: int) -> list[int]:
                     if self._request_logger:
                         self._request_logger(self._slave_id, "FC04", addr, count)
@@ -546,42 +548,28 @@ class ModbusClient:
                     out = (out + [0] * count)[:count]
                     return [x & 0xFFFF for x in out]
 
-                hpsb_regs = rd(100, 16)
-                lpsb1_regs = rd(200, 14)
-                lpsb2_regs = rd(300, 14)
-                lpsb3_regs = rd(400, 14)
-                # raw dump용: worker/UI에서 그대로 표시할 수 있도록 보관 (lock 내부)
-                self._last_sub_raw = {
-                    "hpsb_100_115": list(hpsb_regs),
-                    "lpsb1_200_213": list(lpsb1_regs),
-                    "lpsb2_300_313": list(lpsb2_regs),
-                    "lpsb3_400_413": list(lpsb3_regs),
-                }
+                packed = rd(24, 58)   # packed[0] = addr 24, packed[57] = addr 81
+                # raw dump 보관 (lock 내부)
+                self._last_sub_raw = {"packed_24_81": list(packed)}
 
                 sense = [0] * SUB_SENSE_COUNT
-
-                # HPSB v1.1: AVG(reg6..8), PKPK(reg9..11), CUR(reg12..14)
-                sense[0] = hpsb_regs[6]
-                sense[1] = hpsb_regs[7]
-                sense[2] = hpsb_regs[8]
-                sense[3] = hpsb_regs[9]
-                sense[4] = hpsb_regs[10]
-                sense[5] = hpsb_regs[11]
-                sense[6] = hpsb_regs[12]
-                sense[7] = hpsb_regs[13]
-                sense[8] = hpsb_regs[14]
-
-                # LPSB blocks: old layout maps cleanly
-                # AVG -> reg5..7, PKPK -> reg8..10, CUR -> reg11..13
-                def fill_lpsb(base: int, regs: list[int]):
-                    for ch in range(3):
-                        sense[base + ch] = regs[5 + ch]
-                        sense[base + 3 + ch] = regs[8 + ch]
-                        sense[base + 6 + ch] = regs[11 + ch]
-
-                fill_lpsb(9, lpsb1_regs)
-                fill_lpsb(18, lpsb2_regs)
-                fill_lpsb(27, lpsb3_regs)
+                # packed offset = abs_addr - 24
+                # AVG 46..57  → packed[22..33]
+                # PKPK 58..69 → packed[34..45]
+                # CUR  70..81 → packed[46..57]
+                for ch in range(3):
+                    sense[0 + ch] = packed[22 + ch]   # HPSB AVG
+                    sense[3 + ch] = packed[34 + ch]   # HPSB PKPK
+                    sense[6 + ch] = packed[46 + ch]   # HPSB CUR
+                    sense[9 + ch]  = packed[25 + ch]  # LPSB2 AVG
+                    sense[12 + ch] = packed[37 + ch]  # LPSB2 PKPK
+                    sense[15 + ch] = packed[49 + ch]  # LPSB2 CUR
+                    sense[18 + ch] = packed[28 + ch]  # LPSB4 AVG
+                    sense[21 + ch] = packed[40 + ch]  # LPSB4 PKPK
+                    sense[24 + ch] = packed[52 + ch]  # LPSB4 CUR
+                    sense[27 + ch] = packed[31 + ch]  # LPSB8 AVG
+                    sense[30 + ch] = packed[43 + ch]  # LPSB8 PKPK
+                    sense[33 + ch] = packed[55 + ch]  # LPSB8 CUR
 
                 return True, sense, None
             except Exception as e:
@@ -600,7 +588,7 @@ class ModbusClient:
                 return None
 
     def read_sub_coil_status(self) -> tuple[bool, list[bool] | None, str | None]:
-        """Unified Rule: Mainboard routing 상태를 FC04에서 읽어 coils 레이아웃(길이 14)에 맞춰 변환."""
+        """Unified Rule v1.3: FC04 addr=34 count=12 → coils layout (len=14, last 2 unused)."""
         with self._lock:
             ok, err = self._ensure_socket_open()
             if not ok:
@@ -618,26 +606,14 @@ class ModbusClient:
                     out = (out + [0] * count)[:count]
                     return [x & 0xFFFF for x in out]
 
-                hpsb_regs = rd(100, 16)
-                lpsb1_regs = rd(200, 14)
-                lpsb2_regs = rd(300, 14)
-                lpsb3_regs = rd(400, 14)
-
+                # Coils 34..45: HPSB r0-2 at [0-2], LPSB2 s0-2 at [3-5],
+                #               LPSB4 s0-2 at [6-8], LPSB8 s0-2 at [9-11]
+                c = rd(34, 12)
                 coils = [False] * 14
-                # HPSB: reg2..4 = relay1..3 (UI는 3채널만 표시)
-                coils[0] = bool(hpsb_regs[2])
-                coils[1] = bool(hpsb_regs[3])
-                coils[2] = bool(hpsb_regs[4])
-                # LPSB1/2/3: reg2..4 = SSR1..3
-                coils[3] = bool(lpsb1_regs[2])
-                coils[4] = bool(lpsb1_regs[3])
-                coils[5] = bool(lpsb1_regs[4])
-                coils[6] = bool(lpsb2_regs[2])
-                coils[7] = bool(lpsb2_regs[3])
-                coils[8] = bool(lpsb2_regs[4])
-                coils[9] = bool(lpsb3_regs[2])
-                coils[10] = bool(lpsb3_regs[3])
-                coils[11] = bool(lpsb3_regs[4])
+                coils[0]  = bool(c[0]);  coils[1]  = bool(c[1]);  coils[2]  = bool(c[2])   # HPSB
+                coils[3]  = bool(c[3]);  coils[4]  = bool(c[4]);  coils[5]  = bool(c[5])   # LPSB2
+                coils[6]  = bool(c[6]);  coils[7]  = bool(c[7]);  coils[8]  = bool(c[8])   # LPSB4
+                coils[9]  = bool(c[9]);  coils[10] = bool(c[10]); coils[11] = bool(c[11])  # LPSB8
 
                 return True, coils, None
             except Exception as e:
@@ -647,17 +623,18 @@ class ModbusClient:
 
     def read_full_state(self) -> tuple[bool, dict | None, str | None]:
         """
-        Mainboard FC04 5-block unified read (single source of truth).
+        Unified Rule v1.3: FC04 2-read pass (single source of truth).
 
         Returns (ok, state_dict, err) where state_dict has keys:
-          'main':  regs[0..23]  – FC04 addr=0   count=24  (DI/relay/vbits/env)
-          'hpsb':  regs[0..15]  – FC04 addr=100 count=16  (HPSB sense + coil states)
-          'lpsb1': regs[0..13]  – FC04 addr=200 count=14  (LPSB2/slave=2)
-          'lpsb2': regs[0..13]  – FC04 addr=300 count=14  (LPSB4/slave=4)
-          'lpsb3': regs[0..13]  – FC04 addr=400 count=14  (LPSB8/slave=8)
+          'main':   regs[0..23]  – FC04 addr=0  count=24  (DI/relay/vbits/env)
+          'packed': regs[0..57]  – FC04 addr=24 count=58  (HPSB+LPSB packed map)
 
-        Replaces read_di_bitmap + read_sub_sense + read_sub_coil_status in one pass.
-        Also updates _last_sub_raw for backward compat.
+        Packed layout (abs_addr → packed index = abs_addr - 24):
+          24=HPSB alive,  25-27=rsvd,  28=LPSB2 alive, 29=LPSB4, 30=LPSB8, 31-33=rsvd
+          34-36=HPSB coil0-2,  37-39=LPSB2 SSR0-2,  40-42=LPSB4 SSR0-2, 43-45=LPSB8 SSR0-2
+          46-48=HPSB AVG0-2,   49-51=LPSB2 AVG,     52-54=LPSB4 AVG,    55-57=LPSB8 AVG
+          58-60=HPSB PKPK0-2,  61-63=LPSB2 PKPK,    64-66=LPSB4 PKPK,   67-69=LPSB8 PKPK
+          70-72=HPSB CUR0-2,   73-75=LPSB2 CUR,     76-78=LPSB4 CUR,    79-81=LPSB8 CUR
         """
         with self._lock:
             ok, err = self._ensure_socket_open()
@@ -680,18 +657,10 @@ class ModbusClient:
 
             try:
                 state = {
-                    "main":  _rd(0,   24),
-                    "hpsb":  _rd(100, 16),
-                    "lpsb1": _rd(200, 14),
-                    "lpsb2": _rd(300, 14),
-                    "lpsb3": _rd(400, 14),
+                    "main":   _rd(0,  24),
+                    "packed": _rd(24, 58),
                 }
-                self._last_sub_raw = {
-                    "hpsb_100_115":  list(state["hpsb"]),
-                    "lpsb1_200_213": list(state["lpsb1"]),
-                    "lpsb2_300_313": list(state["lpsb2"]),
-                    "lpsb3_400_413": list(state["lpsb3"]),
-                }
+                self._last_sub_raw = {"packed_24_81": list(state["packed"])}
                 return True, state, None
             except Exception as e:
                 if self._response_logger:

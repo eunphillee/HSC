@@ -135,9 +135,19 @@ class MainboardWorker(QObject):
 
     def on_request_read_sub(self):
         """
-        Unified full state read via Mainboard FC04 (5 blocks in one pass).
+        Unified Rule v1.3: FC04 2-read pass (main 0/24 + packed 24/58).
         Emits di_result (DI/relay/vbits) then sub_data_result (HPSB/LPSB sense/coils).
-        Replaces the old read_sub_sense + read_sub_coil_status + read_error_flags pattern.
+
+        Packed map (packed[i] = addr (24+i)):
+          [0]  =addr24: HPSB alive    [4] =addr28: LPSB2 alive
+          [5]  =addr29: LPSB4 alive   [6] =addr30: LPSB8 alive
+          [10] =addr34: HPSB coil0    [11]=addr35: coil1   [12]=addr36: coil2
+          [13] =addr37: LPSB2 SSR0    [14]=addr38: SSR1    [15]=addr39: SSR2
+          [16] =addr40: LPSB4 SSR0    [17]=addr41: SSR1    [18]=addr42: SSR2
+          [19] =addr43: LPSB8 SSR0    [20]=addr44: SSR1    [21]=addr45: SSR2
+          [22] =addr46: HPSB AVG0     ...  [33]=addr57: LPSB8 AVG2
+          [34] =addr58: HPSB PKPK0    ...  [45]=addr69: LPSB8 PKPK2
+          [46] =addr70: HPSB CUR0     ...  [57]=addr81: LPSB8 CUR2
         """
         if not self._client.connected:
             self.di_result.emit(False, None, None, None, "Not connected")
@@ -157,34 +167,30 @@ class MainboardWorker(QObject):
         vbits = [1 if main[20 + i] else 0 for i in range(4)]
         self.di_result.emit(True, bits, relay_states, vbits, None)
 
-        # ---- sense array (SUB_SENSE_COUNT=40) from HPSB/LPSB blocks ----
-        hpsb  = state["hpsb"]
-        lpsb1 = state["lpsb1"]
-        lpsb2 = state["lpsb2"]
-        lpsb3 = state["lpsb3"]
+        # ---- sense array (SUB_SENSE_COUNT=40) from packed block (addr=24..81) ----
+        p = state["packed"]   # p[i] = abs_addr (24+i)
         sense = [0] * SUB_SENSE_COUNT
-        # HPSB v1.1: AVG(reg6..8), PKPK(reg9..11), CUR(reg12..14)
         for ch in range(3):
-            sense[0 + ch] = hpsb[6 + ch]
-            sense[3 + ch] = hpsb[9 + ch]
-            sense[6 + ch] = hpsb[12 + ch]
+            # AVG 46..57  → p[22..33]
+            sense[0 + ch]  = p[22 + ch]           # HPSB AVG
+            sense[9 + ch]  = p[22 + 3 + ch]       # LPSB2 AVG  (p[25..27])
+            sense[18 + ch] = p[22 + 6 + ch]       # LPSB4 AVG  (p[28..30])
+            sense[27 + ch] = p[22 + 9 + ch]       # LPSB8 AVG  (p[31..33])
+            # PKPK 58..69 → p[34..45]
+            sense[3 + ch]  = p[34 + ch]           # HPSB PKPK
+            sense[12 + ch] = p[34 + 3 + ch]       # LPSB2 PKPK (p[37..39])
+            sense[21 + ch] = p[34 + 6 + ch]       # LPSB4 PKPK (p[40..42])
+            sense[30 + ch] = p[34 + 9 + ch]       # LPSB8 PKPK (p[43..45])
+            # CUR  70..81 → p[46..57]
+            sense[6 + ch]  = p[46 + ch]           # HPSB CUR
+            sense[15 + ch] = p[46 + 3 + ch]       # LPSB2 CUR  (p[49..51])
+            sense[24 + ch] = p[46 + 6 + ch]       # LPSB4 CUR  (p[52..54])
+            sense[33 + ch] = p[46 + 9 + ch]       # LPSB8 CUR  (p[55..57])
 
-        def _fill_lpsb(base: int, regs: list) -> None:
-            for ch in range(3):
-                sense[base + ch]     = regs[5 + ch]   # AVG
-                sense[base + 3 + ch] = regs[8 + ch]   # PKPK
-                sense[base + 6 + ch] = regs[11 + ch]  # CUR
-
-        _fill_lpsb(9,  lpsb1)
-        _fill_lpsb(18, lpsb2)
-        _fill_lpsb(27, lpsb3)
-
-        # ---- coil status (14 elements) ----
+        # ---- coil status (14 elements): coils 34..45 → p[10..21] ----
         coils = [False] * 14
-        coils[0] = bool(hpsb[2]);  coils[1] = bool(hpsb[3]);  coils[2] = bool(hpsb[4])
-        coils[3] = bool(lpsb1[2]); coils[4] = bool(lpsb1[3]); coils[5] = bool(lpsb1[4])
-        coils[6] = bool(lpsb2[2]); coils[7] = bool(lpsb2[3]); coils[8] = bool(lpsb2[4])
-        coils[9] = bool(lpsb3[2]); coils[10] = bool(lpsb3[3]); coils[11] = bool(lpsb3[4])
+        for i in range(12):
+            coils[i] = bool(p[10 + i])
 
         flags = main[1] & 0xFFFF
         raw = self._client.get_last_sub_raw_copy()

@@ -63,6 +63,34 @@
 #define UPSTREAM_RTC_REG_START      890u
 #define UPSTREAM_RTC_REG_COUNT      7u
 
+/* Unified Rule v1.3 FC04 address zones:
+ *   0..81   : MAIN (0..23) + PACKED subboard (24..81)
+ *   890..896: RTC
+ *   2100..2114: ENV/IO/reset-CSR (FC03 blocked, exposed here)
+ *   4000..4039: DIAG
+ *
+ * PACKED 24..81 layout (58 regs):
+ *   Alive/status 24..33:
+ *     24=HPSB alive, 25-27=rsvd,
+ *     28=LPSB2 alive, 29=LPSB4 alive, 30=LPSB8 alive, 31-33=rsvd
+ *   Coils 34..45:
+ *     34=HPSB_R1, 35=HPSB_R2, 36=HPSB_R3,
+ *     37=LPSB2_S1, 38=LPSB2_S2, 39=LPSB2_S3,
+ *     40=LPSB4_S1, 41=LPSB4_S2, 42=LPSB4_S3,
+ *     43=LPSB8_S1, 44=LPSB8_S2, 45=LPSB8_S3
+ *   AVG 46..57:
+ *     46=HPSB_A1,  47=HPSB_A2,  48=HPSB_A3,
+ *     49=LPSB2_A1, 50=LPSB2_A2, 51=LPSB2_A3,
+ *     52=LPSB4_A1, 53=LPSB4_A2, 54=LPSB4_A3,
+ *     55=LPSB8_A1, 56=LPSB8_A2, 57=LPSB8_A3
+ *   PKPK 58..69: same board/channel order
+ *   CUR  70..81: same board/channel order
+ */
+#define FC04_MAIN_PACKED_END   81u    /* 0..81 = 82 regs total */
+#define FC04_ENV_IO_START      2100u
+#define FC04_ENV_IO_END        2114u  /* 2100..2114 = 15 regs */
+#define FC04_ENV_IO_COUNT      15u
+
 #if ENABLE_MB_FC04_MAIN_DEBUG
 static void log_fc04_main_snapshot(uint16_t di_now, uint16_t do_now, const uint16_t *regs)
 {
@@ -401,72 +429,68 @@ __attribute__((unused)) static int handle_fc03(uint16_t start_addr, uint16_t cou
     return (int)(2 + byte_count);
 }
 
-/* FC04 Read Input Registers: 진단/상태 snapshot 제공 (service extension) */
+/* FC04 Read Input Registers — Unified Rule v1.3
+ *
+ * Allowed zones:
+ *   0..81     MAIN (0..23) + PACKED subboard (24..81)
+ *   890..896  RTC
+ *   2100..2114  ENV / IO / reset-CSR  (FC03 is blocked; exposed here)
+ *   4000..4039  DIAG
+ *
+ * Any other address → EX_ILLEGAL_DATA_ADDR.
+ * Partial reads within a zone are permitted: start >= zone_lo && start+count-1 <= zone_hi.
+ */
 static int handle_fc04(uint16_t start_addr, uint16_t count, const void *p_agg,
                        uint8_t *response, uint16_t resp_max)
 {
     const aggregated_status_t *agg = (const aggregated_status_t *)p_agg;
 
+    if (count == 0u) {
+        response[0] = 0x84;
+        response[1] = EX_ILLEGAL_DATA_VAL;
+        return 2;
+    }
+
+    const uint32_t end = (uint32_t)start_addr + (uint32_t)count - 1u;
+
+    /* ------------------------------------------------------------------ */
+    /* Zone: RTC  890..896                                                  */
+    /* ------------------------------------------------------------------ */
     if (start_addr >= UPSTREAM_RTC_REG_START
-        && start_addr < (uint16_t)(UPSTREAM_RTC_REG_START + UPSTREAM_RTC_REG_COUNT)) {
-        if (count == 0u
-            || (uint32_t)start_addr + (uint32_t)count
-                > (uint32_t)UPSTREAM_RTC_REG_START + (uint32_t)UPSTREAM_RTC_REG_COUNT) {
-            response[0] = 0x84;
-            response[1] = EX_ILLEGAL_DATA_ADDR;
-            return 2;
-        }
+        && end <= (uint32_t)(UPSTREAM_RTC_REG_START + UPSTREAM_RTC_REG_COUNT - 1u)) {
         if (resp_max < (uint16_t)(2u + count * 2u)) return -1;
         uint16_t rtc_regs[UPSTREAM_RTC_REG_COUNT] = {0};
         (void)BoardRtc_ReadWordRegs(rtc_regs);
         response[0] = 0x04;
         response[1] = (uint8_t)(count * 2u);
-        {
-            uint16_t off = (uint16_t)(start_addr - UPSTREAM_RTC_REG_START);
-            for (uint16_t i = 0; i < count; i++) {
-                uint16_t v = rtc_regs[off + i];
-                response[2u + i * 2u] = (uint8_t)(v >> 8);
-                response[2u + i * 2u + 1u] = (uint8_t)(v & 0xFFu);
-            }
+        uint16_t off = (uint16_t)(start_addr - UPSTREAM_RTC_REG_START);
+        for (uint16_t i = 0u; i < count; i++) {
+            uint16_t v = rtc_regs[off + i];
+            response[2u + i * 2u]     = (uint8_t)(v >> 8);
+            response[2u + i * 2u + 1u] = (uint8_t)(v & 0xFFu);
         }
         return (int)(2u + count * 2u);
     }
 
-    /* Unified Rule v1.1 FC04 map (0-based)
-     * - Mainboard: 0..23 (14 regs + reserve + virtual bits)
-     * - HPSB copy: 100..115 (16 regs: 0..15)
-     * - LPSB(2) copy: 200..213 (14 regs: 0..13)
-     * - LPSB(4) copy: 300..313 (14 regs: 0..13)
-     * - LPSB(8) copy: 400..413 (14 regs: 0..13)
-     */
-    enum { MAP_MAIN_SIZE = 24u, MAP_HPSB_SIZE = 16u, MAP_LPSB_SIZE = 14u, MAP_MAX_SIZE = 24u };
-    uint16_t base = 0xFFFFu;
-    enum { MAP_MAIN, MAP_HPSB, MAP_LPSB2, MAP_LPSB4, MAP_LPSB8 } which = MAP_MAIN;
-
-    if (start_addr == UPSTREAM_DIAG_IR_START) {
-        /* Legacy diagnostic extension remains supported at 4000.. */
-        if (count == 0u || count > UPSTREAM_DIAG_IR_COUNT) {
-            response[0] = 0x84;
-            response[1] = EX_ILLEGAL_DATA_VAL;
-            return 2;
-        }
+    /* ------------------------------------------------------------------ */
+    /* Zone: DIAG  4000..4039                                               */
+    /* ------------------------------------------------------------------ */
+    if (start_addr >= UPSTREAM_DIAG_IR_START
+        && end <= (uint32_t)(UPSTREAM_DIAG_IR_START + UPSTREAM_DIAG_IR_COUNT - 1u)) {
         if (resp_max < (uint16_t)(2u + count * 2u)) return -1;
-
         uint16_t regs[UPSTREAM_DIAG_IR_COUNT] = {0};
-        regs[0] = (agg && agg->error_flags == 0u) ? 0u : 1u; /* main status code */
-        regs[1] = (agg && !(agg->error_flags & AGG_ERR_COMM_HPSB)) ? 1u : 0u; /* hpsb online */
-        regs[2] = (agg && !(agg->error_flags & AGG_ERR_COMM_LPSB)) ? 1u : 0u; /* lpsb online(any) */
-        regs[3] = agg ? agg->hpsb_status_reg : 0u;
-        regs[4] = agg ? agg->lpsb1_alarm_reg : 0u;
-        regs[5] = agg ? agg->lpsb1_sense_raw[0] : 0u;
-        regs[6] = agg ? agg->lpsb1_sense_raw[1] : 0u;
-        regs[7] = agg ? agg->lpsb1_sense_raw[2] : 0u;
-        regs[8] = agg ? agg->error_flags : 0u;
-        /* UART2 ORE(overrun) counter: non-zero이면 하위 응답 바이트를 놓치고 있을 가능성이 큼 */
-        regs[9] = (uint16_t)(ModbusMaster_GetUart2OreCount() & 0xFFFFu);
+        regs[0]  = (agg && agg->error_flags == 0u) ? 0u : 1u;
+        regs[1]  = (agg && !(agg->error_flags & AGG_ERR_COMM_HPSB)) ? 1u : 0u;
+        regs[2]  = (agg && !(agg->error_flags & AGG_ERR_COMM_LPSB)) ? 1u : 0u;
+        regs[3]  = agg ? agg->hpsb_status_reg : 0u;
+        regs[4]  = agg ? agg->lpsb1_alarm_reg : 0u;
+        regs[5]  = agg ? agg->lpsb1_sense_raw[0] : 0u;
+        regs[6]  = agg ? agg->lpsb1_sense_raw[1] : 0u;
+        regs[7]  = agg ? agg->lpsb1_sense_raw[2] : 0u;
+        regs[8]  = agg ? agg->error_flags : 0u;
+        regs[9]  = (uint16_t)(ModbusMaster_GetUart2OreCount() & 0xFFFFu);
         regs[10] = IO_Main_ReadDI_Bitmap();
         regs[11] = IO_Main_ReadDO_Bitmap();
-        /* Last sub-bus failure reason (ModbusMaster) */
         {
             uint8_t sid = 0u, fc = 0u;
             ModbusSubFailReason_t r = MODBUS_SUB_FAIL_NONE;
@@ -477,8 +501,6 @@ static int handle_fc04(uint16_t start_addr, uint16_t count, const void *p_agg,
             regs[14] = (uint16_t)r;
             regs[15] = (uint16_t)len;
         }
-
-        /* Per-slave sub-bus failure table (HPSB=1, LPSB=2/4/8) */
         {
             const SlaveId_t sids[4] = { SLAVE_ID_HPSB, SLAVE_ID_LPSB1, SLAVE_ID_LPSB2, SLAVE_ID_LPSB3 };
             uint16_t w = 16u;
@@ -487,194 +509,165 @@ static int handle_fc04(uint16_t start_addr, uint16_t count, const void *p_agg,
                 ModbusSubFailReason_t r = MODBUS_SUB_FAIL_NONE;
                 uint16_t len = 0u;
                 ModbusMaster_GetSubFailForSlave(sids[i], &fc, &r, &len);
-                regs[w++] = (uint16_t)((uint8_t)sids[i]); /* slave id */
-                regs[w++] = (uint16_t)fc;                /* fc */
-                regs[w++] = (uint16_t)r;                 /* reason */
-                regs[w++] = (uint16_t)len;               /* rx_len */
+                regs[w++] = (uint16_t)((uint8_t)sids[i]);
+                regs[w++] = (uint16_t)fc;
+                regs[w++] = (uint16_t)r;
+                regs[w++] = (uint16_t)len;
             }
         }
-        /* 4032~4038: NVM diagnostics */
-        regs[32] = OutputStateNvm_Get() ? 1u : 0u;            /* NVM_LOADED */
-        regs[33] = (uint16_t)OutputStateNvm_IsEepromDirty();  /* NVM_DIRTY */
-        regs[34] = OutputStateNvm_GetSequence();              /* NVM_SEQ */
-        regs[35] = OutputStateNvm_GetLastSaveResult();        /* LAST_SAVE_RESULT */
-        regs[36] = OutputStateNvm_GetLastLoadResult();        /* LAST_LOAD_RESULT */
-        regs[37] = OutputStateNvm_GetRestoreDoneMask();       /* RESTORE_TRY_MASK */
-        regs[38] = OutputStateNvm_GetRestoreOkMask();         /* RESTORE_OK_MASK */
+        regs[32] = OutputStateNvm_Get() ? 1u : 0u;
+        regs[33] = (uint16_t)OutputStateNvm_IsEepromDirty();
+        regs[34] = OutputStateNvm_GetSequence();
+        regs[35] = OutputStateNvm_GetLastSaveResult();
+        regs[36] = OutputStateNvm_GetLastLoadResult();
+        regs[37] = OutputStateNvm_GetRestoreDoneMask();
+        regs[38] = OutputStateNvm_GetRestoreOkMask();
 
         response[0] = 0x04;
         response[1] = (uint8_t)(count * 2u);
-        for (uint16_t i = 0; i < count; i++) {
-            response[2u + i * 2u] = (uint8_t)(regs[i] >> 8);
-            response[2u + i * 2u + 1u] = (uint8_t)(regs[i] & 0xFFu);
+        uint16_t off = (uint16_t)(start_addr - UPSTREAM_DIAG_IR_START);
+        for (uint16_t i = 0u; i < count; i++) {
+            response[2u + i * 2u]     = (uint8_t)(regs[off + i] >> 8);
+            response[2u + i * 2u + 1u] = (uint8_t)(regs[off + i] & 0xFFu);
         }
         return (int)(2u + count * 2u);
     }
 
-    if (start_addr < MAP_MAIN_SIZE) {
-        base = 0u;
-        which = MAP_MAIN;
-        /* Mainboard 자체 데이터: downstream poll 불필요 */
-    } else if (start_addr >= 100u && start_addr < 116u) {
-        base = 100u;
-        which = MAP_HPSB;
-        /* PC가 HPSB 데이터를 요청 → 다음 poll 주기에 HPSB를 1회 읽도록 요청 */
-        ModbusMaster_RequestOnDemandPoll((uint16_t)SLAVE_ID_HPSB);
-    } else if (start_addr >= 200u && start_addr < 214u) {
-        base = 200u;
-        which = MAP_LPSB2;
-        ModbusMaster_RequestOnDemandPoll((uint16_t)SLAVE_ID_LPSB1);
-    } else if (start_addr >= 300u && start_addr < 314u) {
-        base = 300u;
-        which = MAP_LPSB4;
-        ModbusMaster_RequestOnDemandPoll((uint16_t)SLAVE_ID_LPSB2);
-    } else if (start_addr >= 400u && start_addr < 414u) {
-        base = 400u;
-        which = MAP_LPSB8;
-        ModbusMaster_RequestOnDemandPoll((uint16_t)SLAVE_ID_LPSB3);
-    } else {
-        response[0] = 0x84;
-        response[1] = EX_ILLEGAL_DATA_ADDR;
-        return 2;
-    }
-
-    uint16_t map_size = MAP_MAIN_SIZE;
-    if (which == MAP_HPSB) map_size = MAP_HPSB_SIZE;
-    else if (which == MAP_LPSB2 || which == MAP_LPSB4 || which == MAP_LPSB8) map_size = MAP_LPSB_SIZE;
-
-    if (count == 0u || count > map_size) {
-        response[0] = 0x84;
-        response[1] = EX_ILLEGAL_DATA_VAL;
-        return 2;
-    }
-
-    uint16_t offset = (uint16_t)(start_addr - base);
-    if ((uint16_t)(offset + count) > map_size) {
-        response[0] = 0x84;
-        response[1] = EX_ILLEGAL_DATA_ADDR;
-        return 2;
-    }
-
-    if (resp_max < (uint16_t)(2u + count * 2u)) return -1;
-
-    uint16_t regs[MAP_MAX_SIZE] = {0};
-    uint16_t di_now = 0u;
-    uint16_t do_now = 0u;
-
-    switch (which) {
-    case MAP_MAIN:
-        regs[0] = (agg && agg->error_flags == 0u) ? 1u : 0u;
-        regs[1] = agg ? agg->error_flags : 0u;
-        /* DI/DO는 집계 스냅샷 대신 실시간 GPIO bitmap을 사용해 UI 표시 지연/불일치 방지 */
-        /* IO_Main_ReadDI가 active-low 보정을 적용하므로 (입력 있음=1, 없음=0)
-         * 여기서는 추가 반전 없이 그대로 전송. */
+    /* ------------------------------------------------------------------ */
+    /* Zone: ENV/IO  2100..2114  (FC03 is blocked; legacy compat)           */
+    /* ------------------------------------------------------------------ */
+    if (start_addr >= FC04_ENV_IO_START && end <= (uint32_t)FC04_ENV_IO_END) {
+        if (resp_max < (uint16_t)(2u + count * 2u)) return -1;
+        uint16_t regs[FC04_ENV_IO_COUNT] = {0};
+        regs[0]  = IO_Main_ReadDI_Bitmap();                              /* 2100: DI bitmap */
+        regs[1]  = IO_Main_ReadDO_Bitmap();                              /* 2101: DO bitmap */
+        /* 2102..2109: reserved (0) */
+        regs[10] = agg ? (uint16_t)agg->env_temp_cx10 : (uint16_t)0x8000u; /* 2110: temp_c_x10 */
+        regs[11] = agg ? agg->env_rh_x10 : 0xFFFFu;                    /* 2111: rh_x10 */
+        regs[12] = agg ? agg->error_flags : 0xFFFFu;                    /* 2112: error_flags */
         {
-            di_now = IO_Main_ReadDI_Bitmap();
-            for (uint16_t i = 0; i < 8u; i++) {
-                regs[2u + i] = (di_now & (1u << i)) ? 1u : 0u;
-            }
+            uint32_t csr = ResetReason_GetRccCsr();
+            regs[13] = (uint16_t)(csr & 0xFFFFu);                       /* 2113: CSR low16 */
+            regs[14] = (uint16_t)(csr >> 16);                           /* 2114: CSR high16 */
         }
-        regs[10] = (uint16_t)BSP_ReadPC_LED_IN();
-        /* Mainboard local relay states (source of truth = 실시간 DO read) */
-        do_now = IO_Main_ReadDO_Bitmap();
-        regs[11] = (do_now & (1u << 0)) ? 1u : 0u; /* MAIN_RELAY_01 */
-        regs[12] = (do_now & (1u << 1)) ? 1u : 0u; /* MAIN_RELAY_02 */
-        regs[13] = (do_now & (1u << 2)) ? 1u : 0u; /* MAIN_RELAY_03 */
-        regs[14] = (do_now & (1u << 3)) ? 1u : 0u; /* MAIN_RELAY_04 */
-        /* Env (SHTC3): moved to reg15/16. temp_c_x10 signed, rh_x10 unsigned. */
-        regs[15] = agg ? (uint16_t)agg->env_temp_cx10 : (uint16_t)0x8000u;
-        regs[16] = agg ? agg->env_rh_x10 : 0xFFFFu;
-        for (uint16_t r = 17u; r < 20u; r++) regs[r] = 0u;
-        regs[20] = MainAutoLink_GetVirtEnableWord(0u);
-        regs[21] = MainAutoLink_GetVirtEnableWord(1u);
-        regs[22] = MainAutoLink_GetVirtEnableWord(2u);
-        regs[23] = MainAutoLink_GetVirtEnableWord(3u);
-        break;
-    case MAP_HPSB:
-        regs[0] = agg ? (agg->hpsb_status_reg ? 1u : 0u) : 0u;
-        regs[1] = 0u;
-        regs[2] = agg ? ((agg->hpsb_coils & (1u << 0)) ? 1u : 0u) : 0u;
-        regs[3] = agg ? ((agg->hpsb_coils & (1u << 1)) ? 1u : 0u) : 0u;
-        regs[4] = agg ? ((agg->hpsb_coils & (1u << 2)) ? 1u : 0u) : 0u;
-        regs[5] = agg ? ((agg->hpsb_coils & (1u << 3)) ? 1u : 0u) : 0u;
-        regs[6]  = agg ? agg->hpsb_sense_raw[0] : 0u; /* ADC1 AVG */
-        regs[7]  = agg ? agg->hpsb_sense_raw[1] : 0u; /* ADC2 AVG */
-        regs[8]  = agg ? agg->hpsb_sense_raw[2] : 0u; /* ADC3 AVG */
-        regs[9]  = agg ? agg->hpsb_pkpk[0] : 0u;      /* ADC1 PKPK */
-        regs[10] = agg ? agg->hpsb_pkpk[1] : 0u;      /* ADC2 PKPK */
-        regs[11] = agg ? agg->hpsb_pkpk[2] : 0u;      /* ADC3 PKPK (may be 0 if not provided) */
-        regs[12] = agg ? agg->hpsb_current_st[0] : 0u;
-        regs[13] = agg ? agg->hpsb_current_st[1] : 0u;
-        regs[14] = agg ? agg->hpsb_current_st[2] : 0u;
-        regs[15] = 0u; /* reserve */
-        break;
-    case MAP_LPSB2:
-        /* LPSB slave2 (modbus id=2) = aggregated_status.lpsb1_* */
-        regs[0] = agg ? (agg->lpsb1_alarm_reg ? 1u : 0u) : 0u;
-        regs[1] = 0u;
-        regs[2] = agg ? (agg->lpsb1_coils[0] ? 1u : 0u) : 0u;
-        regs[3] = agg ? (agg->lpsb1_coils[1] ? 1u : 0u) : 0u;
-        regs[4] = agg ? (agg->lpsb1_coils[2] ? 1u : 0u) : 0u;
-        regs[5] = agg ? agg->lpsb1_sense_raw[0] : 0u;
-        regs[6] = agg ? agg->lpsb1_sense_raw[1] : 0u;
-        regs[7] = agg ? agg->lpsb1_sense_raw[2] : 0u;
-        regs[8] = agg ? agg->lpsb1_pkpk[0] : 0u;
-        regs[9] = agg ? agg->lpsb1_pkpk[1] : 0u;
-        regs[10] = agg ? agg->lpsb1_pkpk[2] : 0u;
-        regs[11] = agg ? agg->lpsb1_current_st[0] : 0u;
-        regs[12] = agg ? agg->lpsb1_current_st[1] : 0u;
-        regs[13] = agg ? agg->lpsb1_current_st[2] : 0u;
-        break;
-    case MAP_LPSB4:
-        /* LPSB slave4 (modbus id=4) = aggregated_status.lpsb2_* */
-        regs[0] = agg ? (agg->lpsb2_alarm_reg ? 1u : 0u) : 0u;
-        regs[1] = 0u;
-        regs[2] = agg ? (agg->lpsb2_coils[0] ? 1u : 0u) : 0u;
-        regs[3] = agg ? (agg->lpsb2_coils[1] ? 1u : 0u) : 0u;
-        regs[4] = agg ? (agg->lpsb2_coils[2] ? 1u : 0u) : 0u;
-        regs[5] = agg ? agg->lpsb2_sense_raw[0] : 0u;
-        regs[6] = agg ? agg->lpsb2_sense_raw[1] : 0u;
-        regs[7] = agg ? agg->lpsb2_sense_raw[2] : 0u;
-        regs[8] = agg ? agg->lpsb2_pkpk[0] : 0u;
-        regs[9] = agg ? agg->lpsb2_pkpk[1] : 0u;
-        regs[10] = agg ? agg->lpsb2_pkpk[2] : 0u;
-        regs[11] = agg ? agg->lpsb2_current_st[0] : 0u;
-        regs[12] = agg ? agg->lpsb2_current_st[1] : 0u;
-        regs[13] = agg ? agg->lpsb2_current_st[2] : 0u;
-        break;
-    case MAP_LPSB8:
-        /* LPSB slave8 (modbus id=8) = aggregated_status.lpsb3_* */
-        regs[0] = agg ? (agg->lpsb3_alarm_reg ? 1u : 0u) : 0u;
-        regs[1] = 0u;
-        regs[2] = agg ? (agg->lpsb3_coils[0] ? 1u : 0u) : 0u;
-        regs[3] = agg ? (agg->lpsb3_coils[1] ? 1u : 0u) : 0u;
-        regs[4] = agg ? (agg->lpsb3_coils[2] ? 1u : 0u) : 0u;
-        regs[5] = agg ? agg->lpsb3_sense_raw[0] : 0u;
-        regs[6] = agg ? agg->lpsb3_sense_raw[1] : 0u;
-        regs[7] = agg ? agg->lpsb3_sense_raw[2] : 0u;
-        regs[8] = agg ? agg->lpsb3_pkpk[0] : 0u;
-        regs[9] = agg ? agg->lpsb3_pkpk[1] : 0u;
-        regs[10] = agg ? agg->lpsb3_pkpk[2] : 0u;
-        regs[11] = agg ? agg->lpsb3_current_st[0] : 0u;
-        regs[12] = agg ? agg->lpsb3_current_st[1] : 0u;
-        regs[13] = agg ? agg->lpsb3_current_st[2] : 0u;
-        break;
+        response[0] = 0x04;
+        response[1] = (uint8_t)(count * 2u);
+        uint16_t off = (uint16_t)(start_addr - FC04_ENV_IO_START);
+        for (uint16_t i = 0u; i < count; i++) {
+            response[2u + i * 2u]     = (uint8_t)(regs[off + i] >> 8);
+            response[2u + i * 2u + 1u] = (uint8_t)(regs[off + i] & 0xFFu);
+        }
+        return (int)(2u + count * 2u);
     }
+
+    /* ------------------------------------------------------------------ */
+    /* Zone: MAIN + PACKED  0..81                                           */
+    /* ------------------------------------------------------------------ */
+    if (start_addr <= FC04_MAIN_PACKED_END && end <= (uint32_t)FC04_MAIN_PACKED_END) {
+        if (resp_max < (uint16_t)(2u + count * 2u)) return -1;
+
+        /* Trigger on-demand sub-board poll when PACKED range (24..81) is touched */
+        if (end >= 24u) {
+            ModbusMaster_RequestOnDemandPoll((uint16_t)SLAVE_ID_HPSB);
+            ModbusMaster_RequestOnDemandPoll((uint16_t)SLAVE_ID_LPSB1);
+            ModbusMaster_RequestOnDemandPoll((uint16_t)SLAVE_ID_LPSB2);
+            ModbusMaster_RequestOnDemandPoll((uint16_t)SLAVE_ID_LPSB3);
+        }
+
+        /* Build unified 0..81 buffer (stack: 82 × 2 = 164 bytes) */
+        uint16_t unified[82u] = {0};
+        uint16_t di_now = IO_Main_ReadDI_Bitmap();
+        uint16_t do_now = IO_Main_ReadDO_Bitmap();
+
+        /* ---- MAIN 0..23 ---- */
+        unified[0]  = (agg && agg->error_flags == 0u) ? 1u : 0u;
+        unified[1]  = agg ? agg->error_flags : 0u;
+        for (uint16_t i = 0u; i < 8u; i++) {
+            unified[2u + i] = (di_now & (1u << i)) ? 1u : 0u;
+        }
+        unified[10] = (uint16_t)BSP_ReadPC_LED_IN();
+        unified[11] = (do_now & (1u << 0)) ? 1u : 0u; /* MAIN_RELAY_01 */
+        unified[12] = (do_now & (1u << 1)) ? 1u : 0u; /* MAIN_RELAY_02 */
+        unified[13] = (do_now & (1u << 2)) ? 1u : 0u; /* MAIN_RELAY_03 */
+        unified[14] = (do_now & (1u << 3)) ? 1u : 0u; /* MAIN_RELAY_04 */
+        unified[15] = agg ? (uint16_t)agg->env_temp_cx10 : (uint16_t)0x8000u;
+        unified[16] = agg ? agg->env_rh_x10 : 0xFFFFu;
+        /* 17..19: reserved (0) */
+        unified[20] = MainAutoLink_GetVirtEnableWord(0u);
+        unified[21] = MainAutoLink_GetVirtEnableWord(1u);
+        unified[22] = MainAutoLink_GetVirtEnableWord(2u);
+        unified[23] = MainAutoLink_GetVirtEnableWord(3u);
+
+        /* ---- PACKED 24..81 ---- */
+
+        /* Alive/status 24..33 */
+        unified[24] = agg ? (agg->hpsb_status_reg  ? 1u : 0u) : 0u; /* HPSB alive  */
+        /* 25..27: reserved */
+        unified[28] = agg ? (agg->lpsb1_alarm_reg  ? 1u : 0u) : 0u; /* LPSB2 alive */
+        unified[29] = agg ? (agg->lpsb2_alarm_reg  ? 1u : 0u) : 0u; /* LPSB4 alive */
+        unified[30] = agg ? (agg->lpsb3_alarm_reg  ? 1u : 0u) : 0u; /* LPSB8 alive */
+        /* 31..33: reserved */
+
+        /* Coils 34..45 */
+        if (agg) {
+            unified[34] = (agg->hpsb_coils & (1u << 0)) ? 1u : 0u; /* HPSB relay1 */
+            unified[35] = (agg->hpsb_coils & (1u << 1)) ? 1u : 0u; /* HPSB relay2 */
+            unified[36] = (agg->hpsb_coils & (1u << 2)) ? 1u : 0u; /* HPSB relay3 */
+            unified[37] = agg->lpsb1_coils[0] ? 1u : 0u; /* LPSB2 SSR1 */
+            unified[38] = agg->lpsb1_coils[1] ? 1u : 0u; /* LPSB2 SSR2 */
+            unified[39] = agg->lpsb1_coils[2] ? 1u : 0u; /* LPSB2 SSR3 */
+            unified[40] = agg->lpsb2_coils[0] ? 1u : 0u; /* LPSB4 SSR1 */
+            unified[41] = agg->lpsb2_coils[1] ? 1u : 0u; /* LPSB4 SSR2 */
+            unified[42] = agg->lpsb2_coils[2] ? 1u : 0u; /* LPSB4 SSR3 */
+            unified[43] = agg->lpsb3_coils[0] ? 1u : 0u; /* LPSB8 SSR1 */
+            unified[44] = agg->lpsb3_coils[1] ? 1u : 0u; /* LPSB8 SSR2 */
+            unified[45] = agg->lpsb3_coils[2] ? 1u : 0u; /* LPSB8 SSR3 */
+        }
+
+        /* AVG 46..57 */
+        if (agg) {
+            unified[46] = agg->hpsb_sense_raw[0];  unified[47] = agg->hpsb_sense_raw[1];  unified[48] = agg->hpsb_sense_raw[2];
+            unified[49] = agg->lpsb1_sense_raw[0]; unified[50] = agg->lpsb1_sense_raw[1]; unified[51] = agg->lpsb1_sense_raw[2];
+            unified[52] = agg->lpsb2_sense_raw[0]; unified[53] = agg->lpsb2_sense_raw[1]; unified[54] = agg->lpsb2_sense_raw[2];
+            unified[55] = agg->lpsb3_sense_raw[0]; unified[56] = agg->lpsb3_sense_raw[1]; unified[57] = agg->lpsb3_sense_raw[2];
+        }
+
+        /* PKPK 58..69 */
+        if (agg) {
+            unified[58] = agg->hpsb_pkpk[0];  unified[59] = agg->hpsb_pkpk[1];  unified[60] = agg->hpsb_pkpk[2];
+            unified[61] = agg->lpsb1_pkpk[0]; unified[62] = agg->lpsb1_pkpk[1]; unified[63] = agg->lpsb1_pkpk[2];
+            unified[64] = agg->lpsb2_pkpk[0]; unified[65] = agg->lpsb2_pkpk[1]; unified[66] = agg->lpsb2_pkpk[2];
+            unified[67] = agg->lpsb3_pkpk[0]; unified[68] = agg->lpsb3_pkpk[1]; unified[69] = agg->lpsb3_pkpk[2];
+        }
+
+        /* CUR 70..81 */
+        if (agg) {
+            unified[70] = agg->hpsb_current_st[0];  unified[71] = agg->hpsb_current_st[1];  unified[72] = agg->hpsb_current_st[2];
+            unified[73] = agg->lpsb1_current_st[0]; unified[74] = agg->lpsb1_current_st[1]; unified[75] = agg->lpsb1_current_st[2];
+            unified[76] = agg->lpsb2_current_st[0]; unified[77] = agg->lpsb2_current_st[1]; unified[78] = agg->lpsb2_current_st[2];
+            unified[79] = agg->lpsb3_current_st[0]; unified[80] = agg->lpsb3_current_st[1]; unified[81] = agg->lpsb3_current_st[2];
+        }
 
 #if ENABLE_MB_FC04_MAIN_DEBUG
-    if (which == MAP_MAIN) {
-        log_fc04_main_snapshot(di_now, do_now, regs);
-    }
+        if (start_addr < 24u) {
+            log_fc04_main_snapshot(di_now, do_now, unified);
+        }
 #endif
 
-    response[0] = 0x04;
-    response[1] = (uint8_t)(count * 2u);
-    for (uint16_t i = 0; i < count; i++) {
-        uint16_t v = regs[offset + i];
-        response[2u + i * 2u] = (uint8_t)(v >> 8);
-        response[2u + i * 2u + 1u] = (uint8_t)(v & 0xFFu);
+        response[0] = 0x04;
+        response[1] = (uint8_t)(count * 2u);
+        for (uint16_t i = 0u; i < count; i++) {
+            uint16_t v = unified[start_addr + i];
+            response[2u + i * 2u]     = (uint8_t)(v >> 8);
+            response[2u + i * 2u + 1u] = (uint8_t)(v & 0xFFu);
+        }
+        return (int)(2u + count * 2u);
     }
-    return (int)(2u + count * 2u);
+
+    /* ---- Unknown address ---- */
+    response[0] = 0x84;
+    response[1] = EX_ILLEGAL_DATA_ADDR;
+    return 2;
 }
 
 /* FC06 Write Single Register: 2101 (DO bitmap); 2120 (PC_ON_EN); 2121 (PC_RESET_EN). 2122 read-only.
