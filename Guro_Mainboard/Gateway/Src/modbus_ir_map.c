@@ -215,6 +215,48 @@ void ModbusIrMap_RefreshAll(const aggregated_status_t *agg)
 }
 
 /* ------------------------------------------------------------------ */
+/* Immediate patch after FC05 write                                     */
+/* ------------------------------------------------------------------ */
+
+void ModbusIrMap_OnFc05Write(uint16_t addr, bool value)
+{
+    const uint16_t v = value ? 1u : 0u;
+
+    /* ---- MAIN relay: addr 0..3 ---- *
+     * s_ir_main[11..14] = MAIN_RELAY_01..04
+     * s_ir_env[1]  = MAIN_IO_DO_BITMAP  (2101)
+     * s_ir_diag[11]= DIAG_DO_REMAP      (4011) */
+    if (addr <= 3u) {
+        s_ir_main[11u + addr] = v;
+        /* Re-read GPIO bitmap: IO_Main_WriteDO() already committed the pin */
+        uint16_t do_bm = IO_Main_ReadDO_Bitmap();
+        s_ir_env[1]    = do_bm;
+        s_ir_diag[11]  = do_bm;
+        return;
+    }
+
+    /* ---- VBIT: addr 20..23 ---- *
+     * s_ir_main[20..23] = MAIN_VBIT_1..4
+     * MainAutoLink_OnVirtualCoil() was already called by handle_fc05. */
+    if (addr >= 20u && addr <= 23u) {
+        s_ir_main[addr] = MainAutoLink_GetVirtEnableWord(addr - 20u);
+        return;
+    }
+
+    /* ---- Sub-coil optimistic update: addr 898..909 ---- *
+     * s_ir_main[34..45]:
+     *   898..900 → [34..36] HPSB_CON_1..3
+     *   901..903 → [37..39] LPSB1_SSW1..3
+     *   904..906 → [40..42] LPSB2_SSW1..3
+     *   907..909 → [43..45] LPSB3_SSW1..3
+     * Optimistic: actual hw state corrected by RefreshAll after next poll. */
+    if (addr >= 898u && addr <= 909u) {
+        s_ir_main[34u + (addr - 898u)] = v;
+        return;
+    }
+}
+
+/* ------------------------------------------------------------------ */
 /* Public: FC04 response from map                                       */
 /* ------------------------------------------------------------------ */
 

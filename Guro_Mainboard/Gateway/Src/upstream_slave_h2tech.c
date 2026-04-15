@@ -851,6 +851,8 @@ static int handle_fc05(uint16_t start_addr, const uint8_t *write_data,
         IO_Main_WriteDO((MainDoChannel_t)start_addr, value ? 1u : 0u);
         /* PC가 직접 릴레이 상태를 변경한 경우에만 EEPROM 저장 (AutoLink 경로는 저장 안 함) */
         OutputStateNvm_NotifyMainRelay((uint8_t)start_addr, value ? 1u : 0u);
+        /* 즉시 맵 반영: s_ir_main[11+addr], s_ir_env[1], s_ir_diag[11] */
+        ModbusIrMap_OnFc05Write(start_addr, value);
         response[0] = 0x05;
         response[1] = (uint8_t)(start_addr >> 8);
         response[2] = (uint8_t)(start_addr & 0xFFu);
@@ -860,6 +862,8 @@ static int handle_fc05(uint16_t start_addr, const uint8_t *write_data,
     }
     if (start_addr >= 20u && start_addr <= 23u) {
         MainAutoLink_OnVirtualCoil((uint8_t)(start_addr - 20u), value ? 1u : 0u);
+        /* MainAutoLink 갱신 완료 후 즉시 맵 반영: s_ir_main[20..23] */
+        ModbusIrMap_OnFc05Write(start_addr, value);
         response[0] = 0x05;
         response[1] = (uint8_t)(start_addr >> 8);
         response[2] = (uint8_t)(start_addr & 0xFFu);
@@ -984,7 +988,7 @@ static int handle_fc05(uint16_t start_addr, const uint8_t *write_data,
 #if FC05_GW_STEP_LOG
     Gateway_LogFc05StepBeforeSendNormalToPc();
 #endif
-    /* FC05 sub-coil(주소 898~909) 성공 후: 즉시 poll + NVM 저장 */
+    /* FC05 sub-coil(주소 898~909) 성공 후: 즉시 poll + NVM 저장 + 맵 즉시 반영 */
     if (e->action == H2_ACT_WRITE_SUB_COIL && start_addr >= 898u && start_addr <= 909u) {
         uint16_t offset = (uint16_t)(start_addr - 898u);
         static const uint8_t sid_map[] = { 1u, 2u, 4u, 8u };
@@ -992,6 +996,8 @@ static int handle_fc05(uint16_t start_addr, const uint8_t *write_data,
         uint16_t sub_coil = (uint16_t)(offset % 3u);
         ModbusMaster_RequestOnDemandPoll((uint16_t)sid);
         (void)OutputStateNvm_SetSubCoilTarget(sid, sub_coil, value ? 1u : 0u);
+        /* 낙관적 즉시 반영: s_ir_main[34..45] (실제 결과는 다음 poll→Aggregator→RefreshAll로 보정) */
+        ModbusIrMap_OnFc05Write(start_addr, value);
     }
     response[0] = 0x05;
     response[1] = (uint8_t)(start_addr >> 8);

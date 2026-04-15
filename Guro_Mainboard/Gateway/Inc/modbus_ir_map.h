@@ -16,6 +16,7 @@
 #define MODBUS_IR_MAP_H
 
 #include <stdint.h>
+#include <stdbool.h>
 #include "aggregated_status.h"
 
 #ifdef __cplusplus
@@ -59,6 +60,20 @@ void ModbusIrMap_RefreshAll(const aggregated_status_t *agg);
  */
 int ModbusIrMap_Fc04Response(uint16_t start_addr, uint16_t count,
                               uint8_t *response, uint16_t resp_max);
+
+/**
+ * Immediately patch the IR map after a successful FC05 write.
+ * Call AFTER the GPIO / AutoLink / downstream-queue function has completed.
+ *
+ * Addresses handled (v1.3):
+ *   0..3    MAIN relay   → s_ir_main[11..14], s_ir_env[1], s_ir_diag[11]
+ *   20..23  VBIT         → s_ir_main[20..23]  (reads MainAutoLink after write)
+ *   898..909 sub-coil    → s_ir_main[34..45]  (optimistic; RefreshAll corrects)
+ *
+ * @param addr   FC05 0-based Modbus address
+ * @param value  true = coil ON
+ */
+void ModbusIrMap_OnFc05Write(uint16_t addr, bool value);
 
 #ifdef __cplusplus
 }
