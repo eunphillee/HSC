@@ -47,9 +47,9 @@ SUB_COIL_STATUS_COUNT = 14
 # FC02 discrete: H2 dec 869..880 = start 868, count 12 (ALM_1..12)
 SUB_ALARM_START = 868
 SUB_ALARM_COUNT = 12
-# FC05 write single coil: H2 892..896 = Modbus addr 891..895 (VB_ONOFF_8..12 → LPSB pulse). 897,898=DOOR.
-SUB_VB_COIL_BASE = 891   # FC05 addr 891 = H2 892 = VB_ONOFF_8 (LPSB1_CH3 pulse), ... 895=VB_ONOFF_12
-SUB_VB_COIL_COUNT = 5    # 891..895
+# FC05 891~897 (구 VB/문열림 1x0892~0898): 메인보드 펌웨어에서 맵 제거 → PC 도구에서도 미사용.
+SUB_VB_COIL_BASE = 891
+SUB_VB_COIL_COUNT = 0
 # Unified Rule:
 # - Mainboard local relay control: FC05 coil0..3 (0-based)
 # - Downstream(HPSB/LPSB) relay/SSR control via Mainboard routing: use H2Tech mapped coil addresses.

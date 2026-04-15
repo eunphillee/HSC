@@ -695,9 +695,11 @@ class ModbusClient:
                 return False, None, format_modbus_error(exc=e)
 
     def write_sub_coil_pulse(self, coil_index_0_to_4: int) -> tuple[bool, str | None]:
-        """FC05 write single coil SUB_VB_COIL_BASE + index = 1 (pulse). index 0..4 = VB 8..12 (LPSB). Returns (ok, err)."""
+        """레거시: VB 펄스(891~895). 펌웨어에서 SUB_VB_COIL_COUNT=0 이면 미지원."""
+        if SUB_VB_COIL_COUNT <= 0:
+            return False, "VB coil pulse disabled (FC05 891~897 not supported by firmware)"
         if coil_index_0_to_4 < 0 or coil_index_0_to_4 >= SUB_VB_COIL_COUNT:
-            return False, "Invalid coil index 0..4"
+            return False, "Invalid coil index"
         addr = SUB_VB_COIL_BASE + coil_index_0_to_4
         with self._lock:
             ok, err = self._ensure_socket_open()

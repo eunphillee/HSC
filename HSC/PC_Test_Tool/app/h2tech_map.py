@@ -27,19 +27,10 @@ CURRENT_START = 2000
 CURRENT_COUNT = 40
 
 # FC05 write (coil): 1xNNNN -> Modbus coil address = NNNN - 1
-# Door open: 1x0897 -> 896, 1x0898 -> 897
-DOOR_OPEN_1_COIL = 896   # 1x0897
-DOOR_OPEN_2_COIL = 897   # 1x0898
-# Virtual buttons ON/OFF 8~12: 1x0892~0896 -> coils 891..895
-VB_ONOFF_8_COIL = 891
-VB_ONOFF_9_COIL = 892
-VB_ONOFF_10_COIL = 893
-VB_ONOFF_11_COIL = 894
-VB_ONOFF_12_COIL = 895
-
-# 1x0899, 1x0900 not in table -> exception 0x02
-INVALID_COIL_899 = 898   # 1x0899 -> 898
-INVALID_COIL_900 = 899   # 1x0900 -> 899
+# 891~897 (1x0892~0898 VB/문열림): 펌웨어 미지원(제거됨).
+# 하위 SSR: 1x0899~0910 -> Modbus coil 898..909 (HPSB/LPSB)
+SUB_COIL_WRITE_FIRST_DOC = 899
+SUB_COIL_WRITE_LAST_DOC = 910
 
 # MAIN Board I/O (Option 1: enable when firmware exposes FC03/FC06)
 # FC03 start=2100 count=2: 4x2100=DI bitmap(bit0..7), 4x2101=DO bitmap(bit0..3); FC06 reg 2101 to write DO

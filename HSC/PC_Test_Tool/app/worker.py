@@ -209,7 +209,7 @@ class MainboardWorker(QObject):
         self.hpsb_adc_result.emit(ok, result, err)
 
     def on_request_sub_pulse(self, coil_index: int):
-        """FC05 pulse one LPSB VB (coil_index 0..4 = VB 8..12). Emit write_result."""
+        """레거시 VB 펄스(891~895). 펌웨어 미지원 시 SUB_VB_COIL_COUNT=0 → 항상 실패."""
         if not self._client.connected:
             self.write_result.emit(False, "Not connected")
             return

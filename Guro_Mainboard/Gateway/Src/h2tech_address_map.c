@@ -1,8 +1,8 @@
 /**
  * @file h2tech_address_map.c
  * @brief H2TECH table-driven mapping: g_agg_bits image and g_map entries.
- *        WRITE(FC05) coil: 1x0892~0898 (VB/Door), 1x0899~0910 (HPSB/LPSB sub-coil).
- *        Modbus start_addr 891~909 → h2_dec = start_addr+1. 898→899=HPSB coil0, 899→900=HPSB coil1, ...
+ *        WRITE(FC05) coil: 1x0899~0910 (HPSB/LPSB sub-coil only; VB/문열림 0892~0898 제거).
+ *        Modbus start_addr 898~909 → h2_dec = start_addr+1 (899..910). 898→899=HPSB coil0, ...
  */
 #include <stddef.h>
 #include "h2tech_address_map.h"
@@ -43,8 +43,22 @@ void H2Map_WriteAggBit(uint16_t agg_bit_index, bool v) {
 
 static const H2_MapEntry_t g_map[] = {
     /* 1x0821~0836 : ON/OFF 1~16 status (READ) */
-    H2E(H2_AREA_1X, 821, H2_RW_READ, 
-    H2E(H2_AREA_1X, 836, H2_RW_READ, H2_SRC_CONST0, 0,               H2_ACT_NONE, "ONOFF_16_RESERVED"),
+    H2E(H2_AREA_1X, 821, H2_RW_READ, H2_SRC_AGG_BIT, AGG_BIT_ONOFF_1,  H2_ACT_NONE, "ONOFF_1_DOOR1"),
+    H2E(H2_AREA_1X, 822, H2_RW_READ, H2_SRC_AGG_BIT, AGG_BIT_ONOFF_2,  H2_ACT_NONE, "ONOFF_2_DOOR2"),
+    H2E(H2_AREA_1X, 823, H2_RW_READ, H2_SRC_AGG_BIT, AGG_BIT_ONOFF_3,  H2_ACT_NONE, "ONOFF_3"),
+    H2E(H2_AREA_1X, 824, H2_RW_READ, H2_SRC_AGG_BIT, AGG_BIT_ONOFF_4,  H2_ACT_NONE, "ONOFF_4"),
+    H2E(H2_AREA_1X, 825, H2_RW_READ, H2_SRC_AGG_BIT, AGG_BIT_ONOFF_5,  H2_ACT_NONE, "ONOFF_5"),
+    H2E(H2_AREA_1X, 826, H2_RW_READ, H2_SRC_AGG_BIT, AGG_BIT_ONOFF_6,  H2_ACT_NONE, "ONOFF_6"),
+    H2E(H2_AREA_1X, 827, H2_RW_READ, H2_SRC_AGG_BIT, AGG_BIT_ONOFF_7,  H2_ACT_NONE, "ONOFF_7"),
+    H2E(H2_AREA_1X, 828, H2_RW_READ, H2_SRC_AGG_BIT, AGG_BIT_ONOFF_8,  H2_ACT_NONE, "ONOFF_8"),
+    H2E(H2_AREA_1X, 829, H2_RW_READ, H2_SRC_AGG_BIT, AGG_BIT_ONOFF_9,  H2_ACT_NONE, "ONOFF_9"),
+    H2E(H2_AREA_1X, 830, H2_RW_READ, H2_SRC_AGG_BIT, AGG_BIT_ONOFF_10, H2_ACT_NONE, "ONOFF_10"),
+    H2E(H2_AREA_1X, 831, H2_RW_READ, H2_SRC_AGG_BIT, AGG_BIT_ONOFF_11, H2_ACT_NONE, "ONOFF_11"),
+    H2E(H2_AREA_1X, 832, H2_RW_READ, H2_SRC_AGG_BIT, AGG_BIT_ONOFF_12, H2_ACT_NONE, "ONOFF_12"),
+    H2E(H2_AREA_1X, 833, H2_RW_READ, H2_SRC_AGG_BIT, AGG_BIT_ONOFF_13, H2_ACT_NONE, "ONOFF_13"),
+    H2E(H2_AREA_1X, 834, H2_RW_READ, H2_SRC_AGG_BIT, AGG_BIT_ONOFF_14, H2_ACT_NONE, "ONOFF_14"),
+    H2E(H2_AREA_1X, 835, H2_RW_READ, H2_SRC_AGG_BIT, AGG_BIT_ONOFF_15, H2_ACT_NONE, "ONOFF_15_RESERVED"),
+    H2E(H2_AREA_1X, 836, H2_RW_READ, H2_SRC_CONST0, 0,                 H2_ACT_NONE, "ONOFF_16_RESERVED"),
 
     /* 1x0853~0860 : Door sensors (READ) */
     H2E(H2_AREA_1X, 853, H2_RW_READ, H2_SRC_AGG_BIT, AGG_BIT_DOOR_MAG_1, H2_ACT_NONE, "DOOR_MAG_1"),
@@ -79,14 +93,6 @@ static const H2_MapEntry_t g_map[] = {
     H2E(H2_AREA_1X, 890, H2_RW_READ, H2_SRC_AGG_BIT, AGG_BIT_CMD_ONOFF_6, H2_ACT_NONE, "CMD_ONOFF_6"),
     H2E(H2_AREA_1X, 891, H2_RW_READ, H2_SRC_AGG_BIT, AGG_BIT_CMD_ONOFF_7, H2_ACT_NONE, "CMD_ONOFF_7"),
 
-    /* 1x0892~0898 : Virtual buttons / Door open control (WRITE). */
-    H2E(H2_AREA_1X, 892, H2_RW_WRITE, H2_SRC_ACTION_PULSE, 0, H2_ACT_PULSE_OUTPUT, "VB_ONOFF_8"),
-    H2E(H2_AREA_1X, 893, H2_RW_WRITE, H2_SRC_ACTION_PULSE, 0, H2_ACT_PULSE_OUTPUT, "VB_ONOFF_9"),
-    H2E(H2_AREA_1X, 894, H2_RW_WRITE, H2_SRC_ACTION_PULSE, 0, H2_ACT_PULSE_OUTPUT, "VB_ONOFF_10"),
-    H2E(H2_AREA_1X, 895, H2_RW_WRITE, H2_SRC_ACTION_PULSE, 0, H2_ACT_PULSE_OUTPUT, "VB_ONOFF_11"),
-    H2E(H2_AREA_1X, 896, H2_RW_WRITE, H2_SRC_ACTION_PULSE, 0, H2_ACT_PULSE_OUTPUT, "VB_ONOFF_12"),
-    H2E(H2_AREA_1X, 897, H2_RW_WRITE, H2_SRC_ACTION_PULSE, 0, H2_ACT_PULSE_MAIN_DOOR1, "DOOR_OPEN_CTRL_1"),
-    H2E(H2_AREA_1X, 898, H2_RW_WRITE, H2_SRC_ACTION_PULSE, 0, H2_ACT_PULSE_MAIN_DOOR2, "DOOR_OPEN_CTRL_2"),
     /* 1x0899~0910 : HPSB/LPSB coil write (FC05 from PC). 899-901=HPSB coil 0-2, 902-904=LPSB1, 905-907=LPSB2, 908-910=LPSB3. */
     H2E(H2_AREA_1X, 899, H2_RW_WRITE, H2_SRC_ACTION_PULSE, 0, H2_ACT_WRITE_SUB_COIL, "WR_HPSB_COIL_0"),
     H2E(H2_AREA_1X, 900, H2_RW_WRITE, H2_SRC_ACTION_PULSE, 0, H2_ACT_WRITE_SUB_COIL, "WR_HPSB_COIL_1"),
@@ -111,12 +117,6 @@ const H2_MapEntry_t* H2Map_FindByDec(H2_Area_t area, uint16_t h2_dec) {
     return NULL;
 }
 
-__attribute__((weak)) void Gateway_Action_PulseMainDoor1(uint16_t pulse_ms) { (void)pulse_ms; }
-__attribute__((weak)) void Gateway_Action_PulseMainDoor2(uint16_t pulse_ms) { (void)pulse_ms; }
-__attribute__((weak)) void Gateway_Action_PulseOutputByOnOffIndex(uint8_t onoff_index_1based, uint16_t pulse_ms) {
-    (void)onoff_index_1based; (void)pulse_ms;
-}
-
 /* 1x0899..0910 -> (slave_id, coil_index). 899-901=HPSB(1), 902-904=LPSB1(2), 905-907=LPSB2(4), 908-910=LPSB3(8). */
 static void h2_dec_to_sub_coil(uint16_t h2_dec, uint8_t *out_slave_id, uint16_t *out_coil_index) {
     if (h2_dec < 899 || h2_dec > 910) { *out_slave_id = 0; *out_coil_index = 0; return; }
@@ -133,22 +133,6 @@ bool H2Map_ApplyWrite(const H2_MapEntry_t* e, bool value, uint16_t pulse_ms) {
     if (e->rw != H2_RW_WRITE) return false;
 
     switch (e->action) {
-    case H2_ACT_PULSE_MAIN_DOOR1:
-        if (!value) return true;
-        Gateway_Action_PulseMainDoor1(pulse_ms);
-        return true;
-    case H2_ACT_PULSE_MAIN_DOOR2:
-        if (!value) return true;
-        Gateway_Action_PulseMainDoor2(pulse_ms);
-        return true;
-    case H2_ACT_PULSE_OUTPUT:
-        if (!value) return true;
-        if (e->h2_dec >= 892 && e->h2_dec <= 896) {
-            uint8_t onoff_index = (uint8_t)(e->h2_dec - 884);
-            Gateway_Action_PulseOutputByOnOffIndex(onoff_index, pulse_ms);
-            return true;
-        }
-        return false;
     case H2_ACT_WRITE_SUB_COIL: {
         if (e->h2_dec < 899 || e->h2_dec > 910) return false;
         uint8_t slave_id;

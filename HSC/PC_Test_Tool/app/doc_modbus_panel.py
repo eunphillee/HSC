@@ -80,7 +80,7 @@ class DocModbusPanel(QWidget):
 
         self._coil_doc = QSpinBox()
         self._coil_doc.setRange(1, 9999)
-        self._coil_doc.setValue(892)
+        self._coil_doc.setValue(899)
         self._coil_doc.setMinimumWidth(80)
 
         self._coil_value = QCheckBox("ON")
@@ -272,8 +272,8 @@ class DocModbusPanel(QWidget):
             points.append((f"1x{d:04d}", f"정상/이상 상태 {d-868}", "DI", "R", "N/A"))
         for d in range(885, 892):
             points.append((f"1x{d:04d}", f"CMD ON/OFF {d-884}", "DI", "R", "N/A"))
-        for d in range(892, 911):
-            points.append((f"1x{d:04d}", f"자동문 제어/가상버튼 {d-891}", "COIL", "RW", "N/A"))
+        for d in range(899, 911):
+            points.append((f"1x{d:04d}", f"HPSB/LPSB SSR 쓰기 (doc→coil addr {d - 1})", "COIL", "RW", "N/A"))
         for d in range(4000, 4032):
             points.append((f"4x{d:04d}", f"진단레지스터 {d}", "IR", "R", "N/A"))
 

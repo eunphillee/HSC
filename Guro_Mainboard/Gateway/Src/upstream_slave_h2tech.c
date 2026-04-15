@@ -161,7 +161,7 @@ static int h2_dec_to_sub_coil(uint16_t h2_dec, uint8_t *out_slave_id, uint16_t *
     return 0;
 }
 
-/* FC01 Read Coils: writable 1x 영역(0892~0910)을 coil 상태로 제공 */
+/* FC01 Read Coils: writable 1x 영역(0899~0910, HPSB/LPSB 미러) — 현재 upstream 에서 FC01 비활성 */
 __attribute__((unused)) static int handle_fc01(uint16_t start_addr, uint16_t count, uint8_t *response, uint16_t resp_max)
 {
     uint16_t byte_count = (uint16_t)((count + 7u) / 8u);
@@ -188,7 +188,7 @@ __attribute__((unused)) static int handle_fc01(uint16_t start_addr, uint16_t cou
         } else if (e->src == H2_SRC_AGG_BIT) {
             bit = H2Map_ReadAggBit(e->agg_bit_index);
         } else {
-            /* pulse coil(0892~0898)은 래치하지 않으므로 read는 0 유지 */
+            /* H2_SRC_ACTION_PULSE 등: 래치 없음 → 0 */
             bit = false;
         }
         if (bit) response[2u + (i / 8u)] |= (uint8_t)(1u << (i % 8u));
@@ -924,11 +924,11 @@ static int handle_fc05(uint16_t start_addr, const uint8_t *write_data,
 #endif
 #if GATEWAY_WRITE_DEBUG_LOG
     Gateway_LogFc05RecvAddr(start_addr, value ? 1u : 0u);
-    Gateway_LogFc05Range(892, 910);
+    Gateway_LogFc05Range(898, 910);
 #endif
 #if FC05_COIL_DIAG_LOG
     Gateway_LogFc05DiagRecv(start_addr, value ? 1u : 0u);
-    Gateway_LogFc05DiagRange(892, 910);
+    Gateway_LogFc05DiagRange(898, 910);
 #endif
 
     /* Unified Rule: mainboard coil map (0-based) */

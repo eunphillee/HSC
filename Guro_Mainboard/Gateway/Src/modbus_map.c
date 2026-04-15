@@ -23,14 +23,20 @@ static const mb_map_entry_t s_di_map[] = {
     {870,  MB_OFF_DI(870),  "정상/이상 상태2", MB_RW_RO},
 };
 
+/* PC FC05 하위 릴레이만 사용 (1x0899~0910 / Modbus coil 898~909). VB·문열림 892~898 미사용. */
 static const mb_map_entry_t s_coil_map[] = {
-    {892, MB_OFF_COIL(892), "자동문 문열림 제어1", MB_RW_RW},
-    {893, MB_OFF_COIL(893), "자동문 문열림 제어2", MB_RW_RW},
-    {894, MB_OFF_COIL(894), "가상버튼3", MB_RW_RW},
-    {895, MB_OFF_COIL(895), "가상버튼4", MB_RW_RW},
-    {896, MB_OFF_COIL(896), "가상버튼5", MB_RW_RW},
-    {897, MB_OFF_COIL(897), "문열림 제어 메인1", MB_RW_RW},
-    {898, MB_OFF_COIL(898), "문열림 제어 메인2", MB_RW_RW},
+    {899, MB_OFF_COIL(899), "HPSB SSR#1 쓰기", MB_RW_RW},
+    {900, MB_OFF_COIL(900), "HPSB SSR#2 쓰기", MB_RW_RW},
+    {901, MB_OFF_COIL(901), "HPSB SSR#3 쓰기", MB_RW_RW},
+    {902, MB_OFF_COIL(902), "LPSB1 SSR#1 쓰기", MB_RW_RW},
+    {903, MB_OFF_COIL(903), "LPSB1 SSR#2 쓰기", MB_RW_RW},
+    {904, MB_OFF_COIL(904), "LPSB1 SSR#3 쓰기", MB_RW_RW},
+    {905, MB_OFF_COIL(905), "LPSB2 SSR#1 쓰기", MB_RW_RW},
+    {906, MB_OFF_COIL(906), "LPSB2 SSR#2 쓰기", MB_RW_RW},
+    {907, MB_OFF_COIL(907), "LPSB2 SSR#3 쓰기", MB_RW_RW},
+    {908, MB_OFF_COIL(908), "LPSB3 SSR#1 쓰기", MB_RW_RW},
+    {909, MB_OFF_COIL(909), "LPSB3 SSR#2 쓰기", MB_RW_RW},
+    {910, MB_OFF_COIL(910), "LPSB3 SSR#3 쓰기", MB_RW_RW},
 };
 
 uint16_t ModbusMap_Doc1xToOffset(uint16_t doc_addr)
