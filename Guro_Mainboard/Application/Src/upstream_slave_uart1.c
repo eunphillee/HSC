@@ -16,12 +16,17 @@
 
 #define UART1_TX_TC_TIMEOUT_MS  50
 
-/* 현장 요구: USART1(PC↔Mainboard) 상위통신용 Slave ID는 반드시 9로 고정 */
-#define UPSTREAM_UART1_FIXED_SLAVE_ID  9u
+/* Slave ID: 부팅 시 EEPROM(SystemConfig)에서 읽어 적용.
+ * EEPROM 미로드 / 범위(1~247) 밖 / 0xFF → 기본값 9 사용. */
+#define UPSTREAM_UART1_DEFAULT_SLAVE_ID  9u
 static inline uint8_t get_slave_id(void)
 {
-  (void)SystemConfig_Get(); /* USART1 슬레이브 ID는 EEPROM에 영향받지 않음 */
-  return UPSTREAM_UART1_FIXED_SLAVE_ID;
+    const system_config_t *cfg = SystemConfig_Get();
+    if (!cfg) return UPSTREAM_UART1_DEFAULT_SLAVE_ID;
+    uint8_t id = cfg->slave_id;
+    if (id < SYSTEM_CONFIG_SLAVE_ID_MIN || id > SYSTEM_CONFIG_SLAVE_ID_MAX)
+        return UPSTREAM_UART1_DEFAULT_SLAVE_ID;
+    return id;
 }
 #define RX_BUF_SIZE        64
 #define RING_SIZE          256

@@ -14,7 +14,7 @@ extern "C" {
 
 #define SYSTEM_CONFIG_MAGIC    0x4853u  /* "HS" */
 #define SYSTEM_CONFIG_VERSION  1u
-#define SYSTEM_CONFIG_DEFAULT_SLAVE_ID  1u
+#define SYSTEM_CONFIG_DEFAULT_SLAVE_ID  9u
 #define SYSTEM_CONFIG_DEFAULT_BAUDRATE  9600u
 
 /* slave_id valid range (Modbus) */
