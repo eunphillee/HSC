@@ -1,5 +1,6 @@
 #include "system_sync.h"
 #include "aggregator.h"
+#include "modbus_ir_map.h"
 
 void SystemSync_Init(void)
 {
@@ -11,4 +12,5 @@ void SystemSync_Update(aggregated_status_t *agg, uint32_t now_ms)
     (void)now_ms;
     if (!agg) return;
     Aggregator_Update(agg);
+    ModbusIrMap_RefreshAll(agg);  /* FC04 맵 갱신: Aggregator 업데이트 직후 반영 */
 }

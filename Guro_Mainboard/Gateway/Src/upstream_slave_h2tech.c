@@ -1,11 +1,17 @@
 /**
  * @file upstream_slave_h2tech.c
- * @brief Upstream Modbus Slave (PC link): Unified Rule v1.2.
- *        Read = FC04 only. Write = FC05 only.
- *        FC01/FC02/FC03/FC06/FC15/FC16 → EX_ILLEGAL_FUNCTION.
+ * @brief Upstream Modbus Slave (PC link): Unified Rule v1.3.
+ *        Read = FC04 only. Write = FC05 / FC16 only.
+ *        FC01/FC02/FC03/FC06/FC15 → EX_ILLEGAL_FUNCTION.
  *        Illegal address -> EX_ILLEGAL_DATA_ADDR(0x02).
+ *
+ *        FC04 responses are served from the pre-populated IR map
+ *        (modbus_ir_map.c, refreshed every 100ms via SystemSync_Update).
+ *        handle_fc04() only triggers on-demand sub-board polls and
+ *        delegates PDU building to ModbusIrMap_Fc04Response().
  */
 #include "upstream_slave_h2tech.h"
+#include "modbus_ir_map.h"
 #include "h2tech_address_map.h"
 #include "gateway_actions.h"
 #include "gateway_write_log.h"
@@ -431,148 +437,50 @@ __attribute__((unused)) static int handle_fc03(uint16_t start_addr, uint16_t cou
 
 /* FC04 Read Input Registers — Unified Rule v1.3
  *
- * Allowed zones:
+ * Allowed zones (see modbus_ir_map.h):
  *   0..81     MAIN (0..23) + PACKED subboard (24..81)
  *   890..896  RTC
- *   2100..2114  ENV / IO / reset-CSR  (FC03 is blocked; exposed here)
- *   4000..4039  DIAG
+ *   2100..2122 ENV / IO / reset-CSR / PC_LED_IN
+ *   4000..4039 DIAG
  *
- * Any other address → EX_ILLEGAL_DATA_ADDR.
- * Partial reads within a zone are permitted: start >= zone_lo && start+count-1 <= zone_hi.
+ * All zone data is pre-populated by ModbusIrMap_RefreshAll() (100ms periodic).
+ * This handler only triggers on-demand sub-board polls and delegates response
+ * building to ModbusIrMap_Fc04Response().
  */
 static int handle_fc04(uint16_t start_addr, uint16_t count, const void *p_agg,
                        uint8_t *response, uint16_t resp_max)
 {
-    const aggregated_status_t *agg = (const aggregated_status_t *)p_agg;
+    (void)p_agg;  /* Map is refreshed periodically; agg used only for poll trigger */
 
     if (count == 0u) {
-        response[0] = 0x84;
+        response[0] = 0x84u;
         response[1] = EX_ILLEGAL_DATA_VAL;
         return 2;
     }
 
+    /* Trigger on-demand sub-board poll when PACKED range (24..81) is accessed */
     const uint32_t end = (uint32_t)start_addr + (uint32_t)count - 1u;
-
-    /* ------------------------------------------------------------------ */
-    /* Zone: RTC  890..896                                                  */
-    /* ------------------------------------------------------------------ */
-    if (start_addr >= UPSTREAM_RTC_REG_START
-        && end <= (uint32_t)(UPSTREAM_RTC_REG_START + UPSTREAM_RTC_REG_COUNT - 1u)) {
-        if (resp_max < (uint16_t)(2u + count * 2u)) return -1;
-        uint16_t rtc_regs[UPSTREAM_RTC_REG_COUNT] = {0};
-        (void)BoardRtc_ReadWordRegs(rtc_regs);
-        response[0] = 0x04;
-        response[1] = (uint8_t)(count * 2u);
-        uint16_t off = (uint16_t)(start_addr - UPSTREAM_RTC_REG_START);
-        for (uint16_t i = 0u; i < count; i++) {
-            uint16_t v = rtc_regs[off + i];
-            response[2u + i * 2u]     = (uint8_t)(v >> 8);
-            response[2u + i * 2u + 1u] = (uint8_t)(v & 0xFFu);
-        }
-        return (int)(2u + count * 2u);
+    if (start_addr <= FC04_MAIN_PACKED_END && end <= (uint32_t)FC04_MAIN_PACKED_END
+        && end >= 24u) {
+        ModbusMaster_RequestOnDemandPoll((uint16_t)SLAVE_ID_HPSB);
+        ModbusMaster_RequestOnDemandPoll((uint16_t)SLAVE_ID_LPSB1);
+        ModbusMaster_RequestOnDemandPoll((uint16_t)SLAVE_ID_LPSB2);
+        ModbusMaster_RequestOnDemandPoll((uint16_t)SLAVE_ID_LPSB3);
     }
 
-    /* ------------------------------------------------------------------ */
-    /* Zone: DIAG  4000..4039                                               */
-    /* ------------------------------------------------------------------ */
-    if (start_addr >= UPSTREAM_DIAG_IR_START
-        && end <= (uint32_t)(UPSTREAM_DIAG_IR_START + UPSTREAM_DIAG_IR_COUNT - 1u)) {
-        if (resp_max < (uint16_t)(2u + count * 2u)) return -1;
-        uint16_t regs[UPSTREAM_DIAG_IR_COUNT] = {0};
-        regs[0]  = (agg && agg->error_flags == 0u) ? 0u : 1u;
-        regs[1]  = (agg && !(agg->error_flags & AGG_ERR_COMM_HPSB)) ? 1u : 0u;
-        regs[2]  = (agg && !(agg->error_flags & AGG_ERR_COMM_LPSB)) ? 1u : 0u;
-        regs[3]  = agg ? agg->hpsb_status_reg : 0u;
-        regs[4]  = agg ? agg->lpsb1_alarm_reg : 0u;
-        regs[5]  = agg ? agg->lpsb1_sense_raw[0] : 0u;
-        regs[6]  = agg ? agg->lpsb1_sense_raw[1] : 0u;
-        regs[7]  = agg ? agg->lpsb1_sense_raw[2] : 0u;
-        regs[8]  = agg ? agg->error_flags : 0u;
-        regs[9]  = (uint16_t)(ModbusMaster_GetUart2OreCount() & 0xFFFFu);
-        regs[10] = IO_Main_ReadDI_Bitmap();
-        regs[11] = IO_Main_ReadDO_Bitmap();
-        {
-            uint8_t sid = 0u, fc = 0u;
-            ModbusSubFailReason_t r = MODBUS_SUB_FAIL_NONE;
-            uint16_t len = 0u;
-            ModbusMaster_GetLastSubFail(&sid, &fc, &r, &len);
-            regs[12] = (uint16_t)sid;
-            regs[13] = (uint16_t)fc;
-            regs[14] = (uint16_t)r;
-            regs[15] = (uint16_t)len;
-        }
-        {
-            const SlaveId_t sids[4] = { SLAVE_ID_HPSB, SLAVE_ID_LPSB1, SLAVE_ID_LPSB2, SLAVE_ID_LPSB3 };
-            uint16_t w = 16u;
-            for (uint16_t i = 0u; i < 4u; i++) {
-                uint8_t fc = 0u;
-                ModbusSubFailReason_t r = MODBUS_SUB_FAIL_NONE;
-                uint16_t len = 0u;
-                ModbusMaster_GetSubFailForSlave(sids[i], &fc, &r, &len);
-                regs[w++] = (uint16_t)((uint8_t)sids[i]);
-                regs[w++] = (uint16_t)fc;
-                regs[w++] = (uint16_t)r;
-                regs[w++] = (uint16_t)len;
-            }
-        }
-        regs[32] = OutputStateNvm_Get() ? 1u : 0u;
-        regs[33] = (uint16_t)OutputStateNvm_IsEepromDirty();
-        regs[34] = OutputStateNvm_GetSequence();
-        regs[35] = OutputStateNvm_GetLastSaveResult();
-        regs[36] = OutputStateNvm_GetLastLoadResult();
-        regs[37] = OutputStateNvm_GetRestoreDoneMask();
-        regs[38] = OutputStateNvm_GetRestoreOkMask();
+    return ModbusIrMap_Fc04Response(start_addr, count, response, resp_max);
+}
 
-        response[0] = 0x04;
-        response[1] = (uint8_t)(count * 2u);
-        uint16_t off = (uint16_t)(start_addr - UPSTREAM_DIAG_IR_START);
-        for (uint16_t i = 0u; i < count; i++) {
-            response[2u + i * 2u]     = (uint8_t)(regs[off + i] >> 8);
-            response[2u + i * 2u + 1u] = (uint8_t)(regs[off + i] & 0xFFu);
-        }
-        return (int)(2u + count * 2u);
-    }
-
-    /* ------------------------------------------------------------------ */
-    /* Zone: ENV/IO  2100..2114  (FC03 is blocked; legacy compat)           */
-    /* ------------------------------------------------------------------ */
-    if (start_addr >= FC04_ENV_IO_START && end <= (uint32_t)FC04_ENV_IO_END) {
-        if (resp_max < (uint16_t)(2u + count * 2u)) return -1;
-        uint16_t regs[FC04_ENV_IO_COUNT] = {0};
-        regs[0]  = IO_Main_ReadDI_Bitmap();                              /* 2100: DI bitmap */
-        regs[1]  = IO_Main_ReadDO_Bitmap();                              /* 2101: DO bitmap */
-        /* 2102..2109: reserved (0) */
-        regs[10] = agg ? (uint16_t)agg->env_temp_cx10 : (uint16_t)0x8000u; /* 2110: temp_c_x10 */
-        regs[11] = agg ? agg->env_rh_x10 : 0xFFFFu;                    /* 2111: rh_x10 */
-        regs[12] = agg ? agg->error_flags : 0xFFFFu;                    /* 2112: error_flags */
-        {
-            uint32_t csr = ResetReason_GetRccCsr();
-            regs[13] = (uint16_t)(csr & 0xFFFFu);                       /* 2113: CSR low16 */
-            regs[14] = (uint16_t)(csr >> 16);                           /* 2114: CSR high16 */
-        }
-        response[0] = 0x04;
-        response[1] = (uint8_t)(count * 2u);
-        uint16_t off = (uint16_t)(start_addr - FC04_ENV_IO_START);
-        for (uint16_t i = 0u; i < count; i++) {
-            response[2u + i * 2u]     = (uint8_t)(regs[off + i] >> 8);
-            response[2u + i * 2u + 1u] = (uint8_t)(regs[off + i] & 0xFFu);
-        }
-        return (int)(2u + count * 2u);
-    }
-
-    /* ------------------------------------------------------------------ */
-    /* Zone: MAIN + PACKED  0..81                                           */
-    /* ------------------------------------------------------------------ */
-    if (start_addr <= FC04_MAIN_PACKED_END && end <= (uint32_t)FC04_MAIN_PACKED_END) {
-        if (resp_max < (uint16_t)(2u + count * 2u)) return -1;
-
-        /* Trigger on-demand sub-board poll when PACKED range (24..81) is touched */
-        if (end >= 24u) {
-            ModbusMaster_RequestOnDemandPoll((uint16_t)SLAVE_ID_HPSB);
-            ModbusMaster_RequestOnDemandPoll((uint16_t)SLAVE_ID_LPSB1);
-            ModbusMaster_RequestOnDemandPoll((uint16_t)SLAVE_ID_LPSB2);
-            ModbusMaster_RequestOnDemandPoll((uint16_t)SLAVE_ID_LPSB3);
-        }
+/* ---- legacy stub kept for reference; no longer called from handle_fc04 ---- */
+#if 0  /* MAIN+PACKED on-demand assembly (replaced by modbus_ir_map) */
+static void _legacy_fc04_main_packed_unused(uint16_t start_addr, uint16_t count,
+                                             const void *p_agg,
+                                             uint8_t *response, uint16_t resp_max)
+{
+    const aggregated_status_t *agg = (const aggregated_status_t *)p_agg;
+    (void)resp_max;
+    const uint32_t end = (uint32_t)start_addr + (uint32_t)count - 1u;
+    (void)end;
 
         /* Build unified 0..81 buffer (stack: 82 × 2 = 164 bytes) */
         uint16_t unified[82u] = {0};
@@ -668,7 +576,8 @@ static int handle_fc04(uint16_t start_addr, uint16_t count, const void *p_agg,
     response[0] = 0x84;
     response[1] = EX_ILLEGAL_DATA_ADDR;
     return 2;
-}
+}  /* end _legacy_fc04_main_packed_unused */
+#endif /* 0 — legacy FC04 on-demand assembly */
 
 /* FC06 Write Single Register: 2101 (DO bitmap); 2120 (PC_ON_EN); 2121 (PC_RESET_EN). 2122 read-only.
  * NOTE: Unified Rule v1.2 금지 FC. UpstreamSlave_HandleRequest에서 EX_ILLEGAL_FUNCTION 반환으로 변경됨. */
