@@ -18,16 +18,17 @@ extern "C" {
 #define MODBUS_DE_GPIO_PORT   RS_485_DE_RE_GPIO_Port
 #define MODBUS_DE_GPIO_PIN    RS_485_DE_RE_Pin
 
-/* Timing (character time at 9600 baud ~ 1.04 ms per char)
- * FC04 16regs 응답(약 37바이트)은 이상적인 경우에도 ~40ms 수준.
- * HPSB 실측 응답: ~50ms. 타임아웃 80ms = HPSB 여유 + LPSB 미응답 3x80=240ms 합계 << PC tool 타임아웃.
- * 주의: 여러 슬레이브가 미응답이면 N×timeout 동안 업스트림 UART2 RX가 잠겨 PC 요청 유실 가능. */
-#define MODBUS_RESPONSE_TIMEOUT_MS    80
+/* Timing at 38400 baud (1 char ~= 0.26ms, t3.5 ~= 0.9ms).
+ * FC04 16regs 응답(약 37바이트)은 선로 점유만 보면 대략 10ms 수준이므로,
+ * 처리 여유를 포함해도 40ms면 충분한 편이다.
+ * 주의: 여러 슬레이브가 연속 미응답이면 N×timeout 동안 UART2가 점유되므로
+ * timeout을 너무 크게 잡지 않는 편이 전체 복원력에 유리하다. */
+#define MODBUS_RESPONSE_TIMEOUT_MS    40
 #define MODBUS_FRAME_DELAY_MS         5
 /* FC05 response: 8 bytes. Timeout for waiting subboard reply (lower-bus gateway). */
 #define MODBUS_FC05_RESPONSE_LEN       8
-#define MODBUS_FC05_RX_TIMEOUT_MS      280  /* 하위보드 응답 지연 여유 확대(FC05 0x04 오검출 완화) */
-/* Do NOT delay or flush RX after TX; slave may respond after t3.5 (~4ms). Flush only before TX. */
+#define MODBUS_FC05_RX_TIMEOUT_MS      120  /* 38400 baud 기준 충분한 여유를 남기되 fail-fast 성격 강화 */
+/* Do NOT delay or flush RX after TX; slave may respond after t3.5 (~1ms at 38400). Flush only before TX. */
 #define MODBUS_FC05_RX_DELAY_MS        0
 /* After TX: explicit wait for UART_FLAG_TC on USART2 before DE LOW (gateway write path). */
 #define MODBUS_FC05_TX_TC_TIMEOUT_MS   30
@@ -36,10 +37,15 @@ extern "C" {
 #define MODBUS_DE_TX_SETTLE_MS       1
 #endif
 
-/* Buffer sizes */
-#define MODBUS_RTU_RX_BUF_SIZE        64
-#define MODBUS_RTU_TX_BUF_SIZE        64
-#define MODBUS_MAX_PDU_LEN            64
+/* Buffer sizes
+ * Upstream slave (UART1→PC): UART1_RESP_PDU_MAX_BYTES=256, tx_frame=259 (separate, upstream_slave_uart1.c)
+ * Downstream master (USART2→Sub): uses these buffers.
+ *   FC04 HPSB/LPSB max response: slave(1)+FC(1)+bc(1)+16regs×2(32)+CRC(2) = 37B → 64 was fine for sub.
+ *   MB_IR_MAIN_COUNT=82 regs → PDU=1+1+164=166B, RTU frame=168B → needs ≥256B
+ *   MODBUS_MAX_PDU_LEN raised to 256 to avoid buffer overrun when sub responds with packed data. */
+#define MODBUS_RTU_RX_BUF_SIZE        256
+#define MODBUS_RTU_TX_BUF_SIZE        256
+#define MODBUS_MAX_PDU_LEN            256
 
 #ifdef __cplusplus
 }
