@@ -18,14 +18,13 @@
 
 /* Slave ID: 부팅 시 EEPROM(SystemConfig)에서 읽어 적용.
  * EEPROM 미로드 / 범위(1~247) 밖 / 0xFF → 기본값 9 사용. */
-#define UPSTREAM_UART1_DEFAULT_SLAVE_ID  9u
 static inline uint8_t get_slave_id(void)
 {
     const system_config_t *cfg = SystemConfig_Get();
-    if (!cfg) return UPSTREAM_UART1_DEFAULT_SLAVE_ID;
+    if (!cfg) return 9u;
     uint8_t id = cfg->slave_id;
     if (id < SYSTEM_CONFIG_SLAVE_ID_MIN || id > SYSTEM_CONFIG_SLAVE_ID_MAX)
-        return UPSTREAM_UART1_DEFAULT_SLAVE_ID;
+        return 9u;
     return id;
 }
 #define RX_BUF_SIZE        64
