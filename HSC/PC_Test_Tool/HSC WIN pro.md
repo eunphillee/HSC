@@ -95,7 +95,7 @@ HSC_PC_Test_Tool_Windows_v1.0.0.zip
 ### 3.3 프로그램 실행
 
 1. `HSC_PC_Test_Tool.exe` 더블클릭  
-2. **Baud**, **Slave ID**(메인보드 기본값 문서와 동일하게, 예: 9) 설정  
+2. **Baud**, **Slave ID**(메인보드 EEPROM `slave_id`와 동일하게; 미설정 시 펌웨어 기본 9) 설정  
 3. **Connect** 후 테스트
 
 ### 3.4 Windows 보안 알림

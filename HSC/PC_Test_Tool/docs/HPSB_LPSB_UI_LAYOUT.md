@@ -18,7 +18,7 @@
 - **COM Port** (드롭다운)
 - **Refresh**
 - **Baudrate** (고정 9600)
-- **Mainboard Slave ID** (기본 9)
+- **Mainboard Slave ID** (SpinBox 기본 9 = 펌웨어 미설정 시 권장값; 실제 응답 ID는 EEPROM `slave_id`)
 - **Connect** / **Disconnect**
 - **Status**: Connected(녹색) / Disconnected(회색)
 
@@ -69,11 +69,10 @@
 
 ---
 
-## Slave ID (메인보드 UART2 → HPSB/LPSB)
-- **PC는 항상 메인보드(unit=9)와만 통신.** PC가 보내는 FC05는 메인보드 **coil 주소 891~895**로 전달됨.
-- 메인보드 펌웨어가 UART2 RS485로 하위 보드에 보낼 때 사용하는 Slave ID (io_map.h 기준):
-  - **HPSB = 1**, **LPSB1 = 2**, **LPSB2 = 3**, **LPSB3 = 4**
-- 하드웨어가 2/4/8 등 다른 주소를 쓰면 펌웨어 `SLAVE_ID_*` 수정 필요.
+## Slave ID (PC ↔ 메인보드 USART1)
+- **PC → 메인보드:** Modbus `unit` = PC 상단 SpinBox 값. 메인보드는 **EEPROM(SystemConfig)의 slave_id**로 응답(미설정/무효 시 기본 9). **9 고정이 아님.**
+- ID 변경 후 보드 **재부팅** → PC SpinBox를 **동일 ID**로 맞춘 뒤 **다시 Connect**.
+- **메인보드 → 하위(HPSB/LPSB)** 는 UART2; 하위 Slave ID는 펌웨어 `io_map.h` 기준 **HPSB=1, LPSB1=2, LPSB2=4, LPSB3=8** 등(프로젝트 정의 따름).
 
 ---
 
@@ -85,14 +84,14 @@
 
 ## RELAY/SSR 버튼 디버그 로그
 - **HPSB RELAY 클릭**: `[DEBUG] Button pressed: HPSB RELAYx EN — PC→HPSB write not supported (UI only)` 로그 출력.
-- **LPSB SSR 클릭**: `[DEBUG] Button pressed: LPSB SSRx EN -> FC05 addr=89X (unit=Mainboard)` 후 **TX FC05 addr=89X val=1 unit=9**, **RX OK** 또는 **RX EXC/ERR**, **Response: OK/Fail** 로그 출력.
+- **LPSB SSR 클릭**: `[DEBUG] Button pressed: LPSB SSRx EN -> FC05 addr=89X (unit=Mainboard)` 후 **TX FC05 addr=89X val=1 unit=(SpinBox=메인보드 EEPROM ID)**, **RX OK** 또는 **RX EXC/ERR**, **Response: OK/Fail** 로그 출력.
 - TX/RX/Response는 모두 `_last_log_tag`([LPSB1] 등)와 함께 기록됨.
 
 ---
 
 ## 메인보드 측 (참고)
 - **DE/RE (PB12)**: UART2 하위 송신 시 `set_de_tx()` → 전송 → 2ms 대기 → `set_de_rx()` (modbus_master.c `DE_RX_GUARD_MS`)로 마지막 바이트가 나간 뒤 RX 전환.
-- LPSB SSR(FC05 891~895) 수신 시 메인보드가 `Gateway_Action_PulseOutputByOnOffIndex` → `ModbusMaster_WriteCoil(slave_id, coil_index, value)`로 해당 하위 보드에 FC05 전송.
+- (구 사양) VB/문열림 FC05 891~897 등은 펌웨어에서 제거됨. 하위 SSR은 **FC05 898~909** 경로 참고.
 
 ---
 

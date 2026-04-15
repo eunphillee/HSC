@@ -71,7 +71,7 @@ class LogHandler(QObject):
         self.log_line.emit(f"{_ts()} | {message}")
 
     def log_request(self, tag: str, unit: int, func: str, addr: int | str, count_or_value: int | str):
-        """Log outgoing request. tag: [MAIN], [HPSB], [LPSB1] etc. unit = slave ID (Mainboard typically 9)."""
+        """Log outgoing request. tag: [MAIN], [HPSB], [LPSB1] etc. unit = Modbus slave ID (mainboard = EEPROM value, often 9)."""
         addr_s = str(addr)
         cov_s = str(count_or_value)
         prefix = f"{tag} " if tag else ""

@@ -42,7 +42,7 @@ PyInstaller로 단일 실행 파일을 만들 수 있습니다. **반드시 Wind
 
 After the window opens, the **console** prints a layout verification block: main window size, layout tree (top bar, 3 left cards, 1 right card, bottom 2 cards), and that all sections are visible on 1440×900 without scrolling.
 
-Select COM port (e.g. `COM3` on Windows, `/dev/tty.usbserial-*` or `/dev/ttyUSB0` on macOS/Linux), set Slave ID (default **9**), then Connect. Use the read panels and control buttons as needed.
+Select COM port (e.g. `COM3` on Windows, `/dev/tty.usbserial-*` or `/dev/ttyUSB0` on macOS/Linux), set **Slave ID** to match the mainboard EEPROM `slave_id` (SpinBox default **9** is the firmware default when EEPROM is unset/invalid—**not** a hardcoded bus ID), then Connect. After changing ID on the board (save to EEPROM + reboot), set the same value here and reconnect.
 
 ## UI overview (text layout)
 
@@ -70,6 +70,13 @@ If any panel is clipped on 1440×900: the window has minimum size 880×700 and t
 
 - **9600** baud, **8N1**, Modbus RTU
 - User selects port; refresh to rescan
+
+## Mainboard Slave ID (EEPROM)
+
+- The mainboard answers Modbus RTU on USART1 using `slave_id` from EEPROM **SystemConfig** (not a fixed 9 in firmware).
+- PC tool sends all mainboard requests with `unit=` = the **Slave ID** spinbox value.
+- If EEPROM is blank (`0xFF`) or out of range **1–247**, firmware falls back to **9**.
+- To change the board ID: write holding register **3000** (per project syscfg / Modbus map), save, **reboot** the board, then set the spinbox to the new ID and **Connect** again.
 
 ## Notes
 

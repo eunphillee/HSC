@@ -431,6 +431,10 @@ class MainWindow(QMainWindow):
         self._slave_id.setRange(1, 247)
         self._slave_id.setValue(MAINBOARD_SLAVE_ID_DEFAULT)
         self._slave_id.setMinimumWidth(50)
+        self._slave_id.setToolTip(
+            "Modbus unit = 메인보드 EEPROM(SystemConfig)의 slave_id와 동일하게 설정.\n"
+            f"기본 권장값 {MAINBOARD_SLAVE_ID_DEFAULT}(펌웨어 미설정 시와 동일). ID 변경 후 보드 재부팅 → PC에서 새 값으로 Connect."
+        )
         top_lay.addWidget(self._slave_id)
         self._btn_connect = QPushButton("Connect")
         self._btn_connect.clicked.connect(self._do_connect)
@@ -1378,7 +1382,9 @@ class MainWindow(QMainWindow):
             self._log.log_info("[MAIN] Not connected")
             return
         self._set_op_state("READ_ONCE")
-        self._log.log_info("[MINIMAL] FC04 addr=0 cnt=24 unit=9 (single shot)")
+        self._log.log_info(
+            f"[MINIMAL] FC04 addr=0 cnt=24 unit={int(self._slave_id.value())} (single shot)"
+        )
         self.request_read_di.emit()
 
     def _run_hpsb_probe_only(self):
@@ -1598,8 +1604,12 @@ class MainWindow(QMainWindow):
                 if raw_only:
                     self._log.log_info("→ 직접 HPSB(raw_only): 시리얼만 열었습니다. 2초 수신 테스트 중…")
                     QTimer.singleShot(300, lambda: self.request_sniff.emit())
-                if self._slave_id.value() != MAINBOARD_SLAVE_ID_DEFAULT:
-                    self._log.log_info(f"경고: 메인보드 Slave ID는 {MAINBOARD_SLAVE_ID_DEFAULT}입니다. 현재 {self._slave_id.value()}이면 Read DI/Relay 응답이 없을 수 있습니다.")
+                self._log.log_info(
+                    "힌트: 메인보드 Slave ID는 보드 EEPROM(SystemConfig)에 저장된 값과 "
+                    "상단 SpinBox를 일치시켜야 합니다. 기본값은 "
+                    f"{MAINBOARD_SLAVE_ID_DEFAULT}입니다(미설정/무효 EEPROM 시 펌웨어 동일). "
+                    "ID를 EEPROM에 저장한 뒤 재부팅하면 보드에 적용되며, PC는 새 ID로 다시 Connect 하세요."
+                )
             else:
                 self._log.log_info(f"[MAIN] Connect fail: {msg or 'No response/timeout'}")
                 self._log.log_tagged("[MAIN]", "Connect", port, self._baud.value(), "Fail", msg or "No response/timeout")

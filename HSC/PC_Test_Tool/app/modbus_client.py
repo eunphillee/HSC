@@ -1,6 +1,7 @@
 """
 Modbus RTU client for Mainboard only. All I/O synchronous; run from worker thread.
 Compatible with pymodbus 2.5.3 (ModbusSerialClient, unit= for slave).
+Mainboard 요청의 unit은 connect(slave_id=...)로 전달된 값(= UI SpinBox). 보드 실제 ID는 EEPROM.
 Direct HPSB 시 raw_only 연결 시 pyserial만 사용해 수신이 pymodbus에 가로채이지 않도록 함.
 """
 import threading

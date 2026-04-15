@@ -2,7 +2,7 @@
 H2TECH address mapping: 1xNNNN -> Modbus start address = NNNN - 1.
 Bit packing in responses: LSB-first, lowest address = bit0.
 """
-# Upstream MAIN Modbus Slave ID default (user can change in UI)
+# PC UI / 문서용 기본값. 메인보드 실제 Modbus unit은 EEPROM(SystemConfig) slave_id (기본 9).
 MAIN_SLAVE_ID_DEFAULT = 9
 
 # FC02 discrete (1x) — Modbus start = NNNN - 1

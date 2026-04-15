@@ -2,8 +2,15 @@
 Mainboard Modbus address map (1:1 with mainboard firmware).
 Change only these constants when firmware mapping changes; UI logic stays the same.
 All addresses for a single slave (Mainboard only).
+
+운영 (메인보드 Slave ID):
+- 펌웨어는 USART1 Modbus Slave ID를 EEPROM(SystemConfig)의 slave_id로 사용합니다.
+- 이 상수는 PC UI SpinBox 초기값·문서 기준일 뿐, 보드가 9로 고정 응답하는 것은 아닙니다.
+- EEPROM 미설정(0xFF)/무효(1~247 밖) 시 펌웨어는 기본값 9로 동작합니다.
+- FC06 등으로 ID를 EEPROM에 저장한 뒤 재부팅하면 보드에 적용됩니다. PC는 상단 SpinBox를
+  그 ID와 맞춘 뒤 Disconnect → Connect 로 다시 연결해야 합니다.
 """
-# Slave ID for Mainboard (default, H2Tech 문서 기준)
+# PC UI 기본 SpinBox 값 (펌웨어 미설정 시와 동일한 권장 시작값). 실제 보드 ID는 EEPROM 따름.
 MAINBOARD_SLAVE_ID_DEFAULT = 9
 
 # ---- Mainboard I/O (FC04/FC05) ----

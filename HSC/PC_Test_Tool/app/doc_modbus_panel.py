@@ -71,6 +71,9 @@ class DocModbusPanel(QWidget):
         self._slave.setRange(1, 247)
         self._slave.setValue(MAINBOARD_SLAVE_ID_DEFAULT)
         self._slave.setMinimumWidth(60)
+        self._slave.setToolTip(
+            "메인보드 EEPROM slave_id와 동일하게. 기본값은 미설정 펌웨어와 맞춘 권장값일 뿐 고정 아님."
+        )
 
         self._pulse_ms = QSpinBox()
         self._pulse_ms.setRange(0, 5000)
