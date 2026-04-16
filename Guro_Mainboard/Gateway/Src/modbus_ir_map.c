@@ -31,6 +31,11 @@ static uint16_t s_ir_rtc[MB_IR_RTC_COUNT];    /* 890..896  */
 static uint16_t s_ir_env[MB_IR_ENV_COUNT];    /* 2100..2122 */
 static uint16_t s_ir_diag[MB_IR_DIAG_COUNT];  /* 4000..4039 */
 
+/* Read-back firmware marker for field verification.
+ * FC04 addr=4039 should return this exact value when the latest
+ * "FC04 side-effect free packed read" firmware is actually flashed. */
+#define MB_FW_MARKER_FC04_SIDE_EFFECT_FREE   0xA416u
+
 /* ------------------------------------------------------------------ */
 /* Refresh: MAIN + PACKED  (0..81)                                      */
 /* ------------------------------------------------------------------ */
@@ -146,7 +151,7 @@ static void refresh_env(const aggregated_status_t *agg)
 
 static void refresh_diag(const aggregated_status_t *agg)
 {
-    /* Full zero first: covers reserved/unset slots including [39] = 4039. */
+    /* Full zero first: covers reserved/unset slots before explicit assignments. */
     (void)memset(s_ir_diag, 0, sizeof(s_ir_diag));
 
     /* NOTE: existing code returns 0=정상 / 1=이상 for DIAG_MAIN_STATUS (opposite
@@ -199,7 +204,7 @@ static void refresh_diag(const aggregated_status_t *agg)
     s_ir_diag[36] = OutputStateNvm_GetLastLoadResult();          /* 4036: NVMI_LAST_LOAD_RESULT */
     s_ir_diag[37] = OutputStateNvm_GetRestoreDoneMask();         /* 4037: NVM_RESTORE_TRY_MASK  */
     s_ir_diag[38] = OutputStateNvm_GetRestoreOkMask();           /* 4038: NVM_RESTORE_OK_MASK   */
-    /* s_ir_diag[39] = 0  (4039: RESERVED, cleared by memset above) */
+    s_ir_diag[39] = MB_FW_MARKER_FC04_SIDE_EFFECT_FREE;          /* 4039: FW_MARKER */
 }
 
 /* ------------------------------------------------------------------ */

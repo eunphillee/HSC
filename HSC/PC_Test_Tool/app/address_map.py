@@ -1,99 +1,87 @@
 """
-Mainboard Modbus address map (1:1 with mainboard firmware).
+Mainboard Modbus address map (1:1 with Guro_Mainboard Gateway modbus_ir_map v1.3).
 Change only these constants when firmware mapping changes; UI logic stays the same.
-All addresses for a single slave (Mainboard only).
+All PDU addresses are 0-based unless noted as H2 4x/1x document addresses.
 
 운영 (메인보드 Slave ID):
-- 펌웨어는 USART1 Modbus Slave ID를 EEPROM(SystemConfig)의 slave_id로 사용합니다.
-- 이 상수는 PC UI SpinBox 초기값·문서 기준일 뿐, 보드가 9로 고정 응답하는 것은 아닙니다.
-- EEPROM 미설정(0xFF)/무효(1~247 밖) 시 펌웨어는 기본값 9로 동작합니다.
-- FC06 등으로 ID를 EEPROM에 저장한 뒤 재부팅하면 보드에 적용됩니다. PC는 상단 SpinBox를
-  그 ID와 맞춘 뒤 Disconnect → Connect 로 다시 연결해야 합니다.
+- 기본 EEPROM 권장값은 9이며, PC SpinBox는 이 값으로 시작합니다.
+- 현재 메인보드 빌드에서 MAINBOARD_UART1_SLAVE_ID_FORCE_LIT9=1 이면 UART1 슬레이브는
+  EEPROM과 무관하게 항상 unit 9로만 응답합니다(PC 테스트용). 0이면 EEPROM slave_id를 따릅니다.
+- EEPROM에 ID를 저장한 뒤 FORCE가 꺼진 빌드에서는 SpinBox를 보드 ID에 맞추고
+  Disconnect → Connect 로 재연결합니다.
 """
-# PC UI 기본 SpinBox 값 (펌웨어 미설정 시와 동일한 권장 시작값). 실제 보드 ID는 EEPROM 따름.
 MAINBOARD_SLAVE_ID_DEFAULT = 9
 
-# ---- Mainboard I/O (FC04/FC05) ----
-# FC04 read start=MAIN_DI_REG count=1 → low 8 bits = DI_01..DI_08
+# ---- Mainboard MAIN zone (FC04 addr 0..81, s_ir_main) ----
+# 1차 폴링: FC04 address=0, count=MAIN_FC04_DI_VBIT_COUNT(24) — status/DI/relay/env/VBIT
+MAIN_FC04_DI_VBIT_COUNT = 24
+# 전체 MAIN+PACKED 스냅샷 길이 (펌 MB_IR_MAIN_COUNT)
+MAIN_FC04_VENDOR_SNAPSHOT_COUNT = 82
+# PACKED 블록: FC04 address=24, count=MAIN_PACKED_FC04_COUNT — HPSB/LPSB alive/coils/AVG/PKPK/CUR
+MAIN_PACKED_FC04_START = 24
+MAIN_PACKED_FC04_COUNT = 58
+
+# 문서 4x 보조(ENV 존 2100..): DI/DO 비트맵 참조용. 실제 PC 툴 DI/릴레이 읽기는 FC04 addr=0 사용.
 MAIN_DI_REG = 2100
 MAIN_DI_COUNT = 8
 
-# FC05 write single coil MAIN_DO_REG → bits 0..3 = RELAY1_EN..RELAY4_EN
+# 릴레이: FC05 coil 0..3 = RELAY1..4 (0-based PDU)
 MAIN_DO_REG = 2101
 MAIN_DO_COUNT = 4
 MAIN_VBIT_COIL_BASE = 20
 MAIN_VBIT_COUNT = 4
-MAIN_FC04_DI_VBIT_COUNT = 24
 
-# ---- PC control GPIO (4x2120..2122) ----
-# FC05 write coil: value=1 → 100ms HIGH pulse, value=0 → LOW
-PC_ON_EN_REG = 2120
-PC_RESET_EN_REG = 2121
-# FC04 read 1 register: 0=OFF, 1=ON
-PC_LED_IN_REG = 2122
+# ---- PC 제어 (FC05 coil, MAIN zone — not 4x2120) ----
+PC_ON_EN_REG = 4
+PC_OFF_EN_REG = 5
+PC_RESET_EN_REG = 6
 
-# ---- MAIN Env (SHTC3) ----
-# FC04 read start=MAIN_ENV_REG count=2
-# Reg0: temp_c_x10 (signed)
-# Reg1: rh_x10 (unsigned)
+# ---- PC_LED_IN (FC04 MAIN 맵 reg10 = PDU addr 10; 보조: ENV 2122) ----
+PC_LED_IN_REG = 10
+
+# ---- ENV 존 (FC04 start=2100, 펌 s_ir_env; PC는 필요 시 이 구간 직접 읽기 가능) ----
 MAIN_ENV_REG = 2110
-MAIN_ENV_COUNT = 3  # + error_flags
+MAIN_ENV_COUNT = 3
 
-# ---- HPSB/LPSB (via Mainboard FC04) ----
-# UI sense 레이아웃(길이=40: 각 보드당 AVG[3],PKPK[3],CUR[3])은 유지하지만,
-# 통신은 FC04로만 수행됩니다.
-# Mainboard routing 복사영역 시작값:
-# - HPSB copy: 100..115 (count=16, Unified Rule v1.1)
-# - LPSB copies: 200..213, 300..313, 400..413 (각 count=14)
-SUB_SENSE_REG = 100
+# ---- HPSB/LPSB (MAIN PACKED, FC04 addr 24..) ----
+# UI sense 배열 길이 40: read_sub_sense()가 packed에서 재배열.
+SUB_SENSE_REG = MAIN_PACKED_FC04_START
 SUB_SENSE_COUNT = 40
 SUB_SENSE_BOARD_STRIDE = 9
-# FC02 discrete (1x): H2 dec 823..836 = start 822, count 14 (ONOFF_3..14 = HPSB CH1~3, LPSB1~3 CH1~3)
-SUB_COIL_STATUS_START = 822
+# FC04: 하위 보드 SSR/릴레이 피드백 복사 영역 시작(34), 레지스터 12개 읽기
+SUB_COIL_STATUS_START = 34
+SUB_COIL_STATUS_FC04_COUNT = 12
+# FC02 discrete: HPSB/LPSB ON/OFF 표시(1x0823..) — 펌 H2Tech 경로 유지 시 PDU 822.., 길이 14
 SUB_COIL_STATUS_COUNT = 14
-# FC02 discrete: H2 dec 869..880 = start 868, count 12 (ALM_1..12)
 SUB_ALARM_START = 868
 SUB_ALARM_COUNT = 12
-# FC05 891~897 (구 VB/문열림 1x0892~0898): 메인보드 펌웨어에서 맵 제거 → PC 도구에서도 미사용.
 SUB_VB_COIL_BASE = 891
 SUB_VB_COIL_COUNT = 0
-# Unified Rule:
-# - Mainboard local relay control: FC05 coil0..3 (0-based)
-# - Downstream(HPSB/LPSB) relay/SSR control via Mainboard routing: use H2Tech mapped coil addresses.
-#   H2Map: h2_dec = FC05_addr + 1
-#   HPSB:  FC05 addr 898..900 → h2_dec 899..901 → HPSB coil 0..2 (RELAY1..3)
-#   LPSB2: FC05 addr 901..903 → h2_dec 902..904 → LPSB1(slave=2) coil 0..2 (SSR1..3)
-#   LPSB4: FC05 addr 904..906 → h2_dec 905..907 → LPSB2(slave=4) coil 0..2
-#   LPSB8: FC05 addr 907..909 → h2_dec 908..910 → LPSB3(slave=8) coil 0..2
-# UI는 HPSB 채널을 3개만 표시(0..2)하므로 SUB_HPSB_COIL_COUNT는 3으로 둡니다.
 SUB_HPSB_COIL_BASE = 898
 SUB_HPSB_COIL_COUNT = 3
-SUB_LPSB_COIL_BASE = 901   # FC05 addr 901..909 = LPSB2/4/8(=slave 2/4/8) SSR1..3
-SUB_LPSB_COIL_COUNT = 9    # 901..903=slave2, 904..906=slave4, 907..909=slave8
-# error_flags (FC03 2112): bit0=AGG_ERR_COMM_HPSB, bit1=AGG_ERR_COMM_LPSB
+SUB_LPSB_COIL_BASE = 901
+SUB_LPSB_COIL_COUNT = 9
+# ENV 존 FC04 addr 2112 (s_ir_env[12]) = error_flags; MAIN 블록 reg1과 동일 값
 ERROR_FLAGS_REG = 2112
 
-# ---- NVM 진단 (FC04 start=4000, count=39) ----
-# regs[offset] 기준 (start=4000이므로 실제 addr = 4000 + offset)
-NVM_DIAG_REG_START   = 4000   # FC04 시작 주소
-NVM_DIAG_REG_COUNT   = 39     # 4000..4038
-NVM_DIAG_LOADED      = 4032   # g_loaded: 1=EEPROM load 성공
-NVM_DIAG_DIRTY       = 4033   # eeprom_dirty: 0=동기화, 1=EEPROM 미반영(Save 실패)
-NVM_DIAG_SEQUENCE    = 4034   # 저장 횟수 (Save OK 마다 +1)
+# ---- NVM / DIAG (FC04 start=4000, count=40, addr 4000..4039) ----
+NVM_DIAG_REG_START = 4000
+NVM_DIAG_REG_COUNT = 40
+NVM_DIAG_LOADED = 4032
+NVM_DIAG_DIRTY = 4033
+NVM_DIAG_SEQUENCE = 4034
 NVM_DIAG_LAST_SAVE_RESULT = 4035
 NVM_DIAG_LAST_LOAD_RESULT = 4036
-NVM_DIAG_RESTORE_TRY_MASK = 4037   # 복원 시도(1패스) 완료
-NVM_DIAG_RESTORE_OK_MASK = 4038    # InputReg 피드백으로 want 일치 확인
-NVM_DIAG_RESTORE_DONE_MASK = 4037  # RESTORE_TRY_MASK 와 동일(하위 호환)
+NVM_DIAG_RESTORE_TRY_MASK = 4037
+NVM_DIAG_RESTORE_OK_MASK = 4038
+NVM_DIAG_FW_MARKER_FC04 = 4039
 
-# ---- Mainboard RTC (FC04/FC16) ----
-# 4x0891..0897 -> PDU 890..896
+# ---- Mainboard RTC (FC04/FC16 PDU 890..896) ----
 MAIN_RTC_REG_START = 890
 MAIN_RTC_REG_COUNT = 7
 
 
 # ---- H2Tech 문서 주소(1x/4x) -> Modbus PDU 0-based offset 변환 ----
-# 문서 표기 예: 1x0821, 1x0892 / 실제 요청은 address=0-based
 DOC1X_DI_BASE = 821
 DOC1X_COIL_BASE = 892
 DOC4X_BASE = 2000

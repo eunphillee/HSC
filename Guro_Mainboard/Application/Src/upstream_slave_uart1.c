@@ -14,24 +14,31 @@
 #include <string.h>
 #include <stdio.h>
 
-#define UART1_TX_TC_TIMEOUT_MS  50
+#define UART1_TX_TC_TIMEOUT_MS      80
+#define UART1_TX_TIMEOUT_MS         400
+#define UART1_RESP_PDU_MAX_BYTES    256
+#define UART1_DE_PRE_TX_SETTLE_MS   1
+#define UART1_DE_POST_TC_HOLD_MS    2
 
-/* Slave ID: 부팅 시 EEPROM(SystemConfig)에서 읽어 적용.
- * EEPROM 미로드 / 범위(1~247) 밖 / 0xFF → 기본값 9 사용. */
+/* Slave ID: 기본은 EEPROM(SystemConfig). MAINBOARD_UART1_SLAVE_ID_FORCE_LIT9=1이면 항상 9. */
 static inline uint8_t get_slave_id(void)
 {
+#if MAINBOARD_UART1_SLAVE_ID_FORCE_LIT9
+    return 9u;
+#else
     const system_config_t *cfg = SystemConfig_Get();
     if (!cfg) return 9u;
     uint8_t id = cfg->slave_id;
     if (id < SYSTEM_CONFIG_SLAVE_ID_MIN || id > SYSTEM_CONFIG_SLAVE_ID_MAX)
         return 9u;
     return id;
+#endif
 }
 #define RX_BUF_SIZE        64
 #define RING_SIZE          256
 #define FRAME_END_MS       4
 #define TX_GUARD_MS        2
-#define RESP_BUF_SIZE      (1 + 128 + 2)
+#define RESP_BUF_SIZE      (1 + UART1_RESP_PDU_MAX_BYTES + 2)
 #define LOG_INTERVAL_MS    1000u
 #define BOARD_TX_0XAA_INTERVAL_MS  500u  /* 보드→PC 0xAA 주기 송신 (BOARD_TX_0XAA_ENABLE=1일 때만) */
 #define TX_RESP_GUARD_MS   150u   /* Modbus 응답 송신 후 이 시간(ms) 동안 0xAA 송신 금지 */
@@ -173,8 +180,9 @@ __attribute__((weak)) void UpstreamSlaveUart1_LogTxResponse(const uint8_t *frame
 
 static void process_modbus_frame(const uint8_t *frame, size_t frame_len, const aggregated_status_t *agg)
 {
-	/* FC03 addr=2000 count=40 → PDU 필요 길이 = 1(FC)+1(byte count)+80(data)=82B */
-	static uint8_t resp_pdu[128];
+	/* Large FC04/FC03 responses must fit a single RTU frame.
+	 * FC04 count=82 needs PDU 166B, so keep generous headroom. */
+	static uint8_t resp_pdu[UART1_RESP_PDU_MAX_BYTES];
 	static uint8_t tx_frame[RESP_BUF_SIZE];
 	uint8_t fc = frame[1];
 	uint16_t start_addr = (uint16_t)((frame[2] << 8) | frame[3]);
@@ -245,8 +253,14 @@ static void process_modbus_frame(const uint8_t *frame, size_t frame_len, const a
 		uart1_debug_log_tx_resp_len(tx_len);
 		uart1_debug_log_de_tx();
 		set_de_tx();
-		/* 응답 길이(FC04 diag 32regs 등)가 길면 100ms timeout이 타이트할 수 있어 여유를 둔다. */
-		(void)HAL_UART_Transmit(&huart1, tx_frame, tx_len, 200);
+		/* Give the MAX3485 direction pin a tiny settle window before the first
+		 * UART bit leaves the MCU. Long FC04 responses were clean only up to
+		 * ~30 regs in field tests; after that, start-of-frame margin became
+		 * a more likely culprit than end-of-frame hold. */
+		if (UART1_DE_PRE_TX_SETTLE_MS > 0)
+			HAL_Delay(UART1_DE_PRE_TX_SETTLE_MS);
+		/* Long RTU responses (e.g. FC04 82 regs) need extra transmit budget at 9600 baud. */
+		(void)HAL_UART_Transmit(&huart1, tx_frame, tx_len, UART1_TX_TIMEOUT_MS);
 		/* 마지막 바이트가 나갈 때까지 대기 후 DE → RX (응답 잘림/No Response 방지) */
 		{
 			uint32_t start = HAL_GetTick();
@@ -255,6 +269,11 @@ static void process_modbus_frame(const uint8_t *frame, size_t frame_len, const a
 					break;
 			}
 		}
+		/* Keep DE asserted a little longer after TC.
+		 * On the actual MAX3485 line, dropping DE immediately after TC was
+		 * observed to clip the tail of longer frames (CRC/stop bits). */
+		if (UART1_DE_POST_TC_HOLD_MS > 0)
+			HAL_Delay(UART1_DE_POST_TC_HOLD_MS);
 		uart1_debug_log_de_rx();
 		set_de_rx();
 		if (TX_GUARD_MS > 0)

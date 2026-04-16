@@ -57,7 +57,6 @@ void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_USART1_UART_Init(void);
 static void MX_ADC_Init(void);
-static void MX_TIM3_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -66,24 +65,6 @@ static void MX_TIM3_Init(void);
 /* USER CODE BEGIN 0 */
 
 /* USER CODE END 0 */
-
-/* USER CODE BEGIN 4 */
-void HAL_ADC_ConvHalfCpltCallback(ADC_HandleTypeDef *hadc_)
-{
-  if (hadc_ == &hadc)
-  {
-    ACS712_RMS_OnDmaBlockReady(0);
-  }
-}
-
-void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc_)
-{
-  if (hadc_ == &hadc)
-  {
-    ACS712_RMS_OnDmaBlockReady(1);
-  }
-}
-/* USER CODE END 4 */
 
 /**
   * @brief  The application entry point.
@@ -116,7 +97,6 @@ int main(void)
   MX_GPIO_Init();
   MX_USART1_UART_Init();
   MX_ADC_Init();
-  MX_TIM3_Init();
   /* USER CODE BEGIN 2 */
   if (HAL_ADCEx_Calibration_Start(&hadc) != HAL_OK)
   {
@@ -160,21 +140,6 @@ int main(void)
     }
   }
   /* USER CODE END 3 */
-}
-
-static void MX_TIM3_Init(void)
-{
-  /* TIM3 TRGO @ ~4kHz (register-level init; HAL TIM driver not included in this project)
-   * 48MHz/(PSC+1)=1MHz with PSC=47, then ARR=249 → 4000Hz update.
-   * TRGO = update event (MMS=010).
-   */
-  __HAL_RCC_TIM3_CLK_ENABLE();
-  TIM3->PSC = 47u;
-  TIM3->ARR = 249u;
-  TIM3->CR1 = 0u;
-  TIM3->EGR = TIM_EGR_UG;
-  TIM3->CR2 = (TIM3->CR2 & ~TIM_CR2_MMS) | TIM_CR2_MMS_1; /* MMS=010: update */
-  TIM3->CR1 |= TIM_CR1_CEN;
 }
 
 /**
@@ -253,10 +218,9 @@ static void MX_ADC_Init(void)
   hadc.Init.LowPowerAutoPowerOff = DISABLE;
   hadc.Init.ContinuousConvMode = DISABLE;
   hadc.Init.DiscontinuousConvMode = DISABLE;
-  /* RMS current measurement uses timer-triggered ADC + DMA */
-  hadc.Init.ExternalTrigConv = ADC_EXTERNALTRIGCONV_T3_TRGO;
-  hadc.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_RISING;
-  hadc.Init.DMAContinuousRequests = ENABLE;
+  hadc.Init.ExternalTrigConv = ADC_SOFTWARE_START;
+  hadc.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
+  hadc.Init.DMAContinuousRequests = DISABLE;
   hadc.Init.Overrun = ADC_OVR_DATA_PRESERVED;
   if (HAL_ADC_Init(&hadc) != HAL_OK)
   {
@@ -267,8 +231,7 @@ static void MX_ADC_Init(void)
   */
   sConfig.Channel = ADC_CHANNEL_3;
   sConfig.Rank = ADC_RANK_CHANNEL_NUMBER;
-  /* ACS712 출력은 소스 임피던스/RC 영향이 있어 충분한 sampling time 권장 */
-  sConfig.SamplingTime = ADC_SAMPLETIME_71CYCLES_5;
+  sConfig.SamplingTime = ADC_SAMPLETIME_1CYCLE_5;
   if (HAL_ADC_ConfigChannel(&hadc, &sConfig) != HAL_OK)
   {
     Error_Handler();
@@ -311,7 +274,7 @@ static void MX_USART1_UART_Init(void)
 
   /* USER CODE END USART1_Init 1 */
   huart1.Instance = USART1;
-  huart1.Init.BaudRate = 9600;
+  huart1.Init.BaudRate = 38400;
   huart1.Init.WordLength = UART_WORDLENGTH_8B;
   huart1.Init.StopBits = UART_STOPBITS_1;
   huart1.Init.Parity = UART_PARITY_NONE;
@@ -392,7 +355,21 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
-/* HAL_UART_RxCpltCallback: modbus_slave.c 에서 정의 (s_rx_byte 관리 포함) */
+void HAL_ADC_ConvHalfCpltCallback(ADC_HandleTypeDef *hadc_)
+{
+  if (hadc_ == &hadc)
+  {
+    ACS712_RMS_OnDmaBlockReady(0);
+  }
+}
+
+void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc_)
+{
+  if (hadc_ == &hadc)
+  {
+    ACS712_RMS_OnDmaBlockReady(1);
+  }
+}
 /* USER CODE END 4 */
 
 /**

@@ -88,9 +88,14 @@
 #define ENABLE_PC_TEST_AA_STREAM  0   /* 0 = PC 테스트 툴 Modbus 요청/응답 사용. 1 = 0xAA 전용(Modbus 무응답). */
 #endif
 
+/* UART1 Modbus RTU 슬레이브 주소: 0=EEPROM(SystemConfig) slave_id(무효/0xFF면 9). 1=항상 9 고정(수신·응답 모두 9). */
+#ifndef MAINBOARD_UART1_SLAVE_ID_FORCE_LIT9
+#define MAINBOARD_UART1_SLAVE_ID_FORCE_LIT9  1
+#endif
+
 /* 부팅 후 EEPROM 설정 로드/저장 결과를 UART1로 한 줄 로그 출력. 1=테스트 시 활성화 (CFG[A/B] seq= id= baud= valid=1) */
 #ifndef SYSTEM_CONFIG_BOOT_LOG
-#define SYSTEM_CONFIG_BOOT_LOG  0
+#define SYSTEM_CONFIG_BOOT_LOG  1
 #endif
 
 /* Save 시 값이 동일하면 EEPROM 쓰기 생략. 1=생략 시 "CFG unchanged, skip save" 로그 출력 옵션 사용 */

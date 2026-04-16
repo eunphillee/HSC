@@ -122,11 +122,10 @@ static void set_de_rx(void)
 
 #define DE_RX_GUARD_MS  1  /* Delay after TX before DE->RX so last byte leaves driver (PB12) */
 
-/* FC05 전송 전, 이전 FC04 poll 응답(예: HPSB 37바이트)이 버스에 아직 남아 있는 경우
- * RS485 버스 충돌 및 응답 오인을 방지하기 위해 버스 무음이 될 때까지 드레인한다.
- * max_ms=50: HPSB FC04 응답 최대 38ms + 여유. silence=4: 3.5 char-time(9600baud≈3.6ms) 초과. */
-#define FC05_STALE_RX_DRAIN_MS      50u
-#define FC05_STALE_RX_SILENCE_MS     4u
+/* FC05 전송 전, 이전 FC04 poll 응답이 버스에 남아 있으면 충돌/오인을 막기 위해
+ * 버스 무음을 기다린다. 38400 baud에서는 선로 점유가 짧아져 드레인 시간도 줄일 수 있다. */
+#define FC05_STALE_RX_DRAIN_MS      20u
+#define FC05_STALE_RX_SILENCE_MS     2u
 
 static void uart2_mb_log(const char *msg)
 {

@@ -76,7 +76,7 @@ def _format_sense_channel(sense: list, base: int, ch: int) -> str:
 # FC05 성공 후 EEPROM DIAG read 지연 (ms).
 # 낮추면 응답이 빠르지만 Modbus 버스 충돌 위험. 높이면 충돌은 줄지만 응답이 느림.
 DIAG_READ_DELAY_MS: int = 150
-# 자동 DIAG/NVM(4x4000..4038) 읽기 기본 동작 제어
+# 자동 DIAG/NVM(FC04 4000..4039) 읽기 기본 동작 제어
 # - False: 수동(문서 탭 버튼) 또는 필요 시 코드에서 명시적으로만 실행
 # - True : 기존 자동 진단 경로 활성
 AUTO_DIAG_AFTER_WRITE_OK: bool = False
@@ -183,6 +183,7 @@ class MainWindow(QMainWindow):
     request_read_env = pyqtSignal()
     request_read_raw = pyqtSignal()
     request_read_sub = pyqtSignal()           # HPSB/LPSB sense + coil + error_flags
+    request_read_sub_coil_status = pyqtSignal()  # FC04 34/12 coil snapshot only
     request_sub_pulse = pyqtSignal(int)       # LPSB VB pulse index 0..4
     request_write_sub_coil = pyqtSignal(int, bool)  # addr 898..909, value (FC05 to Mainboard)
     request_write_direct_hpsb_coil = pyqtSignal(int, bool)  # coil_index 0..2, value (HPSB 다이렉트, Slave 1)
@@ -221,6 +222,7 @@ class MainWindow(QMainWindow):
         self._last_req_route: str = "mainboard-routing"
         self._simple_hpsb_mode: bool = True
         self._hpsb_probe_inflight: bool = False
+        self._sub_coil_read_inflight: bool = False
         self._hpsb_probe_only: bool = False
         self._log_buffer: deque[str] = deque()
         self._client.set_request_logger(self._on_request_log)
@@ -339,6 +341,7 @@ class MainWindow(QMainWindow):
         self._post_write_verify_remaining: int = 0
         # 공통 로그 레이트리밋 상태 (key -> {"ts": float, "count": int})
         self._log_rl_state: dict[str, dict[str, float | int]] = {}
+        self._last_fc04_sub_ok_tag_log_m = -1e9
         self._last_sub_ok_sig: tuple | None = None
         self._last_hpsb_dump_sig: tuple | None = None
         # RTC read 10회 반복 타이머
@@ -372,6 +375,9 @@ class MainWindow(QMainWindow):
         self.request_read_env.connect(self._worker.on_request_read_env, Qt.ConnectionType.QueuedConnection)
         self.request_read_raw.connect(self._worker.on_request_read_raw, Qt.ConnectionType.QueuedConnection)
         self.request_read_sub.connect(self._worker.on_request_read_sub, Qt.ConnectionType.QueuedConnection)
+        self.request_read_sub_coil_status.connect(
+            self._worker.on_request_read_sub_coil_status, Qt.ConnectionType.QueuedConnection
+        )
         self.request_sub_pulse.connect(self._worker.on_request_sub_pulse, Qt.ConnectionType.QueuedConnection)
         self.request_write_sub_coil.connect(self._worker.on_request_write_sub_coil, Qt.ConnectionType.QueuedConnection)
         self.request_write_direct_hpsb_coil.connect(self._worker.on_request_write_direct_hpsb_coil, Qt.ConnectionType.QueuedConnection)
@@ -381,6 +387,7 @@ class MainWindow(QMainWindow):
         self._worker.di_result.connect(self._on_di_result)
         self._worker.sniff_result.connect(self._on_sniff_result)
         self._worker.sub_data_result.connect(self._on_sub_data_result)
+        self._worker.sub_coil_status_result.connect(self._on_sub_coil_status_result)
         self._worker.pc_led_result.connect(self._on_pc_led_result)
         self._worker.env_result.connect(self._on_env_result)
         self._worker.write_result.connect(self._on_write_result)
@@ -644,6 +651,14 @@ class MainWindow(QMainWindow):
         self._chk_auto_poll = QCheckBox("Auto poll (2s)")
         self._chk_auto_poll.stateChanged.connect(self._on_auto_poll_changed)
         lay_ctrl.addWidget(self._chk_auto_poll)
+        self._chk_light_bus = QCheckBox("Light bus (FC04 34/12, coils only)")
+        self._chk_light_bus.setChecked(True)
+        self._chk_light_bus.setToolTip(
+            "Post-write verify, Auto poll refresh, LPSB board switch, and FC05-fail read-back use "
+            "FC04 addr=34 count=12 instead of full 0/24 + 24/58. "
+            "Use Read once (HPSB/LPSB) to refresh AVG/PKPK/CUR."
+        )
+        lay_ctrl.addWidget(self._chk_light_bus)
         right_layout.addWidget(gb_ctrl)
 
         gb_hpsb = QGroupBox("HPSB (Slave 1)")
@@ -1327,6 +1342,14 @@ class MainWindow(QMainWindow):
         else:
             self._log_rl_state[key] = {"ts": last_ts, "count": rep + 1}
 
+    def _log_fc04_sub_ok_tag_throttled(self) -> None:
+        """FC04 sub 성공 log_tagged: 주기 폴링 시 동일 로그 연속 출력 방지(최소 300ms 간격)."""
+        now_m = time.monotonic()
+        if (now_m - getattr(self, "_last_fc04_sub_ok_tag_log_m", -1e9)) < 0.3:
+            return
+        self._last_fc04_sub_ok_tag_log_m = now_m
+        self._log.log_tagged("[HPSB][LPSB2][LPSB4][LPSB8]", "FC04", SUB_SENSE_REG, "sub", "OK")
+
     def _flush_log_buffer(self):
         if not self._log_buffer:
             return
@@ -1626,6 +1649,7 @@ class MainWindow(QMainWindow):
         if self._pending_hpsb_ui_write is not None:
             self._rollback_hpsb_write_ui()
         self._hpsb_probe_inflight = False
+        self._sub_coil_read_inflight = False
         self._hpsb_probe_ok = False
         self._pending_hpsb_write = None
         self._set_op_state("IDLE")
@@ -1762,9 +1786,15 @@ class MainWindow(QMainWindow):
             return
         if getattr(self, "_hpsb_probe_inflight", False):
             return
-        self._hpsb_probe_inflight = True
+        if getattr(self, "_sub_coil_read_inflight", False):
+            return
         self._post_write_verify_remaining -= 1
-        self.request_read_sub.emit()
+        if self._light_bus_reads():
+            self._sub_coil_read_inflight = True
+            self.request_read_sub_coil_status.emit()
+        else:
+            self._hpsb_probe_inflight = True
+            self.request_read_sub.emit()
 
     # ---- RTC 핸들러 ----
     def _on_read_rtc_btn(self):
@@ -2000,7 +2030,11 @@ class MainWindow(QMainWindow):
                     self._pending_lpsb_verify = {"idx": idx, "prev": prev, "target": target, "sel": sel}
                     self._log.log_info(f"[UI] LPSB SSR{idx + 1} write fail -> read-back verify")
                 self._pending_lpsb_ui_write = None
-                if not getattr(self, "_hpsb_probe_inflight", False):
+                if self._light_bus_reads():
+                    if not self._sub_coil_read_inflight:
+                        self._sub_coil_read_inflight = True
+                        self.request_read_sub_coil_status.emit()
+                elif not getattr(self, "_hpsb_probe_inflight", False):
                     self._hpsb_probe_inflight = True
                     self.request_read_sub.emit()
             msg = err or "No response/timeout"
@@ -2149,9 +2183,14 @@ class MainWindow(QMainWindow):
         self._update_lpsb_ssr_button_state()
         self._log_lpsb_selection_state("lpsb_select")
         # 요구사항: 탭/보드 선택 시 상세 데이터 1회 갱신
-        if self._client.connected and self._direct_mode == "none" and not getattr(self, "_hpsb_probe_inflight", False):
-            self._hpsb_probe_inflight = True
-            self.request_read_sub.emit()
+        if self._client.connected and self._direct_mode == "none":
+            if self._light_bus_reads():
+                if not self._sub_coil_read_inflight and not getattr(self, "_hpsb_probe_inflight", False):
+                    self._sub_coil_read_inflight = True
+                    self.request_read_sub_coil_status.emit()
+            elif not getattr(self, "_hpsb_probe_inflight", False):
+                self._hpsb_probe_inflight = True
+                self.request_read_sub.emit()
 
     def _on_lpsb_ssr_click(self, ssr_idx: int):
         """LPSB SSR 버튼: 선택된 LPSB2/3/4 보드에 대해 Mainboard routing FC05로 토글 제어."""
@@ -2471,7 +2510,11 @@ class MainWindow(QMainWindow):
         # inflight 플래그로 막히지 않도록 직접 emit — 이전 read가 진행 중이면 skip해도 됨.
         if self._direct_mode == "none" and self._sub_auto_poll:
             self._auto_poll_adc_log_pending = True
-            if not self._hpsb_probe_inflight:
+            if self._light_bus_reads():
+                if not self._hpsb_probe_inflight and not self._sub_coil_read_inflight:
+                    self._sub_coil_read_inflight = True
+                    self.request_read_sub_coil_status.emit()
+            elif not self._hpsb_probe_inflight:
                 self._hpsb_probe_inflight = True
                 self.request_read_sub.emit()
             return
@@ -2525,6 +2568,98 @@ class MainWindow(QMainWindow):
             f"LPSB4={'Y' if (mask_ok & 0x4) else 'N'}, "
             f"LPSB8={'Y' if (mask_ok & 0x8) else 'N'})"
         )
+
+    def _light_bus_reads(self) -> bool:
+        try:
+            return bool(self._chk_light_bus.isChecked())
+        except Exception:
+            return False
+
+    def _apply_sub_coils_ui_only(self, coils: list) -> None:
+        """Apply FC04 34/12 coils only; sense labels use cached _last_sense (zeros if none)."""
+        cl = list(coils) if coils else []
+        cl = (cl + [False] * 14)[:14]
+        sense = self._last_sense
+        if sense is None or len(sense) < SUB_SENSE_COUNT:
+            sense = [0] * SUB_SENSE_COUNT
+
+        pending_idx = -1
+        if self._pending_hpsb_ui_write is not None:
+            pending_idx = int(self._pending_hpsb_ui_write.get("idx", -1))
+        monitoring_active = (getattr(self, "_op_state", "IDLE") == "OUTPUT_MONITORING")
+        for i in range(3):
+            on = bool(cl[i])
+            if i != pending_idx:
+                self._hpsb_strips[i].set_state(on)
+                if not monitoring_active:
+                    self._hpsb_btns[i].setChecked(on)
+
+        sel = getattr(self, "_selected_lpsb_index", 0)
+        base_s = _lpsb_sense_base_from_selection(sel)
+        base_c = 3 + sel * 3
+        for i in range(3):
+            on = base_c + i < len(cl) and bool(cl[base_c + i])
+            self._lpsb_ssr_state[i] = bool(on)
+            self._lpsb_strips[i].set_state(on)
+            self._lpsb_ssr_btns[i].setChecked(on)
+            self._lpsb_current_labels[i].setText(_format_sense_channel(sense, base_s, i))
+
+        if self._pending_lpsb_verify is not None:
+            try:
+                v_idx = int(self._pending_lpsb_verify.get("idx", -1))
+                v_sel = int(self._pending_lpsb_verify.get("sel", sel))
+                v_target = bool(self._pending_lpsb_verify.get("target", False))
+                v_prev = bool(self._pending_lpsb_verify.get("prev", False))
+                v_base_c = 3 + v_sel * 3
+                actual = bool(v_base_c + v_idx < len(cl) and cl[v_base_c + v_idx])
+                if actual == v_target:
+                    self._log.log_info(f"[UI] LPSB SSR{v_idx + 1} write verified by read-back -> {'ON' if actual else 'OFF'}")
+                    if v_target:
+                        self._start_output_monitoring("lpsb")
+                else:
+                    self._lpsb_ssr_state[v_idx] = v_prev
+                    if 0 <= v_idx < len(self._lpsb_ssr_btns):
+                        self._lpsb_ssr_btns[v_idx].blockSignals(True)
+                        self._lpsb_ssr_btns[v_idx].setChecked(v_prev)
+                        self._lpsb_ssr_btns[v_idx].blockSignals(False)
+                        self._lpsb_strips[v_idx].set_state(v_prev)
+                    self._log.log_info(f"[UI] LPSB SSR{v_idx + 1} write verify mismatch -> rollback")
+            except Exception:
+                pass
+            self._pending_lpsb_verify = None
+
+        try:
+            for _bi in range(3):
+                _bc = 3 + _bi * 3
+                for _si in range(3):
+                    _on = (_bc + _si < len(cl)) and bool(cl[_bc + _si])
+                    self._lpsb_ssr_state_all[_bi][_si] = _on
+        except Exception:
+            pass
+
+        self._last_coils = cl
+        try:
+            self._lpsb_adc_state["avg"] = [int(sense[base_s + 0]), int(sense[base_s + 1]), int(sense[base_s + 2])]
+            self._lpsb_adc_state["pkpk"] = [int(sense[base_s + 3]), int(sense[base_s + 4]), int(sense[base_s + 5])]
+            self._lpsb_adc_state["cur"] = [int(sense[base_s + 6]), int(sense[base_s + 7]), int(sense[base_s + 8])]
+        except Exception:
+            pass
+
+    def _on_sub_coil_status_result(self, ok: bool, coils: list | None, err: str | None):
+        self._sub_coil_read_inflight = False
+        emit_adc_log = bool(getattr(self, "_auto_poll_adc_log_pending", False))
+        self._auto_poll_adc_log_pending = False
+        if not ok:
+            if err:
+                self._log_info_rl("sub_coil_read_fail", f"[SUB] FC04 34/12 coil status fail: {err}", 3.0)
+            return
+        cl = list(coils) if coils else []
+        cl = (cl + [False] * 14)[:14]
+        self._apply_sub_coils_ui_only(cl)
+        if self._op_state == "OUTPUT_MONITORING":
+            self._monitor_retry_count = 0
+        if self._sub_auto_poll and self._direct_mode == "none" and emit_adc_log:
+            self._log_current_line_from_last_sense()
 
     def _on_sub_data_result(self, ok: bool, sense: list | None, coils: list | None, flags: int | None, raw: dict | None, err: str | None):
         AGG_ERR_COMM_HPSB = 1
@@ -2589,7 +2724,7 @@ class MainWindow(QMainWindow):
         # 성공 OK 로그: OUTPUT_MONITORING 중 또는 통합 poll 자동 주기에서는 억제
         # (ADC 로그는 _auto_poll_adc_log_pending 플래그가 True일 때만 별도 출력됨)
         if self._op_state not in ("OUTPUT_MONITORING",) and not getattr(self, "_in_unified_mb_poll", False):
-            self._log.log_tagged("[HPSB][LPSB2][LPSB4][LPSB8]", "FC04", SUB_SENSE_REG, "sub", "OK")
+            self._log_fc04_sub_ok_tag_throttled()
         sense = sense or [0] * SUB_SENSE_COUNT
         coils = coils or [False] * 14
         flags = flags if flags is not None else 0
@@ -2863,7 +2998,7 @@ class MainWindow(QMainWindow):
             )
             if sub_sig != self._last_sub_ok_sig:
                 self._last_sub_ok_sig = sub_sig
-                self._log.log_tagged("[HPSB][LPSB2][LPSB4][LPSB8]", "FC04", SUB_SENSE_REG, "sub", "OK")
+                self._log_fc04_sub_ok_tag_throttled()
         # READ_ONCE (Read once 버튼) 경로: 완료 후 IDLE 복귀
         if self._op_state == "READ_ONCE":
             self._set_op_state("IDLE")

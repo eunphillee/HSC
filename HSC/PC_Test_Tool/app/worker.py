@@ -17,6 +17,8 @@ class MainboardWorker(QObject):
     sniff_result = pyqtSignal(list)                # 연결 직후 2초 수신 테스트 결과 (바이트 리스트)
     # HPSB/LPSB: ok, sense[40], coil_bits[14], error_flags u16, raw_blocks(dict) or None, err
     sub_data_result = pyqtSignal(bool, object, object, object, object, object)
+    # FC04 addr=34 count=12 — sub coil snapshot only (lighter than full 0/24 + 24/58)
+    sub_coil_status_result = pyqtSignal(bool, object, object)  # ok, coils[14] or None, err
     # Direct LPSB: FC04 start=0 count=14 (Unified Rule v1.2 LPSB map reg0..13)
     lpsb_adc_result = pyqtSignal(bool, object, object)  # ok, regs[14] or None, err
     # Direct HPSB: FC04 start=0 count=16 (Unified Rule v1.1 HPSB map reg0..15)
@@ -132,6 +134,17 @@ class MainboardWorker(QObject):
             return
         buf = self._client.sniff_raw(timeout_sec=2.0)
         self.sniff_result.emit(buf)
+
+    def on_request_read_sub_coil_status(self):
+        """FC04 34/12: HPSB/LPSB coil bits only (lower bus load than read_full_state)."""
+        if not self._client.connected:
+            self.sub_coil_status_result.emit(False, None, "Not connected")
+            return
+        ok, coils, err = self._client.read_sub_coil_status()
+        if not ok:
+            self.sub_coil_status_result.emit(False, None, err or "read fail")
+            return
+        self.sub_coil_status_result.emit(True, coils, None)
 
     def on_request_read_sub(self):
         """

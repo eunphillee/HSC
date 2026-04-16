@@ -15,6 +15,10 @@
 #include <stdio.h>
 #define PULSE_MS_DOOR  300u
 #define PULSE_MS_PC_IO 500u
+#define SUBCOIL_PENDING_RETRY_COUNT      5u
+#define SUBCOIL_PENDING_RETRY_BACKOFF_MS 30u
+#define SUBCOIL_REQUEST_COALESCE_MS      40u
+#define SUBCOIL_MIN_TX_GAP_MS            80u
 
 static uint8_t door1_active;
 static uint32_t door1_tick;
@@ -29,16 +33,35 @@ static volatile uint8_t s_downstream_write_fail;
 
 typedef struct {
     uint8_t valid;
-    uint8_t slave_id;
-    uint16_t coil_index;
     uint8_t value;
     uint8_t retries_left;
     uint32_t next_try_tick;
 } PendingSubCoilWrite_t;
 
-static volatile PendingSubCoilWrite_t s_pending_subcoil_write;
+static volatile PendingSubCoilWrite_t s_pending_subcoil_write[4][MODBUS_COIL_COUNT];
+static uint32_t s_subcoil_last_issue_tick[4][MODBUS_COIL_COUNT];
+static uint8_t s_pending_subcoil_rr_index;
 
 static const char *s_write_sub_reason = "UNKNOWN";
+
+static int subcoil_slave_to_slot(uint8_t slave_id)
+{
+    switch (slave_id) {
+    case 1u: return 0;
+    case 2u: return 1;
+    case 4u: return 2;
+    case 8u: return 3;
+    default: return -1;
+    }
+}
+
+static uint8_t subcoil_slot_to_slave(uint8_t slot)
+{
+    static const uint8_t s_slot_to_slave[] = { 1u, 2u, 4u, 8u };
+    if (slot >= (uint8_t)(sizeof(s_slot_to_slave) / sizeof(s_slot_to_slave[0])))
+        return 0u;
+    return s_slot_to_slave[slot];
+}
 
 void Gateway_WriteSubCoil_SetNextReason(const char *reason)
 {
@@ -125,27 +148,46 @@ void Gateway_Action_Update(void)
         pc_reset_en_pulse_active = 0;
     }
 
-    /* Async sub-board coil write (non-blocking FC05 response path) */
-    if (s_pending_subcoil_write.valid) {
-        if ((int32_t)(now - s_pending_subcoil_write.next_try_tick) >= 0) {
-            uint8_t sid = s_pending_subcoil_write.slave_id;
-            uint16_t coil = s_pending_subcoil_write.coil_index;
-            uint8_t val = s_pending_subcoil_write.value;
+    /* Async sub-board coil write:
+     * keep the latest target per slave/coil and send only one when UART2 is idle.
+     * This prevents FC05 button mashing from turning into a UART2 write storm. */
+    if (!ModbusMaster_IsBusy()) {
+        uint8_t total_slots = (uint8_t)(4u * MODBUS_COIL_COUNT);
+        for (uint8_t tries = 0u; tries < total_slots; ++tries) {
+            uint8_t flat_index = (uint8_t)((s_pending_subcoil_rr_index + tries) % total_slots);
+            uint8_t sid_slot = (uint8_t)(flat_index / MODBUS_COIL_COUNT);
+            uint8_t coil = (uint8_t)(flat_index % MODBUS_COIL_COUNT);
+            volatile PendingSubCoilWrite_t *pending = &s_pending_subcoil_write[sid_slot][coil];
+            uint8_t sid;
+            int ret;
+
+            if (!pending->valid) continue;
+            if ((int32_t)(now - pending->next_try_tick) < 0) continue;
+
+            sid = subcoil_slot_to_slave(sid_slot);
+            if (sid == 0u) {
+                pending->valid = 0u;
+                continue;
+            }
+
             Gateway_WriteSubCoil_SetNextReason("PENDING");
-            int ret = Gateway_Action_WriteSubCoil(sid, coil, val);
+            s_subcoil_last_issue_tick[sid_slot][coil] = now;
+            ret = Gateway_Action_WriteSubCoil(sid, coil, pending->value);
             if (ret == 0) {
-                s_pending_subcoil_write.valid = 0u;
+                pending->valid = 0u;
             } else {
-                if (s_pending_subcoil_write.retries_left > 0u)
-                    s_pending_subcoil_write.retries_left--;
-                if (s_pending_subcoil_write.retries_left == 0u) {
-                    s_pending_subcoil_write.valid = 0u;
+                if (pending->retries_left > 0u)
+                    pending->retries_left--;
+                if (pending->retries_left == 0u) {
+                    pending->valid = 0u;
                     /* sticky fail flag is set inside Gateway_Action_WriteSubCoil() */
                 } else {
                     /* small backoff to avoid bus collision / allow subboard settle */
-                    s_pending_subcoil_write.next_try_tick = now + 30u;
+                    pending->next_try_tick = now + SUBCOIL_PENDING_RETRY_BACKOFF_MS;
                 }
             }
+            s_pending_subcoil_rr_index = (uint8_t)((flat_index + 1u) % total_slots);
+            break;
         }
     }
 }
@@ -209,15 +251,34 @@ int Gateway_Action_WriteSubCoil(uint8_t slave_id, uint16_t coil_index, uint8_t v
 
 int Gateway_Action_RequestSubCoilWrite(uint8_t slave_id, uint16_t coil_index, uint8_t value)
 {
-    /* Single-slot queue but overwrite allowed: 최신 목표 상태를 우선 적용 */
-    if (slave_id != 1 && slave_id != 2 && slave_id != 4 && slave_id != 8) return -1;
+    /* Queue latest target per slave/coil so PC FC05 storms collapse into a small
+     * number of actual UART2 writes. */
+    int sid_slot = subcoil_slave_to_slot(slave_id);
+    volatile PendingSubCoilWrite_t *pending;
+    uint32_t now;
+    uint32_t ready_tick;
+    uint32_t earliest_tick;
+
+    if (sid_slot < 0) return -1;
     if (coil_index >= MODBUS_COIL_COUNT) return -1;
 
-    s_pending_subcoil_write.slave_id = slave_id;
-    s_pending_subcoil_write.coil_index = coil_index;
-    s_pending_subcoil_write.value = value ? 1u : 0u;
-    s_pending_subcoil_write.retries_left = 5u;
-    s_pending_subcoil_write.next_try_tick = HAL_GetTick();
-    s_pending_subcoil_write.valid = 1u;
+    pending = &s_pending_subcoil_write[sid_slot][coil_index];
+    now = HAL_GetTick();
+    ready_tick = now + SUBCOIL_REQUEST_COALESCE_MS;
+    earliest_tick = s_subcoil_last_issue_tick[sid_slot][coil_index] + SUBCOIL_MIN_TX_GAP_MS;
+    if (s_subcoil_last_issue_tick[sid_slot][coil_index] != 0u &&
+        (int32_t)(ready_tick - earliest_tick) < 0) {
+        ready_tick = earliest_tick;
+    }
+
+    if (pending->valid && pending->value == (value ? 1u : 0u)) {
+        /* Same target/value is already queued; keep the earlier send time. */
+        return 0;
+    }
+
+    pending->value = value ? 1u : 0u;
+    pending->retries_left = SUBCOIL_PENDING_RETRY_COUNT;
+    pending->next_try_tick = ready_tick;
+    pending->valid = 1u;
     return 0;
 }

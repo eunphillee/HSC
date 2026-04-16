@@ -41,18 +41,17 @@ def build_fc05_rtu_frame(slave_id: int, coil_addr: int, value: bool) -> bytes:
 
 from .address_map import (
     MAINBOARD_SLAVE_ID_DEFAULT,
-    MAIN_DI_REG,
     MAIN_DI_COUNT,
-    MAIN_DO_REG,
     MAIN_DO_COUNT,
+    MAIN_FC04_DI_VBIT_COUNT,
+    MAIN_PACKED_FC04_COUNT,
     PC_ON_EN_REG,
     PC_RESET_EN_REG,
     PC_LED_IN_REG,
-    MAIN_ENV_REG,
-    MAIN_ENV_COUNT,
     SUB_SENSE_REG,
     SUB_SENSE_COUNT,
     SUB_COIL_STATUS_START,
+    SUB_COIL_STATUS_FC04_COUNT,
     SUB_COIL_STATUS_COUNT,
     SUB_ALARM_START,
     SUB_ALARM_COUNT,
@@ -65,7 +64,6 @@ from .address_map import (
     ERROR_FLAGS_REG,
     MAIN_VBIT_COIL_BASE,
     MAIN_VBIT_COUNT,
-    MAIN_FC04_DI_VBIT_COUNT,
     MAIN_RTC_REG_START,
     MAIN_RTC_REG_COUNT,
 )
@@ -427,9 +425,9 @@ class ModbusClient:
                 return False, None, err or "Not connected"
             try:
                 if self._request_logger:
-                    self._request_logger(self._slave_id, "FC04", 10, 1)
+                    self._request_logger(self._slave_id, "FC04", PC_LED_IN_REG, 1)
                 rr = self._client.read_input_registers(
-                    address=10,
+                    address=PC_LED_IN_REG,
                     count=1,
                     unit=self._slave_id,
                 )
@@ -517,11 +515,11 @@ class ModbusClient:
 
     def write_pc_on_en(self, onoff: bool) -> tuple[bool, str | None]:
         """Unified Rule: Mainboard FC05 coil4 = PC_ON (value=True -> pulse)."""
-        return self.write_single_coil(4, onoff, unit=None)
+        return self.write_single_coil(PC_ON_EN_REG, onoff, unit=None)
 
     def write_pc_reset_en(self, onoff: bool) -> tuple[bool, str | None]:
         """Unified Rule: Mainboard FC05 coil6 = RESET (value=True -> pulse)."""
-        return self.write_single_coil(6, onoff, unit=None)
+        return self.write_single_coil(PC_RESET_EN_REG, onoff, unit=None)
 
     def read_sub_sense(self) -> tuple[bool, list[int] | None, str | None]:
         """Unified Rule v1.3: FC04 addr=24 count=58 (packed map) → sense array (SUB_SENSE_COUNT=40)."""
@@ -549,7 +547,7 @@ class ModbusClient:
                     out = (out + [0] * count)[:count]
                     return [x & 0xFFFF for x in out]
 
-                packed = rd(24, 58)   # packed[0] = addr 24, packed[57] = addr 81
+                packed = rd(SUB_SENSE_REG, MAIN_PACKED_FC04_COUNT)  # addr 24..81
                 # raw dump 보관 (lock 내부)
                 self._last_sub_raw = {"packed_24_81": list(packed)}
 
@@ -609,8 +607,8 @@ class ModbusClient:
 
                 # Coils 34..45: HPSB r0-2 at [0-2], LPSB2 s0-2 at [3-5],
                 #               LPSB4 s0-2 at [6-8], LPSB8 s0-2 at [9-11]
-                c = rd(34, 12)
-                coils = [False] * 14
+                c = rd(SUB_COIL_STATUS_START, SUB_COIL_STATUS_FC04_COUNT)
+                coils = [False] * SUB_COIL_STATUS_COUNT
                 coils[0]  = bool(c[0]);  coils[1]  = bool(c[1]);  coils[2]  = bool(c[2])   # HPSB
                 coils[3]  = bool(c[3]);  coils[4]  = bool(c[4]);  coils[5]  = bool(c[5])   # LPSB2
                 coils[6]  = bool(c[6]);  coils[7]  = bool(c[7]);  coils[8]  = bool(c[8])   # LPSB4
@@ -658,8 +656,8 @@ class ModbusClient:
 
             try:
                 state = {
-                    "main":   _rd(0,  24),
-                    "packed": _rd(24, 58),
+                    "main":   _rd(0, MAIN_FC04_DI_VBIT_COUNT),
+                    "packed": _rd(SUB_SENSE_REG, MAIN_PACKED_FC04_COUNT),
                 }
                 self._last_sub_raw = {"packed_24_81": list(state["packed"])}
                 return True, state, None

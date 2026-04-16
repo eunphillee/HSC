@@ -63,6 +63,35 @@
 
 /* USER CODE END PM */
 
+/* Private variables ---------------------------------------------------------*/
+I2C_HandleTypeDef hi2c1;
+I2C_HandleTypeDef hi2c3;
+
+RTC_HandleTypeDef hrtc;
+
+UART_HandleTypeDef huart1;
+UART_HandleTypeDef huart2;
+
+WWDG_HandleTypeDef hwwdg;
+
+/* USER CODE BEGIN PV */
+static aggregated_status_t aggregated_status;
+/* USER CODE END PV */
+
+/* Private function prototypes -----------------------------------------------*/
+void SystemClock_Config(void);
+static void MX_GPIO_Init(void);
+static void MX_WWDG_Init(void);
+static void MX_I2C1_Init(void);
+static void MX_I2C3_Init(void);
+static void MX_USART1_UART_Init(void);
+static void MX_USART2_UART_Init(void);
+static void MX_RTC_Init(void);
+/* USER CODE BEGIN PFP */
+
+/* USER CODE END PFP */
+
+/* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 /**
  * @brief EEPROM 단순 read/write 부팅 테스트.
@@ -96,165 +125,6 @@ __attribute__((unused)) static void Eeprom_RunBootTest(void)
                  (unsigned)EEPROM_BOOT_TEST_ADDR, pass ? "PASS" : "FAIL");
     if (n > 0) (void)HAL_UART_Transmit(&huart1, (uint8_t *)buf, (uint16_t)n, 100);
 }
-/* USER CODE END 0 */
-
-/* Private variables ---------------------------------------------------------*/
-I2C_HandleTypeDef hi2c1;
-I2C_HandleTypeDef hi2c3;
-
-RTC_HandleTypeDef hrtc;
-
-UART_HandleTypeDef huart1;
-UART_HandleTypeDef huart2;
-
-WWDG_HandleTypeDef hwwdg;
-
-/* USER CODE BEGIN PV */
-static aggregated_status_t aggregated_status;
-/* USER CODE END PV */
-
-/* Private function prototypes -----------------------------------------------*/
-void SystemClock_Config(void);
-static void MX_GPIO_Init(void);
-static void MX_WWDG_Init(void);
-static void MX_I2C1_Init(void);
-static void MX_I2C3_Init(void);
-static void MX_USART1_UART_Init(void);
-static void MX_USART2_UART_Init(void);
-static void MX_RTC_Init(void);
-/* USER CODE BEGIN PFP */
-
-/* USER CODE END PFP */
-
-/* Private user code ---------------------------------------------------------*/
-/* USER CODE BEGIN 0 */
-
-#if UART2_RS485_SUB_TXRX_TEST_ENABLE
-static void rs485_test_tx(void)
-{
-  static const char msg[] = "MB->SUB TEST\r\n";
-
-  /* DE=1: TX 모드, 전송 완료(TC) 대기 후 DE=0: RX 모드로 복귀 */
-  HAL_GPIO_WritePin(RS_485_DE_RE_GPIO_Port, RS_485_DE_RE_Pin, GPIO_PIN_SET);
-  (void)HAL_UART_Transmit(&huart2, (uint8_t *)msg, (uint16_t)(sizeof(msg) - 1u), 100);
-
-  uint32_t start = HAL_GetTick();
-  while (__HAL_UART_GET_FLAG(&huart2, UART_FLAG_TC) == RESET) {
-    if ((HAL_GetTick() - start) > 20u) {
-      break; /* TC 타임아웃: 혹시라도 UART가 멈추면 영구 block 방지 */
-    }
-  }
-  HAL_GPIO_WritePin(RS_485_DE_RE_GPIO_Port, RS_485_DE_RE_Pin, GPIO_PIN_RESET);
-}
-#endif
-
-#if MB_UART2_ASCII_BRIDGE_TEST
-/* OKOK\r\n 시퀀스를 스트림에서 안정적으로 탐지 */
-static uint8_t s_okok_window[6];
-static uint8_t s_okok_window_len;
-
-/* USART1(상위 RS485) 전송 시 DE 토글:
- * ascii bridge 모드는 Modbus slave 경로와 달리 DE 제어를 자동으로 하지 않으므로,
- * 여기서 직접 DE=TX / TC wait / DE=RX 순서를 강제한다. */
-static void ascii_bridge_uart1_rs485_set_tx(void)
-{
-#if RS485_DE_ACTIVE_HIGH
-  HAL_GPIO_WritePin(RS485_DE_GPIO_Port, RS485_DE_Pin, GPIO_PIN_SET);
-#else
-  HAL_GPIO_WritePin(RS485_DE_GPIO_Port, RS485_DE_Pin, GPIO_PIN_RESET);
-#endif
-}
-
-static void ascii_bridge_uart1_rs485_set_rx(void)
-{
-#if RS485_DE_ACTIVE_HIGH
-  HAL_GPIO_WritePin(RS485_DE_GPIO_Port, RS485_DE_Pin, GPIO_PIN_RESET);
-#else
-  HAL_GPIO_WritePin(RS485_DE_GPIO_Port, RS485_DE_Pin, GPIO_PIN_SET);
-#endif
-}
-
-static void ascii_bridge_log_uart1(const char *s)
-{
-  if (s == NULL) return;
-  ascii_bridge_uart1_rs485_set_tx();
-  (void)HAL_UART_Transmit(&huart1, (const uint8_t *)s, (uint16_t)strlen(s), 100);
-  /* TC까지 대기 후 RX로 복귀 (마지막 바이트 잘림 방지) */
-  {
-    uint32_t start = HAL_GetTick();
-    while (__HAL_UART_GET_FLAG(&huart1, UART_FLAG_TC) == RESET) {
-      if ((HAL_GetTick() - start) > 20u) {
-        break;
-      }
-    }
-  }
-  ascii_bridge_uart1_rs485_set_rx();
-}
-
-static void ascii_bridge_tick(void)
-{
-  uint8_t b;
-  while (HAL_UART_Receive(&huart2, &b, 1, 0) == HAL_OK) {
-    /* Sliding window detection: last 6 bytes == "OKOK\r\n" */
-    if (s_okok_window_len < 6u) {
-      s_okok_window[s_okok_window_len++] = b;
-    } else {
-      for (uint8_t i = 0; i < 5u; i++) s_okok_window[i] = s_okok_window[i + 1u];
-      s_okok_window[5] = b;
-    }
-
-    if (s_okok_window_len == 6u) {
-      static const uint8_t seq_okok[6] = { 'O', 'K', 'O', 'K', '\r', '\n' };
-      if (memcmp(s_okok_window, seq_okok, 6u) == 0) {
-        /* Exact payload match: 출력은 한 줄만 */
-        ascii_bridge_log_uart1("[HPSB->MB] OKOK\r\n");
-        s_okok_window_len = 0u; /* 1개 시퀀스당 1회 로그 */
-      }
-    }
-  }
-}
-#endif
-
-#if MB_UART1_TX_OK_STREAM_TEST
-static uint32_t s_mb_ok_last_tick;
-
-static void mb_uart1_rs485_set_tx(void)
-{
-#if RS485_DE_ACTIVE_HIGH
-  HAL_GPIO_WritePin(RS485_DE_GPIO_Port, RS485_DE_Pin, GPIO_PIN_SET);
-#else
-  HAL_GPIO_WritePin(RS485_DE_GPIO_Port, RS485_DE_Pin, GPIO_PIN_RESET);
-#endif
-}
-
-static void mb_uart1_rs485_set_rx(void)
-{
-#if RS485_DE_ACTIVE_HIGH
-  HAL_GPIO_WritePin(RS485_DE_GPIO_Port, RS485_DE_Pin, GPIO_PIN_RESET);
-#else
-  HAL_GPIO_WritePin(RS485_DE_GPIO_Port, RS485_DE_Pin, GPIO_PIN_SET);
-#endif
-}
-
-static void mb_uart1_send_mb_ok(void)
-{
-  static const char msg[] = "MB_OK\r\n";
-  const uint16_t len = (uint16_t)(sizeof(msg) - 1u); /* exclude trailing '\0' */
-
-  mb_uart1_rs485_set_tx();
-  (void)HAL_UART_Transmit(&huart1, (const uint8_t *)msg, len, 100);
-
-  /* TC까지 대기 후 RX로 복귀 (송신 잘림 방지) */
-  uint32_t start = HAL_GetTick();
-  while (__HAL_UART_GET_FLAG(&huart1, UART_FLAG_TC) == RESET) {
-    if ((HAL_GetTick() - start) > 20u) {
-      break; /* 영구 block 방지 */
-    }
-  }
-  mb_uart1_rs485_set_rx();
-}
-#endif
-
 /* USER CODE END 0 */
 
 /**
@@ -671,7 +541,7 @@ static void MX_USART2_UART_Init(void)
 
   /* USER CODE END USART2_Init 1 */
   huart2.Instance = USART2;
-  huart2.Init.BaudRate = 9600;
+  huart2.Init.BaudRate = 38400;
   huart2.Init.WordLength = UART_WORDLENGTH_8B;
   huart2.Init.StopBits = UART_STOPBITS_1;
   huart2.Init.Parity = UART_PARITY_NONE;
@@ -738,7 +608,6 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  /* RELAY1~4_EN: 부팅 직후 모두 Low (GPIO Init 직후 ODR 설정). */
   HAL_GPIO_WritePin(GPIOE, RELAY3_EN_Pin|RELAY4_EN_Pin|RELAY1_EN_Pin|RELAY2_EN_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */

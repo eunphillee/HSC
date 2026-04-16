@@ -138,7 +138,9 @@ bool H2Map_ApplyWrite(const H2_MapEntry_t* e, bool value, uint16_t pulse_ms) {
         uint8_t slave_id;
         uint16_t coil_index;
         h2_dec_to_sub_coil(e->h2_dec, &slave_id, &coil_index);
-        return (Gateway_Action_WriteSubCoil(slave_id, coil_index, value ? 1 : 0) == 0);
+        /* PC-originated FC05 should be absorbed by the mainboard first so
+         * rapid repeated clicks do not turn into back-to-back UART2 writes. */
+        return (Gateway_Action_RequestSubCoilWrite(slave_id, coil_index, value ? 1 : 0) == 0);
     }
     default:
         return false;

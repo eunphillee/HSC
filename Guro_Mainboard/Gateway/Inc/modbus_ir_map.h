@@ -6,7 +6,7 @@
  *   s_ir_main[82]   : addr   0 ..   81  (MAIN 0..23 + PACKED 24..81)
  *   s_ir_rtc[7]     : addr 890 ..  896  (RTC)
  *   s_ir_env[23]    : addr 2100 .. 2122 (ENV/IO/Reset-CSR/PC_LED_IN)
- *   s_ir_diag[40]   : addr 4000 .. 4039 (DIAG/NVM)
+ *   s_ir_diag[40]   : addr 4000 .. 4039 (DIAG/NVM/FW marker at 4039)
  *
  * Usage:
  *   1) Call ModbusIrMap_RefreshAll(agg) periodically (100ms, from SystemSync_Update).

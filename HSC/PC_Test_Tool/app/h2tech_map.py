@@ -32,8 +32,8 @@ CURRENT_COUNT = 40
 SUB_COIL_WRITE_FIRST_DOC = 899
 SUB_COIL_WRITE_LAST_DOC = 910
 
-# MAIN Board I/O (Option 1: enable when firmware exposes FC03/FC06)
-# FC03 start=2100 count=2: 4x2100=DI bitmap(bit0..7), 4x2101=DO bitmap(bit0..3); FC06 reg 2101 to write DO
+# MAIN Board I/O — v1.3: PC 툴은 FC04 MAIN(0..) + FC05 coil0..3/4/5/6 가 단일 경로.
+# 4x2100/2101은 ENV 존 비트맵(보조); 레거시 FC03/FC06 경로는 펌에 따라 다를 수 있음.
 MAIN_IO_ENABLED = True
 MAIN_DI_REG = 2100
 MAIN_DO_REG = 2101

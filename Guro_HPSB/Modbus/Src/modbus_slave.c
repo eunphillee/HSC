@@ -39,7 +39,7 @@ volatile uint8_t  HPSB_dbg_crc_ok;
 volatile uint8_t  HPSB_dbg_slave_match;
 volatile uint8_t  HPSB_dbg_reply_started;
 volatile uint8_t  HPSB_dbg_reply_done;
-/* Modbus RTU t3.5 at 9600 bps ≈ 3.65 ms; use 4 ms for frame end detection (mainboard RX timeout와 충돌하지 않도록) */
+/* Modbus RTU t3.5 at 38400 bps ≈ 0.9 ms; 4 ms는 여유 포함(메인보드 RX 타이밍과도 호환) */
 #define FRAME_SILENCE_MS  4
 
 /* UART error flag clear helper: ensure RX state is clean between frames. */

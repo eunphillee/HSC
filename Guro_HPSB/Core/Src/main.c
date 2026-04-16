@@ -126,7 +126,7 @@ int main(void)
     HAL_Delay(500);
   }
 #elif HPSB_PA9_TEST_MODE == 2
-  /* PA9 UART TX 테스트: Modbus/DE 배제, 500ms마다 0x55 1바이트 송신. PA9에서 9600 8N1 파형 확인. */
+  /* PA9 UART TX 테스트: Modbus/DE 배제, 500ms마다 0x55 1바이트 송신. PA9에서 USART1 보드레이트(예: 38400) 8N1 파형 확인. */
   for (;;) {
     uint8_t b = 0x55;
     HAL_UART_Transmit(&huart1, &b, 1, 100);
@@ -222,8 +222,8 @@ int main(void)
     __WFI();
 #endif
   }
+#endif /* HPSB minimal heat loop vs full while */
   /* USER CODE END 3 */
-#endif
 }
 
 /**
@@ -344,7 +344,7 @@ static void MX_USART1_UART_Init(void)
 
   /* USER CODE END USART1_Init 1 */
   huart1.Instance = USART1;
-  huart1.Init.BaudRate = 9600;
+  huart1.Init.BaudRate = 38400;
   huart1.Init.WordLength = UART_WORDLENGTH_8B;
   huart1.Init.StopBits = UART_STOPBITS_1;
   huart1.Init.Parity = UART_PARITY_NONE;

@@ -7,8 +7,8 @@
  *
  *        FC04 responses are served from the pre-populated IR map
  *        (modbus_ir_map.c, refreshed every 100ms via SystemSync_Update).
- *        handle_fc04() only triggers on-demand sub-board polls and
- *        delegates PDU building to ModbusIrMap_Fc04Response().
+ *        To keep upstream reads deterministic, handle_fc04() is side-effect free
+ *        and only delegates PDU building to ModbusIrMap_Fc04Response().
  */
 #include "upstream_slave_h2tech.h"
 #include "modbus_ir_map.h"
@@ -96,6 +96,19 @@
 #define FC04_ENV_IO_START      2100u
 #define FC04_ENV_IO_END        2114u  /* 2100..2114 = 15 regs */
 #define FC04_ENV_IO_COUNT      15u
+/*
+ * FC04 packed reads (24..81) used to request downstream on-demand polls here.
+ * In practice this made a simple upstream read mutate system state:
+ *   - count=25+ immediately armed UART2 polling,
+ *   - Aggregator_Update() could observe ModbusMaster_IsBusy() and publish
+ *     env sentinel values (-32768 / 0xFFFF),
+ *   - repeated PC polling around the 24/25 boundary produced checksum/value jitter.
+ *
+ * The FC04 map is already pre-populated every 100ms, so reads should stay
+ * side-effect free. Downstream polls still happen from boot / write / restore
+ * paths that already own that responsibility.
+ */
+#define FC04_TRIGGER_ONDEMAND_POLL_ON_PACKED_READ  0
 
 #if ENABLE_MB_FC04_MAIN_DEBUG
 static void log_fc04_main_snapshot(uint16_t di_now, uint16_t do_now, const uint16_t *regs)
@@ -444,8 +457,8 @@ __attribute__((unused)) static int handle_fc03(uint16_t start_addr, uint16_t cou
  *   4000..4039 DIAG
  *
  * All zone data is pre-populated by ModbusIrMap_RefreshAll() (100ms periodic).
- * This handler only triggers on-demand sub-board polls and delegates response
- * building to ModbusIrMap_Fc04Response().
+ * This handler keeps FC04 side-effect free and delegates response building to
+ * ModbusIrMap_Fc04Response().
  */
 static int handle_fc04(uint16_t start_addr, uint16_t count, const void *p_agg,
                        uint8_t *response, uint16_t resp_max)
@@ -458,8 +471,11 @@ static int handle_fc04(uint16_t start_addr, uint16_t count, const void *p_agg,
         return 2;
     }
 
-    /* Trigger on-demand sub-board poll when PACKED range (24..81) is accessed */
+    /* Keep FC04 read path side-effect free: return the latest refreshed snapshot.
+     * Optional packed-read-triggered polling can be re-enabled for experiments,
+     * but is disabled by default because it destabilized 25+ register reads. */
     const uint32_t end = (uint32_t)start_addr + (uint32_t)count - 1u;
+#if FC04_TRIGGER_ONDEMAND_POLL_ON_PACKED_READ
     if (start_addr <= FC04_MAIN_PACKED_END && end <= (uint32_t)FC04_MAIN_PACKED_END
         && end >= 24u) {
         ModbusMaster_RequestOnDemandPoll((uint16_t)SLAVE_ID_HPSB);
@@ -467,6 +483,9 @@ static int handle_fc04(uint16_t start_addr, uint16_t count, const void *p_agg,
         ModbusMaster_RequestOnDemandPoll((uint16_t)SLAVE_ID_LPSB2);
         ModbusMaster_RequestOnDemandPoll((uint16_t)SLAVE_ID_LPSB3);
     }
+#else
+    (void)end;
+#endif
 
     return ModbusIrMap_Fc04Response(start_addr, count, response, resp_max);
 }
