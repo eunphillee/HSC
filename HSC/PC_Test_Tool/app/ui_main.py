@@ -744,8 +744,9 @@ class MainWindow(QMainWindow):
         lpsb_sel_row = QHBoxLayout()
         lpsb_names = ["LPSB 2", "LPSB 4", "LPSB 8"]
         self._lpsb_slave_ids = [2, 4, 8]  # UI 이름과 매핑되는 실제 LPSB slave ID
-        # 초기값: LPSB2(slave=2)만 기본 활성, LPSB4/8(slave=4/8)는 탐색 성공 시 활성
-        self._lpsb_present = [True, False, False]
+        # 초기값: LPSB2/4/8 모두 선택 가능하게 시작.
+        # (탐색 응답이 들어오면 _on_sub_data_result 경로에서 presence가 갱신된다.)
+        self._lpsb_present = [True, True, True]
         for i, name in enumerate(lpsb_names):
             b = QPushButton(name)
             b.setCheckable(True)
@@ -885,7 +886,7 @@ class MainWindow(QMainWindow):
             lambda unit, start, values: None,
         )
         self._doc_panel = tab_doc
-        tabs.addTab(tab_doc, "문서 기반 Modbus 테스트")
+        tabs.addTab(tab_doc, "Modbus 테스트")
 
         self.setCentralWidget(central)
 
@@ -3117,8 +3118,9 @@ class MainWindow(QMainWindow):
                 packed_raw = raw.get("packed_24_81") or []
                 # LPSB2(slave=2)는 기본 사용 보드로 항상 존재 취급.
                 p2 = True
-                p4 = bool(len(packed_raw) > 5 and packed_raw[5] == 1)  # addr29
-                p8 = bool(len(packed_raw) > 6 and packed_raw[6] == 1)  # addr30
+                # alive 값은 구현에 따라 1 이외의 non-zero로 올라올 수 있어 non-zero를 존재로 취급.
+                p4 = bool(len(packed_raw) > 5 and int(packed_raw[5]) != 0)  # addr29
+                p8 = bool(len(packed_raw) > 6 and int(packed_raw[6]) != 0)  # addr30
                 new_present = [p2, p4, p8]
                 if new_present != self._lpsb_present:
                     self._lpsb_present = new_present
