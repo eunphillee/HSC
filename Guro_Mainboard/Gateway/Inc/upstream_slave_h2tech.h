@@ -33,6 +33,30 @@ int UpstreamSlave_HandleRequest(uint8_t fc, uint16_t start_addr, uint16_t count,
                                 const void *p_agg,
                                 uint8_t *response, uint16_t resp_max);
 
+/** Call after SystemConfig_Load (boot). Syncs pending IR2103 from effective ID. */
+void UpstreamSlave_InitMainboardSlavePending(void);
+
+/** Pending mainboard slave ID for FC04 IR 2103 (before EEPROM save). */
+uint16_t UpstreamSlave_GetPendingMainboardSlaveId(void);
+
+/** Pending mainboard baud rate for FC04 IR 2104 (before EEPROM save). */
+uint16_t UpstreamSlave_GetPendingMainboardBaudRate(void);
+
+/* FC04 IR 2109: last FC05 coil7 save fail code. */
+#define UPSTREAM_COIL7_SAVE_FAIL_NONE              0u
+#define UPSTREAM_COIL7_SAVE_FAIL_INVALID_PENDING   1u
+#define UPSTREAM_COIL7_SAVE_FAIL_NULL_CFG          2u
+#define UPSTREAM_COIL7_SAVE_FAIL_SYSCFG_BASE     0x100u
+
+/**
+ * Last FC05 coil7 save fail code.
+ * - 0: success / no failure
+ * - 1: pending slave id invalid or reserved
+ * - 2: SystemConfig_Get() returned NULL
+ * - 0x100 | n: SystemConfig_Save() failed, where n is SYSCFG_SAVE_STATUS_*
+ */
+uint16_t UpstreamSlave_GetLastCoil7SaveFailCode(void);
+
 #ifdef __cplusplus
 }
 #endif

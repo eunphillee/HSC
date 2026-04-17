@@ -66,6 +66,10 @@ from .address_map import (
     MAIN_VBIT_COUNT,
     MAIN_RTC_REG_START,
     MAIN_RTC_REG_COUNT,
+    MAIN_SLAVE_ID_ACTIVE_REG,
+    MAIN_SLAVE_ID_PENDING_REG,
+    MAIN_BAUD_RATE_PENDING_REG,
+    MAIN_SLAVE_SAVE_COIL,
 )
 
 
@@ -758,6 +762,46 @@ class ModbusClient:
                 if self._response_logger:
                     self._response_logger(False, None)
                 return False, None, format_modbus_error(exc=e)
+
+    def write_single_register(self, addr: int, value: int, unit: int | None = None) -> tuple[bool, str | None]:
+        """FC06 write single holding/register (Mainboard: pending slave ID @ 2103 only on firmware)."""
+        with self._lock:
+            ok, err = self._ensure_socket_open()
+            if not ok:
+                return False, err or "Not connected"
+            u = self._slave_id if unit is None else unit
+            try:
+                v = int(value) & 0xFFFF
+                if self._request_logger:
+                    self._request_logger(u, "FC06", addr, v)
+                wr = self._client.write_register(address=addr, value=v, unit=u)
+                if self._response_logger:
+                    self._response_logger(not wr.isError(), _response_exception_code(wr))
+                if wr.isError():
+                    return False, format_modbus_error(resp=wr)
+                return True, None
+            except Exception as e:
+                if self._response_logger:
+                    self._response_logger(False, None)
+                return False, format_modbus_error(exc=e)
+
+    def read_mainboard_slave_id_regs(self) -> tuple[bool, int | None, int | None, str | None]:
+        """FC04: reg2102=effective, 2103=pending."""
+        ok, regs, err = self.read_input_registers(MAIN_SLAVE_ID_ACTIVE_REG, 2, unit=None)
+        if not ok or regs is None or len(regs) < 2:
+            return False, None, None, err
+        return True, int(regs[0]) & 0xFFFF, int(regs[1]) & 0xFFFF, None
+
+    def save_mainboard_slave_id_eeprom(self, new_id: int) -> tuple[bool, str | None]:
+        """FC06 pending @2103, then FC05 coil 7 ON to commit EEPROM."""
+        ok, err = self.write_single_register(MAIN_SLAVE_ID_PENDING_REG, new_id, unit=None)
+        if not ok:
+            return False, err
+        return self.write_single_coil(MAIN_SLAVE_SAVE_COIL, True, unit=None)
+
+    def write_mainboard_baud_pending(self, baud: int) -> tuple[bool, str | None]:
+        """FC06 pending @2104. Commit is FC05 coil 7 ON."""
+        return self.write_single_register(MAIN_BAUD_RATE_PENDING_REG, baud, unit=None)
 
     def write_single_coil(self, addr: int, value: bool, unit: int | None = None) -> tuple[bool, str | None]:
         with self._lock:

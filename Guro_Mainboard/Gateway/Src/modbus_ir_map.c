@@ -2,17 +2,13 @@
  * @file modbus_ir_map.c
  * @brief FC04 Input Register global map implementation (v1.3).
  *
- * Four static zone arrays are refreshed every 100ms by ModbusIrMap_RefreshAll().
- * ModbusIrMap_Fc04Response() slices any valid [start, start+count-1] range
- * into a ready-to-send Modbus PDU without any on-demand assembly.
- *
- * Address zones (H2TECH Unified Rule v1.3):
- *   s_ir_main[82]  :   0 ..   81  MAIN status/DI/DO/relay/env/vbit + PACKED subboard
- *   s_ir_rtc[7]    : 890 ..  896  RTC (year..second)
- *   s_ir_env[23]   : 2100 .. 2122 ENV/IO/Reset-CSR + PC_LED_IN
- *   s_ir_diag[40]  : 4000 .. 4039 DIAG diagnostics + NVM state
+ * Two banks: RefreshAll writes the back bank, then swaps s_front_idx so FC04
+ * and FC05 optimistic patch always see a stable front snapshot.
  */
 #include "modbus_ir_map.h"
+#include "stm32f2xx.h"   /* __DMB() */
+#include "system_config.h"
+#include "upstream_slave_h2tech.h"
 #include "io_map.h"
 #include "bsp_gpio.h"
 #include "reset_reason.h"
@@ -23,25 +19,41 @@
 #include <string.h>
 
 /* ------------------------------------------------------------------ */
-/* Static zone arrays                                                   */
+/* Double-buffered zone banks */
 /* ------------------------------------------------------------------ */
 
-static uint16_t s_ir_main[MB_IR_MAIN_COUNT];  /* 0..81     */
-static uint16_t s_ir_rtc[MB_IR_RTC_COUNT];    /* 890..896  */
-static uint16_t s_ir_env[MB_IR_ENV_COUNT];    /* 2100..2122 */
-static uint16_t s_ir_diag[MB_IR_DIAG_COUNT];  /* 4000..4039 */
+typedef struct {
+    uint16_t main[MB_IR_MAIN_COUNT];
+    uint16_t rtc[MB_IR_RTC_COUNT];
+    uint16_t env[MB_IR_ENV_COUNT];
+    uint16_t diag[MB_IR_DIAG_COUNT];
+} ModbusIrBank_t;
+
+static ModbusIrBank_t s_bank[2];
+static volatile uint8_t s_front_idx;
 
 /* Read-back firmware marker for field verification.
  * FC04 addr=4039 should return this exact value when the latest
  * "FC04 side-effect free packed read" firmware is actually flashed. */
 #define MB_FW_MARKER_FC04_SIDE_EFFECT_FREE   0xA416u
 
+static void patch_env_config_diag(ModbusIrBank_t *b)
+{
+    if (!b) return;
+    b->env[2] = (uint16_t)SystemConfig_GetEffectiveMainboardSlaveId(); /* 2102 */
+    b->env[3] = UpstreamSlave_GetPendingMainboardSlaveId();            /* 2103 */
+    b->env[4] = UpstreamSlave_GetPendingMainboardBaudRate();           /* 2104 */
+    b->env[8] = SystemConfig_GetLastSaveStatus();                      /* 2108 */
+    b->env[9] = UpstreamSlave_GetLastCoil7SaveFailCode();              /* 2109 */
+}
+
 /* ------------------------------------------------------------------ */
 /* Refresh: MAIN + PACKED  (0..81)                                      */
 /* ------------------------------------------------------------------ */
 
-static void refresh_main(const aggregated_status_t *agg)
+static void refresh_main(ModbusIrBank_t *b, const aggregated_status_t *agg)
 {
+    uint16_t *const s_ir_main = b->main;
     uint16_t di   = IO_Main_ReadDI_Bitmap();
     uint16_t dout = IO_Main_ReadDO_Bitmap();
 
@@ -117,22 +129,29 @@ static void refresh_main(const aggregated_status_t *agg)
 /* Refresh: RTC  (890..896)                                             */
 /* ------------------------------------------------------------------ */
 
-static void refresh_rtc(void)
+static void refresh_rtc(ModbusIrBank_t *b)
 {
-    (void)BoardRtc_ReadWordRegs(s_ir_rtc);
+    (void)BoardRtc_ReadWordRegs(b->rtc);
 }
 
 /* ------------------------------------------------------------------ */
 /* Refresh: ENV/IO  (2100..2122)                                        */
 /* ------------------------------------------------------------------ */
 
-static void refresh_env(const aggregated_status_t *agg)
+static void refresh_env(ModbusIrBank_t *b, const aggregated_status_t *agg)
 {
-    /* Reserved slots 2..9 (2102..2109) and 15..21 (2115..2121) stay 0.
-     * Only update the named registers; static storage ensures 0 elsewhere. */
+    uint16_t *const s_ir_env = b->env;
+    /* 2102..2109:
+     * 2102 effective slave id
+     * 2103 pending slave id
+     * 2104 pending baud
+     * 2108 last SystemConfig_Save status
+     * 2109 last coil7 save fail code
+     */
     s_ir_env[0]  = IO_Main_ReadDI_Bitmap();                                   /* 2100: MAIN_IO_DI_BITMAP */
     s_ir_env[1]  = IO_Main_ReadDO_Bitmap();                                   /* 2101: MAIN_IO_DO_BITMAP */
-    /* [2..9] RESERVED (2102..2109) */
+    patch_env_config_diag(b);
+    /* [5..7] RESERVED (2105..2107) */
     s_ir_env[10] = agg ? (uint16_t)agg->env_temp_cx10 : (uint16_t)0x8000u;   /* 2110: MAIN_ENV_TEMP     */
     s_ir_env[11] = agg ? agg->env_rh_x10 : 0xFFFFu;                          /* 2111: MAIN_ENV_RH       */
     s_ir_env[12] = agg ? agg->error_flags : 0xFFFFu;                          /* 2112: MAIN_ENV_ERR_FLAGS */
@@ -149,10 +168,11 @@ static void refresh_env(const aggregated_status_t *agg)
 /* Refresh: DIAG  (4000..4039)                                          */
 /* ------------------------------------------------------------------ */
 
-static void refresh_diag(const aggregated_status_t *agg)
+static void refresh_diag(ModbusIrBank_t *b, const aggregated_status_t *agg)
 {
+    uint16_t *const s_ir_diag = b->diag;
     /* Full zero first: covers reserved/unset slots before explicit assignments. */
-    (void)memset(s_ir_diag, 0, sizeof(s_ir_diag));
+    (void)memset(s_ir_diag, 0, sizeof(b->diag));
 
     /* NOTE: existing code returns 0=정상 / 1=이상 for DIAG_MAIN_STATUS (opposite
      * of MAIN_STATUS at addr 0).  Preserved as-is for backward compatibility. */
@@ -213,10 +233,23 @@ static void refresh_diag(const aggregated_status_t *agg)
 
 void ModbusIrMap_RefreshAll(const aggregated_status_t *agg)
 {
-    refresh_main(agg);
-    refresh_rtc();
-    refresh_env(agg);
-    refresh_diag(agg);
+    uint8_t back = (uint8_t)(1u - s_front_idx);
+    ModbusIrBank_t *b = &s_bank[back];
+
+    refresh_main(b, agg);
+    refresh_rtc(b);
+    refresh_env(b, agg);
+    refresh_diag(b, agg);
+
+    __DMB();
+    s_front_idx = back;
+}
+
+void ModbusIrMap_SyncConfigDiag(void)
+{
+    patch_env_config_diag(&s_bank[0]);
+    patch_env_config_diag(&s_bank[1]);
+    __DMB();
 }
 
 /* ------------------------------------------------------------------ */
@@ -225,6 +258,13 @@ void ModbusIrMap_RefreshAll(const aggregated_status_t *agg)
 
 void ModbusIrMap_OnFc05Write(uint16_t addr, bool value)
 {
+    uint8_t f = s_front_idx;
+    __DMB();
+    ModbusIrBank_t *b = &s_bank[f];
+    uint16_t *const s_ir_main = b->main;
+    uint16_t *const s_ir_env = b->env;
+    uint16_t *const s_ir_diag = b->diag;
+
     const uint16_t v = value ? 1u : 0u;
 
     /* ---- MAIN relay: addr 0..3 ---- *
@@ -280,11 +320,15 @@ int ModbusIrMap_Fc04Response(uint16_t start_addr, uint16_t count,
         return 2;
     }
 
+    uint8_t f = s_front_idx;
+    __DMB();
+    const ModbusIrBank_t *bk = &s_bank[f];
+
     const IrZone_t zones[4] = {
-        { MB_IR_MAIN_START,  MB_IR_MAIN_COUNT,  s_ir_main  },
-        { MB_IR_RTC_START,   MB_IR_RTC_COUNT,   s_ir_rtc   },
-        { MB_IR_ENV_START,   MB_IR_ENV_COUNT,   s_ir_env   },
-        { MB_IR_DIAG_START,  MB_IR_DIAG_COUNT,  s_ir_diag  },
+        { MB_IR_MAIN_START,  MB_IR_MAIN_COUNT,  bk->main  },
+        { MB_IR_RTC_START,   MB_IR_RTC_COUNT,   bk->rtc   },
+        { MB_IR_ENV_START,   MB_IR_ENV_COUNT,   bk->env   },
+        { MB_IR_DIAG_START,  MB_IR_DIAG_COUNT,  bk->diag  },
     };
 
     const uint32_t end = (uint32_t)start_addr + (uint32_t)count - 1u;

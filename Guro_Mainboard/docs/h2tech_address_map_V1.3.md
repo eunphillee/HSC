@@ -113,26 +113,42 @@ Encoding: **UTF-8**
 
 ## FC04-3. 시스템 / 환경 (관리주소 2100 ~ 2122)
 
-코드 기준 실제 주소. 2102~2109 는 예약(0 반환).
+코드 기준 실제 주소. 2102~2109 중 일부는 mainboard ID 저장 진단용으로 사용한다.
 
 | FC | 관리주소 | 항목 | 설명 |
 |----|----------|------|------|
 | FC04 | 2100 | MAIN_IO_DI_BITMAP | 메인 DI bitmap (bit0=DI01 .. bit7=DI08) |
 | FC04 | 2101 | MAIN_IO_DO_BITMAP | 메인 DO bitmap (bit0=RELAY1 .. bit3=RELAY4) |
-| FC04 | 2102 | RESERVED | 예약 |
-| FC04 | 2103 | RESERVED | 예약 |
-| FC04 | 2104 | RESERVED | 예약 |
+| FC04 | 2102 | MB_SLAVE_EFFECTIVE | 현재 적용 중인 mainboard slave id |
+| FC04 | 2103 | MB_SLAVE_PENDING | 저장 전 pending slave id |
+| FC04 | 2104 | MB_BAUD_PENDING | 저장 전 pending baudrate |
 | FC04 | 2105 | RESERVED | 예약 |
 | FC04 | 2106 | RESERVED | 예약 |
 | FC04 | 2107 | RESERVED | 예약 |
-| FC04 | 2108 | RESERVED | 예약 |
-| FC04 | 2109 | RESERVED | 예약 |
+| FC04 | 2108 | SYSCFG_LAST_SAVE_STATUS | 마지막 `SystemConfig_Save()` 상태 코드 |
+| FC04 | 2109 | COIL7_LAST_FAIL_CODE | 마지막 `Save ID`(FC05 coil7) 실패 코드 |
 | FC04 | 2110 | MAIN_ENV_TEMP | 보드 온도 × 10 (signed), 센서에러=-32768 |
 | FC04 | 2111 | MAIN_ENV_RH | 보드 습도 × 10, 센서에러=0xFFFF |
 | FC04 | 2112 | MAIN_ENV_ERR_FLAGS | 환경/통신 에러 플래그 |
 | FC04 | 2113 | RESET_CSR_LOW | RCC CSR 하위 16비트 |
 | FC04 | 2114 | RESET_CSR_HIGH | RCC CSR 상위 16비트 |
 | FC04 | 2122 | PC_LED_IN_REG | PC_LED 입력 상태 (0=OFF, 1=ON, read-only) |
+
+### 2108 / 2109 진단 코드
+
+- `2108 = SYSCFG_LAST_SAVE_STATUS`
+  - `0`: OK
+  - `1`: NULL cfg
+  - `2`: validate 실패
+  - `3`: EEPROM write 실패
+  - `4`: EEPROM read 실패
+  - `5`: readback validate 실패
+  - `6`: sequence mismatch
+- `2109 = COIL7_LAST_FAIL_CODE`
+  - `0`: coil7 save 성공 / 실패 없음
+  - `1`: pending slave id invalid/reserved
+  - `2`: `SystemConfig_Get()` NULL
+  - `0x100 | n`: `SystemConfig_Save()` 실패. 하위 `n`은 위 2108 상태 코드와 동일
 
 ## FC04-4. 진단 DIAG (관리주소 4000 ~ 4039)
 
@@ -196,7 +212,7 @@ Encoding: **UTF-8**
 | FC05 | 4 | PC_ON | PC_ON 펄스 트리거 (ON 쓰기 시 펄스) |
 | FC05 | 5 | PC_OFF | PC_ON_EN=0 (ON 쓰기 시 OFF 동작) |
 | FC05 | 6 | PC_RESET | PC_RESET 펄스 트리거 (ON 쓰기 시 펄스) |
-| FC05 | 7 | RESERVED | 예약 |
+| FC05 | 7 | CONFIG_SAVE_TRIGGER | pending ID/baud를 EEPROM에 저장하는 trigger |
 | FC05 | 8 | RESERVED | 예약 |
 | FC05 | 9 | RESERVED | 예약 |
 | FC05 | 10 | RESERVED | 예약 |

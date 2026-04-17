@@ -27,6 +27,7 @@
 #include "aggregated_status.h"
 #include "upstream_pc_protocol.h"
 #include "upstream_slave_uart1.h"
+#include "upstream_slave_h2tech.h"
 #include "modbus_master.h"
 #include "gateway_actions.h"
 #include "led_status.h"
@@ -71,6 +72,7 @@ RTC_HandleTypeDef hrtc;
 
 UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart2;
+DMA_HandleTypeDef hdma_usart1_tx;
 
 WWDG_HandleTypeDef hwwdg;
 
@@ -81,6 +83,7 @@ static aggregated_status_t aggregated_status;
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
+static void MX_DMA_Init(void);
 static void MX_WWDG_Init(void);
 static void MX_I2C1_Init(void);
 static void MX_I2C3_Init(void);
@@ -157,6 +160,7 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  MX_DMA_Init();
   MX_WWDG_Init();
   MX_I2C1_Init();
   MX_I2C3_Init();
@@ -187,6 +191,7 @@ int main(void)
 #if SYSTEM_CONFIG_BOOT_LOG
     SystemConfig_LogToUart((void *)&huart1);
 #endif
+    UpstreamSlave_InitMainboardSlavePending();
   }
   /* 정상 동작 모드: 스케줄러/통신/집계/LED 상태 및 WWDG 서비스 초기화. */
   WwdgService_Init(&hwwdg);
@@ -585,6 +590,22 @@ static void MX_WWDG_Init(void)
   /* USER CODE BEGIN WWDG_Init 2 */
 
   /* USER CODE END WWDG_Init 2 */
+
+}
+
+/**
+  * Enable DMA controller clock
+  */
+static void MX_DMA_Init(void)
+{
+
+  /* DMA controller clock enable */
+  __HAL_RCC_DMA2_CLK_ENABLE();
+
+  /* DMA interrupt init */
+  /* DMA2_Stream7_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA2_Stream7_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA2_Stream7_IRQn);
 
 }
 

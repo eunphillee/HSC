@@ -5,7 +5,15 @@
  * Zones (v1.3 address map):
  *   s_ir_main[82]   : addr   0 ..   81  (MAIN 0..23 + PACKED 24..81)
  *   s_ir_rtc[7]     : addr 890 ..  896  (RTC)
- *   s_ir_env[23]    : addr 2100 .. 2122 (ENV/IO/Reset-CSR/PC_LED_IN)
+ *   s_ir_env[23]    : addr 2100 .. 2122
+ *                     - 2100..2101 : MAIN IO bitmaps
+ *                     - 2102       : effective slave id
+ *                     - 2103       : pending slave id
+ *                     - 2104       : pending baudrate
+ *                     - 2108       : last SystemConfig_Save() status
+ *                     - 2109       : last FC05 coil7 save fail code
+ *                     - 2113..2114 : reset CSR
+ *                     - 2122       : PC_LED_IN
  *   s_ir_diag[40]   : addr 4000 .. 4039 (DIAG/NVM/FW marker at 4039)
  *
  * Usage:
@@ -74,6 +82,17 @@ int ModbusIrMap_Fc04Response(uint16_t start_addr, uint16_t count,
  * @param value  true = coil ON
  */
 void ModbusIrMap_OnFc05Write(uint16_t addr, bool value);
+
+/**
+ * Immediately synchronize ENV config/diagnostic registers that are otherwise
+ * refreshed by the 100ms periodic map update:
+ *   2102 effective slave id
+ *   2103 pending slave id
+ *   2104 pending baudrate
+ *   2108 last SystemConfig_Save() status
+ *   2109 last FC05 coil7 save fail code
+ */
+void ModbusIrMap_SyncConfigDiag(void);
 
 #ifdef __cplusplus
 }

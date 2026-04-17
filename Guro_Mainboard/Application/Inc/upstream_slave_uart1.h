@@ -16,6 +16,8 @@ extern "C" {
 void UpstreamSlaveUart1_Init(void);
 void UpstreamSlaveUart1_Poll(const aggregated_status_t *agg);
 void UpstreamSlaveUart1_RxEventCallback(uint16_t Size);
+/** Called from HAL_UART_TxCpltCallback when USART1 DMA TX completes (TC). */
+void UpstreamSlaveUart1_TxCpltCallback(void);
 
 /** Debug counters: rx_frame_ok, rx_crc_fail, rx_len_fail, tx_resp. Pass NULL to skip. */
 void UpstreamSlaveUart1_GetCounts(uint32_t *rx_ok, uint32_t *rx_crc_fail, uint32_t *rx_len_fail, uint32_t *tx_resp);

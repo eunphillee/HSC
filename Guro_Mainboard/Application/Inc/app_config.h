@@ -90,7 +90,7 @@
 
 /* UART1 Modbus RTU 슬레이브 주소: 0=EEPROM(SystemConfig) slave_id(무효/0xFF면 9). 1=항상 9 고정(수신·응답 모두 9). */
 #ifndef MAINBOARD_UART1_SLAVE_ID_FORCE_LIT9
-#define MAINBOARD_UART1_SLAVE_ID_FORCE_LIT9  1
+#define MAINBOARD_UART1_SLAVE_ID_FORCE_LIT9  0
 #endif
 
 /* 부팅 후 EEPROM 설정 로드/저장 결과를 UART1로 한 줄 로그 출력. 1=테스트 시 활성화 (CFG[A/B] seq= id= baud= valid=1) */

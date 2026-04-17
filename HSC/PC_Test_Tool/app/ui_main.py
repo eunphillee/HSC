@@ -24,6 +24,7 @@ from .logger import LogHandler
 from .doc_modbus_panel import DocModbusPanel
 from .address_map import (
     MAINBOARD_SLAVE_ID_DEFAULT,
+    MAIN_SLAVE_ID_FORBIDDEN_SUB,
     MAIN_DI_REG,
     MAIN_DO_REG,
     PC_ON_EN_REG,
@@ -76,6 +77,10 @@ def _format_sense_channel(sense: list, base: int, ch: int) -> str:
 # FC05 성공 후 EEPROM DIAG read 지연 (ms).
 # 낮추면 응답이 빠르지만 Modbus 버스 충돌 위험. 높이면 충돌은 줄지만 응답이 느림.
 DIAG_READ_DELAY_MS: int = 150
+# Bootstrap SYNC: extra retries after first failure (0 = single attempt total).
+BOOTSTRAP_SYNC_RETRY_MAX: int = 0
+# After minimal FC04 test fail, suppress tick-driven sub reads (seconds).
+MINIMAL_FAIL_SUB_BLOCK_SEC: float = 1.0
 # 자동 DIAG/NVM(FC04 4000..4039) 읽기 기본 동작 제어
 # - False: 수동(문서 탭 버튼) 또는 필요 시 코드에서 명시적으로만 실행
 # - True : 기존 자동 진단 경로 활성
@@ -176,6 +181,8 @@ class MainWindow(QMainWindow):
     request_read_pc_led = pyqtSignal()
     request_read_rtc = pyqtSignal()
     request_set_rtc = pyqtSignal()
+    request_read_mainboard_slave_id = pyqtSignal()
+    request_save_mainboard_slave_id = pyqtSignal(int)
     request_write_relay = pyqtSignal(int, bool)
     request_write_virtual_bit = pyqtSignal(int, bool)
     request_pc_on_pulse = pyqtSignal()
@@ -285,12 +292,16 @@ class MainWindow(QMainWindow):
         # 오류 종료를 방지한다.
         self._hpsb_relay_commanded: list[bool] = [False, False, False]
         self._lpsb_ssr_commanded: list[bool] = [False, False, False]
-        # Bootstrap sync: connect 직후 1회 sub read로 실제 출력 상태를 복원한 뒤 polling 시작.
-        # "idle" → "syncing"(connect 후 sub read 요청) → "done"(복원 완료 or 포기)
+        # Bootstrap SYNC: manual _start_bootstrap_sync() only; no auto on Connect (P0).
+        # "idle" -> "syncing" -> "done". Unified main poll does not auto-start on Connect.
         self._bootstrap_sync_state: str = "idle"
         # 마지막 CUR(I=ON/OFF) 상태 시그니처 — 변경 시 즉시 [1s][CURRENT] 로그 출력용
         self._last_cur_sig: tuple | None = None
         self._bootstrap_sync_retry: int = 0
+        self._read_once_from_minimal: bool = False
+        self._suppress_sub_auto_until: float = 0.0
+        self._sub_comm_fail_streak: int = 0
+        self._mb_slave_id_read_exclusive: bool = False
         # LPSB 전체 보드별 SSR 상태 캐시: [0]=LPSB2, [1]=LPSB4, [2]=LPSB8 각 3채널.
         # 선택 보드와 무관하게 항상 업데이트 → 보드 전환 시 _last_coils 없어도 즉시 복원.
         self._lpsb_ssr_state_all: list[list[bool]] = [[False, False, False] for _ in range(3)]
@@ -331,7 +342,6 @@ class MainWindow(QMainWindow):
         self._main_poll_default_ms = 1000
         self._main_poll_slow_ms = 2000
         self._main_poll_max_ms = 3000
-        self._last_main_poll_fail_log_ts = 0.0
         # DIAG read 동시 실행 방지 플래그: FC05 연속 write 시 중복 DIAG 시퀀스 차단
         self._diag_read_in_progress: bool = False
         # write 직후 짧은 상세 확인 구간: 제한 횟수만 request_read_sub 수행
@@ -405,6 +415,15 @@ class MainWindow(QMainWindow):
         self.request_read_rtc.connect(self._worker.on_request_read_rtc, Qt.ConnectionType.QueuedConnection)
         self.request_set_rtc.connect(self._worker.on_request_set_rtc, Qt.ConnectionType.QueuedConnection)
         self._worker.rtc_result.connect(self._on_rtc_result)
+        # Mainboard Slave ID (EEPROM/SystemConfig)
+        self.request_read_mainboard_slave_id.connect(
+            self._worker.on_request_read_mainboard_slave_id, Qt.ConnectionType.QueuedConnection
+        )
+        self.request_save_mainboard_slave_id.connect(
+            self._worker.on_request_save_mainboard_slave_id, Qt.ConnectionType.QueuedConnection
+        )
+        self._worker.mainboard_slave_id_read_result.connect(self._on_mainboard_slave_id_read_result)
+        self._worker.mainboard_slave_save_result.connect(self._on_mainboard_slave_save_result)
 
     def _build_ui(self):
         central = QWidget()
@@ -470,6 +489,26 @@ class MainWindow(QMainWindow):
         self._btn_read_rtc.clicked.connect(self._on_read_rtc_btn)
         self._btn_read_rtc.setEnabled(False)
         top_lay.addWidget(self._btn_read_rtc)
+        # Mainboard Slave ID (EEPROM/SystemConfig) UI
+        self._lbl_mb_slave_cfg = QLabel("Mainboard Slave ID:")
+        top_lay.addWidget(self._lbl_mb_slave_cfg)
+        self._mb_slave_cfg_spin = QSpinBox()
+        self._mb_slave_cfg_spin.setRange(1, 247)
+        self._mb_slave_cfg_spin.setValue(MAINBOARD_SLAVE_ID_DEFAULT)
+        self._mb_slave_cfg_spin.setMinimumWidth(60)
+        self._mb_slave_cfg_spin.setToolTip(
+            "EEPROM(SystemConfig)에 저장할 Mainboard Slave ID.\n"
+            "저장 후 보드 재부팅 시 적용되며, PC 툴은 새 ID로 다시 Connect 해야 합니다."
+        )
+        top_lay.addWidget(self._mb_slave_cfg_spin)
+        self._btn_read_mb_slave = QPushButton("Read ID")
+        self._btn_read_mb_slave.clicked.connect(self._on_read_mainboard_slave_id_clicked)
+        self._btn_read_mb_slave.setEnabled(False)
+        top_lay.addWidget(self._btn_read_mb_slave)
+        self._btn_save_mb_slave = QPushButton("Save ID")
+        self._btn_save_mb_slave.clicked.connect(self._on_save_mainboard_slave_id_clicked)
+        self._btn_save_mb_slave.setEnabled(False)
+        top_lay.addWidget(self._btn_save_mb_slave)
         top_lay.addStretch()
         main_layout.addWidget(top)
 
@@ -1342,6 +1381,36 @@ class MainWindow(QMainWindow):
         else:
             self._log_rl_state[key] = {"ts": last_ts, "count": rep + 1}
 
+    def _log_comm_fail_throttled(self, key: str, msg: str, streak: int | None = None) -> None:
+        """Comm-fail log via _log_info_rl (2s). Appends fail_streak when set."""
+        if streak is not None:
+            msg = f"{msg} | fail_streak={int(streak)}"
+        self._log_info_rl(key, msg, window_sec=2.0)
+
+    def _any_modbus_inflight(self) -> bool:
+        """True if another Modbus request is in flight (timer ticks only)."""
+        return (
+            self._mb_slave_id_read_exclusive
+            or self._main_poll_inflight
+            or self._hpsb_probe_inflight
+            or self._sub_coil_read_inflight
+            or self._post_write_verify_remaining > 0
+        )
+
+    def _stop_auto_poll_completely(self, reason: str) -> None:
+        """Disable Auto poll after a failure."""
+        if not self._sub_auto_poll and not self._chk_auto_poll.isChecked():
+            return
+        self._sub_auto_poll = False
+        self._chk_auto_poll.blockSignals(True)
+        self._chk_auto_poll.setChecked(False)
+        self._chk_auto_poll.blockSignals(False)
+        self._sub_poll_timer.stop()
+        self._auto_poll_adc_log_pending = False
+        self._sync_current_log_timer()
+        self._sync_hpsb_adc_log_timer()
+        self._log.log_info(f"[PC-TOOL] Auto poll=OFF (reason={reason})")
+
     def _log_fc04_sub_ok_tag_throttled(self) -> None:
         """FC04 sub 성공 log_tagged: 주기 폴링 시 동일 로그 연속 출력 방지(최소 300ms 간격)."""
         now_m = time.monotonic()
@@ -1404,6 +1473,7 @@ class MainWindow(QMainWindow):
         if not self._client.connected:
             self._log.log_info("[MAIN] Not connected")
             return
+        self._read_once_from_minimal = True
         self._set_op_state("READ_ONCE")
         self._log.log_info(
             f"[MINIMAL] FC04 addr=0 cnt=24 unit={int(self._slave_id.value())} (single shot)"
@@ -1433,6 +1503,10 @@ class MainWindow(QMainWindow):
         self._lbl_slave_id.setVisible(show_slave)
         self._slave_id.setVisible(show_slave)
         self._slave_id.setEnabled(not connected and show_slave)
+        self._lbl_mb_slave_cfg.setVisible(show_slave)
+        self._mb_slave_cfg_spin.setVisible(show_slave)
+        self._btn_read_mb_slave.setVisible(show_slave)
+        self._btn_save_mb_slave.setVisible(show_slave)
         # direct 모드에 따라 일부 버튼 제어 (Mainboard 경유 HPSB/LPSB 읽기/제어만 제한)
         direct_mode_active = connected and (self._direct_mode in ("hpsb", "lpsb"))
         self._btn_read_di.setEnabled(connected)          # Mainboard DI는 항상 가능
@@ -1440,6 +1514,10 @@ class MainWindow(QMainWindow):
         self._btn_read_env.setEnabled(connected)         # Env도 항상 가능
         self._btn_set_rtc.setEnabled(connected)
         self._btn_read_rtc.setEnabled(connected)
+        mb_slave_ui = connected and show_slave
+        self._mb_slave_cfg_spin.setEnabled(mb_slave_ui)
+        self._btn_read_mb_slave.setEnabled(mb_slave_ui)
+        self._btn_save_mb_slave.setEnabled(mb_slave_ui)
         # Read once 버튼은 Direct LPSB 모드에서도 사용:
         # - Mainboard routing: HPSB/LPSB sub read
         # - Direct LPSB: LPSB FC04 (ADC raw 포함) read
@@ -1494,12 +1572,10 @@ class MainWindow(QMainWindow):
                 else:
                     self._log.log_info("→ [DIRECT] 보드→PC 수신: 이 툴에서 raw 수신 미지원. 터미널에서 screen ... 9600 로 확인하세요.")
             else:
-                # Mainboard routing: bootstrap sync(실제 출력 복원) → main polling 순서로 진행
+                # Mainboard routing: no auto bootstrap/main poll after Connect (P0).
                 self._main_poll_inflight = False
                 self._main_poll_fail_streak = 0
-                self._last_main_poll_fail_log_ts = 0.0
                 self._diag_read_in_progress = False
-                self._start_bootstrap_sync()
         else:
             self._log.set_raw_line_only(False)
             self._raw_poll_timer.stop()
@@ -1510,11 +1586,14 @@ class MainWindow(QMainWindow):
             self._main_poll_timer.setInterval(self._main_poll_default_ms)
             self._main_poll_inflight = False
             self._main_poll_fail_streak = 0
-            self._last_main_poll_fail_log_ts = 0.0
             self._diag_read_in_progress = False
             self._bootstrap_sync_state = "idle"
             self._sub_auto_poll = False
             self._chk_auto_poll.setChecked(False)
+            self._read_once_from_minimal = False
+            self._suppress_sub_auto_until = 0.0
+            self._sub_comm_fail_streak = 0
+            self._mb_slave_id_read_exclusive = False
             self._status_badge.setText("Disconnected")
             self._status_badge.setStyleSheet("color: #555555; font-weight: bold; padding: 4px 8px;")
             self._stop_lpsb_auto_adc_poll("disconnect")
@@ -1524,13 +1603,13 @@ class MainWindow(QMainWindow):
                 led.set_di_state(None)
 
     # ------------------------------------------------------------------
-    # Bootstrap sync: connect 직후 실제 출력 상태 1회 복원
+    # Bootstrap SYNC: 수동 호출로만 실제 출력 상태 1회 복원 (Connect 직후 자동 시작 없음).
     # 흐름: _start_bootstrap_sync → _do_bootstrap_sync_read → (sub read)
     #       → _on_sub_data_result(bootstrap 분기) → _apply_bootstrap_state
-    #       → _finish_bootstrap_sync → main_poll_timer.start()
+    #       → _finish_bootstrap_sync (통합 main poll 자동 시작 없음)
     # ------------------------------------------------------------------
     def _start_bootstrap_sync(self):
-        """Connect 직후 1회 sub read로 실제 출력 상태를 복원한 뒤 main polling을 시작."""
+        """수동 호출 시 1회 sub read로 실제 출력 상태를 복원한다."""
         self._bootstrap_sync_state = "syncing"
         self._bootstrap_sync_retry = 0
         self._log.log_info("[SYNC] 초기 상태 동기화 시작 (HPSB·LPSB 실제 출력 상태 복원 중...)")
@@ -1584,16 +1663,12 @@ class MainWindow(QMainWindow):
             self._log.log_info("[SYNC] 모든 출력 OFF 확인 → IDLE 유지")
 
     def _finish_bootstrap_sync(self, success: bool):
-        """Bootstrap sync 완료(또는 재시도 포기) 후 main polling을 시작."""
+        """Bootstrap finished; unified main poll is NOT auto-started (P0)."""
         self._bootstrap_sync_state = "done"
         if success:
-            self._log.log_info("[SYNC] 초기 상태 동기화 완료 → Mainboard polling 시작")
+            self._log.log_info("[SYNC] 초기 상태 동기화 ��료 (통합 main poll은 수동·설정에서 시작)")
         else:
-            self._log.log_info("[SYNC] 초기 동기화 실패 → polling 강제 시작")
-        if not self._main_poll_timer.isActive():
-            self._main_poll_timer.setInterval(self._main_poll_default_ms)
-            self._main_poll_timer.start()
-        self._log.log_info("→ 통합 Mainboard polling 시작 (1000ms: DI / Relay / HPSB / LPSB 전체 상태)")
+            self._log.log_info("[SYNC] 초기 동기화 실패 (통합 main poll 자동 시작 없음)")
 
     def _refresh_ports(self):
         try:
@@ -1761,7 +1836,11 @@ class MainWindow(QMainWindow):
             return
         if not self._client.connected:
             return
+        if self._mb_slave_id_read_exclusive:
+            return
         if self._main_poll_inflight:
+            return
+        if self._hpsb_probe_inflight or self._sub_coil_read_inflight or self._post_write_verify_remaining > 0:
             return
         self._main_poll_inflight = True
         self.request_read_di.emit()
@@ -1823,6 +1902,58 @@ class MainWindow(QMainWindow):
         else:
             self._log.log_info(f"[RTC] 읽기 실패: {err}")
 
+    def _on_read_mainboard_slave_id_clicked(self):
+        if not self._client.connected:
+            self._log.log_info("[MAIN] Not connected")
+            return
+        self._mb_slave_id_read_exclusive = True
+        if self._main_poll_timer.isActive():
+            self._main_poll_timer.stop()
+        self.request_read_mainboard_slave_id.emit()
+
+    def _on_mainboard_slave_id_read_result(self, ok: bool, effective, pending, err):
+        try:
+            if ok and effective is not None:
+                self._mb_slave_cfg_spin.setValue(int(effective))
+                p = int(pending) if pending is not None else -1
+                self._log.log_info(f"[MAIN] Slave ID read: effective={effective}, pending={p}")
+            else:
+                self._log.log_info(f"[MAIN] Slave ID read failed: {err}")
+        finally:
+            self._mb_slave_id_read_exclusive = False
+
+    def _on_save_mainboard_slave_id_clicked(self):
+        v = int(self._mb_slave_cfg_spin.value())
+        if not (1 <= v <= 247):
+            QMessageBox.warning(self, "Save ID", "유효한 Slave ID 범위는 1~247입니다.")
+            return
+        if v in MAIN_SLAVE_ID_FORBIDDEN_SUB:
+            QMessageBox.warning(
+                self,
+                "Save ID",
+                "서브보드 주소(1, 2, 4, 8)는 메인보드 Slave ID로 사용할 수 없습니다.",
+            )
+            return
+        self.request_save_mainboard_slave_id.emit(v)
+
+    def _on_mainboard_slave_save_result(self, ok: bool, err):
+        if ok:
+            saved_id = int(self._mb_slave_cfg_spin.value())
+            self._log.log_info(f"[MAIN] EEPROM 저장 완료: Mainboard Slave ID={saved_id}")
+            self._log.log_info("[MAIN] 저장값은 보드 재부팅 후 적용됩니다.")
+            self._log.log_info("[MAIN] 통신용 Slave ID는 자동 변경하지 않습니다. 새 ID로 다시 Connect 하세요.")
+            QMessageBox.information(
+                self,
+                "Save ID",
+                "EEPROM 저장 완료.\n"
+                f"- 저장한 Mainboard Slave ID: {saved_id}\n"
+                "- 보드 재부팅 후 적용됩니다.\n"
+                "- 통신용 Slave ID는 자동 변경되지 않으므로 새 ID로 다시 Connect 하세요.",
+            )
+        else:
+            self._log.log_info(f"[MAIN] Slave ID 저장 실패: {err}")
+            QMessageBox.warning(self, "Save ID", f"저장 실패: {err or 'unknown'}")
+
     def _on_di_result(self, ok: bool, bits: list | None, relay_states: list | None, vbits: list | None, err: str | None):
         self._main_poll_inflight = False
         self._in_unified_mb_poll = False        # 통합 poll 로그 억제 해제
@@ -1862,15 +1993,18 @@ class MainWindow(QMainWindow):
                 self._log.log_info(
                     f"[MAIN] poll interval backoff: {new_interval}ms (fail_streak={self._main_poll_fail_streak})"
                 )
-            # 동일 실패 로그 폭주 방지(2초 쓰로틀)
-            now_ts = time.monotonic()
-            if (now_ts - self._last_main_poll_fail_log_ts) >= 2.0:
-                self._last_main_poll_fail_log_ts = now_ts
-                self._log.log_tagged("[MAIN]", "FC04", 0, MAIN_FC04_DI_VBIT_COUNT, "Fail", msg)
+            fail_line = f"[MAIN] FC04 addr=0 cnt={MAIN_FC04_DI_VBIT_COUNT} Fail: {msg}"
+            self._log_comm_fail_throttled("main_fc04_di_fail", fail_line, self._main_poll_fail_streak)
             self._show_0xaa_mode_hint_if_needed(msg)
             if msg and ("No response" in msg or "0 received" in msg):
                 self._log.log_info("힌트: 메인보드 빌드에서 ENABLE_PC_TEST_AA_STREAM=0, USE_PC_TEST_UART1_SLAVE=1 인지 확인하세요.")
         if self._op_state == "READ_ONCE":
+            if self._read_once_from_minimal:
+                if ok and bits is not None:
+                    self._read_once_from_minimal = False
+                else:
+                    self._suppress_sub_auto_until = time.monotonic() + MINIMAL_FAIL_SUB_BLOCK_SEC
+                    self._read_once_from_minimal = False
             self._set_op_state("IDLE")
 
     def _on_pc_led_result(self, ok: bool, state: bool | None, err: str | None):
@@ -2423,9 +2557,7 @@ class MainWindow(QMainWindow):
             self._lpsb_log_timer.stop()
 
     def _on_lpsb_log_tick(self):
-        """(레거시) _lpsb_log_timer 콜백. 통합 모니터링(_on_hpsb_adc_log_tick)으로 대체됨.
-        _monitor_target == "both" 이면 타이머를 멈추고 종료 (중복 실행 방지).
-        """
+        """(legacy) _lpsb_log_timer: no tick guards (P0-P2 rare path)."""
         if not (self._client.connected and self._op_state == "OUTPUT_MONITORING"):
             self._lpsb_log_timer.stop()
             return
@@ -2509,6 +2641,10 @@ class MainWindow(QMainWindow):
         # 응답이 오면 _on_sub_data_result에서 [1s][CURRENT] 출력.
         # inflight 플래그로 막히지 않도록 직접 emit — 이전 read가 진행 중이면 skip해도 됨.
         if self._direct_mode == "none" and self._sub_auto_poll:
+            if time.monotonic() < self._suppress_sub_auto_until:
+                return
+            if self._any_modbus_inflight():
+                return
             self._auto_poll_adc_log_pending = True
             if self._light_bus_reads():
                 if not self._hpsb_probe_inflight and not self._sub_coil_read_inflight:
@@ -2519,6 +2655,10 @@ class MainWindow(QMainWindow):
                 self.request_read_sub.emit()
             return
         if self._direct_mode == "none" and self._op_state == "OUTPUT_MONITORING":
+            if time.monotonic() < self._suppress_sub_auto_until:
+                return
+            if self._any_modbus_inflight():
+                return
             if not self._hpsb_probe_inflight:
                 self._hpsb_probe_inflight = True
                 self.request_read_sub.emit()
@@ -2650,9 +2790,15 @@ class MainWindow(QMainWindow):
         emit_adc_log = bool(getattr(self, "_auto_poll_adc_log_pending", False))
         self._auto_poll_adc_log_pending = False
         if not ok:
+            self._sub_comm_fail_streak += 1
             if err:
-                self._log_info_rl("sub_coil_read_fail", f"[SUB] FC04 34/12 coil status fail: {err}", 3.0)
+                self._log_comm_fail_throttled(
+                    "sub_coil_read_fail", f"[SUB] FC04 34/12 coil status fail: {err}", self._sub_comm_fail_streak
+                )
+            if self._sub_auto_poll:
+                self._stop_auto_poll_completely("sub_coil_fail")
             return
+        self._sub_comm_fail_streak = 0
         cl = list(coils) if coils else []
         cl = (cl + [False] * 14)[:14]
         self._apply_sub_coils_ui_only(cl)
@@ -2674,19 +2820,20 @@ class MainWindow(QMainWindow):
         # Bootstrap sync 경로 판단 (함수 전체에서 is_bootstrap 참조)
         is_bootstrap = (self._bootstrap_sync_state == "syncing")
         if not ok:
-            # Bootstrap 재시도: 최대 3회 후 포기하고 main poll 시작
+            total_att = BOOTSTRAP_SYNC_RETRY_MAX + 1
             if is_bootstrap:
                 self._bootstrap_sync_retry += 1
-                if self._bootstrap_sync_retry < 3:
+                if self._bootstrap_sync_retry <= BOOTSTRAP_SYNC_RETRY_MAX:
                     self._log.log_info(
-                        f"[SYNC] 초기 동기화 읽기 실패 (retry {self._bootstrap_sync_retry}/3): {err or 'sub read fail'}"
+                        f"[SYNC] 초기 동기화 읽기 실패 (시도 {self._bootstrap_sync_retry}/{total_att}): {err or 'sub read fail'}"
                     )
                     QTimer.singleShot(500, self._do_bootstrap_sync_read)
                     return
-                else:
-                    self._log.log_info("[SYNC] 초기 동기화 3회 실패 → 포기하고 polling 시작")
-                    self._finish_bootstrap_sync(success=False)
-                    # 일반 fail 처리도 계속 수행
+                self._log.log_info(
+                    f"[SYNC] 초기 동기화 실패 ({self._bootstrap_sync_retry}/{total_att}회 시도) → 포기"
+                )
+                self._finish_bootstrap_sync(success=False)
+                # 일반 fail 처리도 계속 수행
             if self._pending_hpsb_write is not None:
                 self._log.log_info(f"[MB->HPSB] read-first probe fail -> write skipped ({err or 'sub read fail'})")
                 self._pending_hpsb_write = None
@@ -2716,11 +2863,16 @@ class MainWindow(QMainWindow):
             self._reset_hpsb_adc_state()
             self._update_hpsb_adc_labels()
             self._sync_hpsb_adc_log_timer()
+            self._sub_comm_fail_streak += 1
             if err:
-                self._log.log_tagged("[HPSB][LPSB2][LPSB4][LPSB8]", "FC04", SUB_SENSE_REG, "sub", "Fail", err)
+                line = f"[HPSB][LPSB2][LPSB4][LPSB8] FC04 addr={SUB_SENSE_REG} sub Fail: {err}"
+                self._log_comm_fail_throttled("sub_fc04_sense_fail", line, self._sub_comm_fail_streak)
+            if self._bootstrap_sync_state != "syncing" and self._sub_auto_poll:
+                self._stop_auto_poll_completely("sub_data_fail")
             if self._op_state == "READ_ONCE":
                 self._set_op_state("IDLE")
             return
+        self._sub_comm_fail_streak = 0
         # 성공 OK 로그: OUTPUT_MONITORING 중 또는 통합 poll 자동 주기에서는 억제
         # (ADC 로그는 _auto_poll_adc_log_pending 플래그가 True일 때만 별도 출력됨)
         if self._op_state not in ("OUTPUT_MONITORING",) and not getattr(self, "_in_unified_mb_poll", False):

@@ -60,6 +60,16 @@ int SystemConfig_Load(system_config_t *cfg);
  */
 int SystemConfig_Save(const system_config_t *cfg);
 
+/* Last SystemConfig_Save status code (for diagnostics; no UART logging). */
+#define SYSCFG_SAVE_STATUS_OK                     0u
+#define SYSCFG_SAVE_STATUS_ERR_NULL_CFG           1u
+#define SYSCFG_SAVE_STATUS_ERR_VALIDATE           2u
+#define SYSCFG_SAVE_STATUS_ERR_EEPROM_WRITE       3u
+#define SYSCFG_SAVE_STATUS_ERR_EEPROM_READ        4u
+#define SYSCFG_SAVE_STATUS_ERR_READBACK_VALIDATE  5u
+#define SYSCFG_SAVE_STATUS_ERR_SEQ_MISMATCH       6u
+uint16_t SystemConfig_GetLastSaveStatus(void);
+
 /**
  * Validate magic, version, CRC, slave_id (1~247), baudrate (allowed list only).
  * @return 0 if valid, non-zero if invalid.
@@ -74,6 +84,18 @@ uint16_t SystemConfig_CalcCrc(const system_config_t *cfg);
 
 /** Return pointer to the in-memory config. NULL if not yet loaded. */
 const system_config_t *SystemConfig_Get(void);
+
+/**
+ * Effective UART1/PC Modbus unit ID (EEPROM + validation).
+ * If FORCE_LIT9: 9. If EEPROM invalid (0xFF or out of 1..247): default 9.
+ */
+uint8_t SystemConfig_GetEffectiveMainboardSlaveId(void);
+
+/**
+ * Runtime communication slave ID used by current session.
+ * Policy: updated at boot/load time, not changed by SystemConfig_Save().
+ */
+uint8_t SystemConfig_GetRuntimeCommSlaveId(void);
 
 /** Current sequence number (from loaded or last saved block). 0 if not loaded. */
 uint16_t SystemConfig_GetSequence(void);
@@ -111,6 +133,13 @@ void UpstreamSlave_LogSyscfgWrite(uint16_t reg, uint16_t value, int result_ok);
 #define SYSCFG_MODBUS_SLAVE_ID_REG      3000u
 #define SYSCFG_MODBUS_BAUDRATE_CODE_REG 3001u
 #define SYSCFG_MODBUS_FACTORY_RESET_REG 3002u
+
+/* PC UART1 config path: FC06 pending + FC05 coil7 save trigger */
+#define MB_MAIN_SLAVE_PENDING_REG_PDU   2103u
+#define MB_MAIN_BAUD_RATE_PENDING_REG_PDU 2104u
+#define MB_MAIN_SYSTEM_MODE_REG_PDU     2105u
+#define MB_MAIN_LOG_ENABLE_REG_PDU      2106u
+#define MB_MAIN_SLAVE_SAVE_COIL_PDU     7u
 
 #ifdef __cplusplus
 }

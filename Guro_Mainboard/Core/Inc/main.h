@@ -55,6 +55,7 @@ void Error_Handler(void);
 /* USER CODE BEGIN EFP */
 extern I2C_HandleTypeDef hi2c3;
 extern UART_HandleTypeDef huart1;
+extern DMA_HandleTypeDef hdma_usart1_tx;
 extern RTC_HandleTypeDef hrtc;
 /* USER CODE END EFP */
 

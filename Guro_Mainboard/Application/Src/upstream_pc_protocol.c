@@ -15,8 +15,8 @@
 
 #define UPSTREAM_MODBUS_SLAVE_ID_DEFAULT  9
 static inline uint8_t get_upstream_slave_id(void) {
-  const system_config_t *c = SystemConfig_Get();
-  return c ? (uint8_t)c->slave_id : UPSTREAM_MODBUS_SLAVE_ID_DEFAULT;
+  uint8_t sid = SystemConfig_GetRuntimeCommSlaveId();
+  return sid ? sid : UPSTREAM_MODBUS_SLAVE_ID_DEFAULT;
 }
 #define MODBUS_RESP_BUF_SIZE     (1 + 128 + 2)   /* slave_id + PDU + CRC (FC03×40 regs) */
 #define RX_RING_SIZE             256
@@ -209,7 +209,8 @@ static void process_modbus_frame(const uint8_t *frame, size_t frame_len, const a
 	}
 
 	if (resp_len > 0 && (size_t)(1 + resp_len + 2) <= sizeof(modbus_resp_buf)) {
-		modbus_resp_buf[0] = get_upstream_slave_id();
+		/* Echo request unit ID to keep response/unit paired. */
+		modbus_resp_buf[0] = frame[0];
 		memcpy(&modbus_resp_buf[1], resp_pdu, (size_t)resp_len);
 		ModbusRTU_AppendCRC(modbus_resp_buf, (size_t)(1 + resp_len));
 		(void)HAL_UART_Transmit(&huart2, modbus_resp_buf,
@@ -353,6 +354,10 @@ void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t Size)
 
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 {
+#if USE_PC_TEST_UART1_SLAVE
+	if (huart == &huart1)
+		UpstreamSlaveUart1_TxCpltCallback();
+#endif
 	if (huart == &huart2)
 		UpstreamPC_TxCpltCallback();
 }

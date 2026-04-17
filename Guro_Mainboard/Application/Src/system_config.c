@@ -21,6 +21,16 @@ static system_config_t g_system_config;
 static uint16_t g_sequence;
 static uint8_t g_active_block;  /* 0 = A, 1 = B */
 static int g_loaded;
+static uint8_t g_runtime_comm_slave_id = SYSTEM_CONFIG_DEFAULT_SLAVE_ID;
+static uint16_t g_last_save_status = SYSCFG_SAVE_STATUS_OK;
+
+static uint8_t normalize_slave_id(uint8_t id)
+{
+	if (id == 0xFFu) return SYSTEM_CONFIG_DEFAULT_SLAVE_ID;
+	if (id < SYSTEM_CONFIG_SLAVE_ID_MIN || id > SYSTEM_CONFIG_SLAVE_ID_MAX)
+		return SYSTEM_CONFIG_DEFAULT_SLAVE_ID;
+	return id;
+}
 
 static int config_compare_payload(const system_config_t *a, const system_config_t *b)
 {
@@ -143,6 +153,7 @@ int SystemConfig_Load(system_config_t *cfg)
 		g_active_block = 0;
 		memcpy(&g_system_config, cfg, sizeof(g_system_config));
 		g_loaded = 1;
+		g_runtime_comm_slave_id = normalize_slave_id(g_system_config.slave_id);
 		/* Save defaults to block A */
 		uint8_t buf[SYSTEM_CONFIG_STORED_BYTES];
 		build_stored_block(buf, g_sequence, cfg);
@@ -153,14 +164,21 @@ int SystemConfig_Load(system_config_t *cfg)
 
 	memcpy(&g_system_config, cfg, sizeof(g_system_config));
 	g_loaded = 1;
+	g_runtime_comm_slave_id = normalize_slave_id(g_system_config.slave_id);
 	return 0;
 }
 
 int SystemConfig_Save(const system_config_t *cfg)
 {
-	if (!cfg) return -1;
-	if (SystemConfig_Validate(cfg) != 0)
+	g_last_save_status = SYSCFG_SAVE_STATUS_OK;
+	if (!cfg) {
+		g_last_save_status = SYSCFG_SAVE_STATUS_ERR_NULL_CFG;
 		return -1;
+	}
+	if (SystemConfig_Validate(cfg) != 0) {
+		g_last_save_status = SYSCFG_SAVE_STATUS_ERR_VALIDATE;
+		return -1;
+	}
 
 	if (g_loaded && config_compare_payload(cfg, &g_system_config) == 0) {
 #if SYSTEM_CONFIG_LOG_SKIP_SAVE
@@ -175,29 +193,71 @@ int SystemConfig_Save(const system_config_t *cfg)
 
 	uint8_t buf[SYSTEM_CONFIG_STORED_BYTES];
 	build_stored_block(buf, next_seq, cfg);
-	if (EEPROM_Write(base, buf, SYSTEM_CONFIG_STORED_BYTES) != 0)
+	if (EEPROM_Write(base, buf, SYSTEM_CONFIG_STORED_BYTES) != 0) {
+		g_last_save_status = SYSCFG_SAVE_STATUS_ERR_EEPROM_WRITE;
 		return -1;
+	}
 
 	/* Read back and validate */
 	uint8_t read_back[SYSTEM_CONFIG_STORED_BYTES];
-	if (EEPROM_Read(base, read_back, SYSTEM_CONFIG_STORED_BYTES) != 0)
+	if (EEPROM_Read(base, read_back, SYSTEM_CONFIG_STORED_BYTES) != 0) {
+		g_last_save_status = SYSCFG_SAVE_STATUS_ERR_EEPROM_READ;
 		return -1;
+	}
 	uint16_t read_seq;
 	system_config_t read_cfg;
 	parse_stored_block(read_back, &read_seq, &read_cfg);
-	if (SystemConfig_Validate(&read_cfg) != 0 || read_seq != next_seq)
+	if (SystemConfig_Validate(&read_cfg) != 0) {
+		g_last_save_status = SYSCFG_SAVE_STATUS_ERR_READBACK_VALIDATE;
 		return -1;
+	}
+	if (read_seq != next_seq) {
+		g_last_save_status = SYSCFG_SAVE_STATUS_ERR_SEQ_MISMATCH;
+		return -1;
+	}
 
 	g_active_block = next_block;
 	g_sequence = next_seq;
 	memcpy(&g_system_config, &read_cfg, sizeof(g_system_config));
 	g_loaded = 1;
+	g_last_save_status = SYSCFG_SAVE_STATUS_OK;
 	return 0;
+}
+
+uint16_t SystemConfig_GetLastSaveStatus(void)
+{
+	return g_last_save_status;
 }
 
 const system_config_t *SystemConfig_Get(void)
 {
 	return g_loaded ? &g_system_config : NULL;
+}
+
+uint8_t SystemConfig_GetEffectiveMainboardSlaveId(void)
+{
+#if MAINBOARD_UART1_SLAVE_ID_FORCE_LIT9
+	return 9u;
+#else
+	const system_config_t *cfg = SystemConfig_Get();
+	if (!cfg)
+		return SYSTEM_CONFIG_DEFAULT_SLAVE_ID;
+	uint8_t id = cfg->slave_id;
+	if (id == 0xFFu)
+		return SYSTEM_CONFIG_DEFAULT_SLAVE_ID;
+	if (id < SYSTEM_CONFIG_SLAVE_ID_MIN || id > SYSTEM_CONFIG_SLAVE_ID_MAX)
+		return SYSTEM_CONFIG_DEFAULT_SLAVE_ID;
+	return id;
+#endif
+}
+
+uint8_t SystemConfig_GetRuntimeCommSlaveId(void)
+{
+#if MAINBOARD_UART1_SLAVE_ID_FORCE_LIT9
+	return 9u;
+#else
+	return g_runtime_comm_slave_id;
+#endif
 }
 
 uint16_t SystemConfig_GetSequence(void)
@@ -229,6 +289,7 @@ int SystemConfig_FactoryReset(void)
 		return -1;
 	memcpy(&g_system_config, &cfg, sizeof(g_system_config));
 	g_loaded = 1;
+	g_runtime_comm_slave_id = normalize_slave_id(g_system_config.slave_id);
 
 #if SYSTEM_CONFIG_BOOT_LOG_FACTORY_RESET
 	SystemConfig_LogFactoryResetDone();

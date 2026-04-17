@@ -30,6 +30,8 @@ class MainboardWorker(QObject):
     doc_fc05_result = pyqtSignal(bool, object)          # ok, err
     doc_fc15_result = pyqtSignal(bool, object)          # ok, err
     rtc_result = pyqtSignal(bool, object, object)       # ok, regs[7] or None, err
+    mainboard_slave_id_read_result = pyqtSignal(bool, object, object, object)  # ok, eff, pend, err
+    mainboard_slave_save_result = pyqtSignal(bool, object)  # ok, err
 
     def __init__(self, client):
         super().__init__()
@@ -62,6 +64,20 @@ class MainboardWorker(QObject):
             return
         ok, regs, err = self._client.read_board_time()
         self.rtc_result.emit(ok, regs, err)
+
+    def on_request_read_mainboard_slave_id(self):
+        if not self._client.connected:
+            self.mainboard_slave_id_read_result.emit(False, None, None, "Not connected")
+            return
+        ok, eff, pend, err = self._client.read_mainboard_slave_id_regs()
+        self.mainboard_slave_id_read_result.emit(ok, eff, pend, err)
+
+    def on_request_save_mainboard_slave_id(self, new_id: int):
+        if not self._client.connected:
+            self.mainboard_slave_save_result.emit(False, "Not connected")
+            return
+        ok, err = self._client.save_mainboard_slave_id_eeprom(int(new_id))
+        self.mainboard_slave_save_result.emit(ok, err)
 
     def on_request_set_rtc(self):
         import datetime

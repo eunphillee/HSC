@@ -14,25 +14,15 @@
 #include <string.h>
 #include <stdio.h>
 
-#define UART1_TX_TC_TIMEOUT_MS      80
 #define UART1_TX_TIMEOUT_MS         400
 #define UART1_RESP_PDU_MAX_BYTES    256
 #define UART1_DE_PRE_TX_SETTLE_MS   1
 #define UART1_DE_POST_TC_HOLD_MS    2
 
-/* Slave ID: 기본은 EEPROM(SystemConfig). MAINBOARD_UART1_SLAVE_ID_FORCE_LIT9=1이면 항상 9. */
+/* Runtime comm slave ID: fixed for current boot session (FORCE_LIT9 respected). */
 static inline uint8_t get_slave_id(void)
 {
-#if MAINBOARD_UART1_SLAVE_ID_FORCE_LIT9
-    return 9u;
-#else
-    const system_config_t *cfg = SystemConfig_Get();
-    if (!cfg) return 9u;
-    uint8_t id = cfg->slave_id;
-    if (id < SYSTEM_CONFIG_SLAVE_ID_MIN || id > SYSTEM_CONFIG_SLAVE_ID_MAX)
-        return 9u;
-    return id;
-#endif
+    return SystemConfig_GetRuntimeCommSlaveId();
 }
 #define RX_BUF_SIZE        64
 #define RING_SIZE          256
@@ -155,6 +145,10 @@ static uint32_t last_log_tick;
 static uint32_t last_0xaa_tick;  /* 보드→PC 0xAA 주기 송신 */
 static uint32_t last_tx_resp_tick; /* Modbus 응답 송신 시각 (0xAA 송신 금지 구간용) */
 
+static uint8_t s_uart1_tx_dma[RESP_BUF_SIZE];
+static volatile uint8_t s_uart1_de_hold_pending;
+static uint32_t s_uart1_post_tc_tick;
+
 __attribute__((weak)) void UpstreamSlaveUart1_LogCounts(uint32_t rx_ok, uint32_t rx_crc_fail, uint32_t rx_len_fail, uint32_t tx_resp)
 {
 	(void)rx_ok;
@@ -235,7 +229,8 @@ static void process_modbus_frame(const uint8_t *frame, size_t frame_len, const a
 	}
 
 	if (resp_len > 0 && (size_t)(1 + resp_len + 2) <= sizeof(tx_frame)) {
-		tx_frame[0] = get_slave_id();
+		/* Echo request unit ID (matches req_slave after EEPROM slave_id change). */
+		tx_frame[0] = frame[0];
 		memcpy(&tx_frame[1], resp_pdu, (size_t)resp_len);
 		ModbusRTU_AppendCRC(tx_frame, (size_t)(1 + resp_len));
 		uint16_t tx_len = (uint16_t)(1 + resp_len + 2);
@@ -248,6 +243,14 @@ static void process_modbus_frame(const uint8_t *frame, size_t frame_len, const a
 			Gateway_LogFc06ResponseHex(tx_frame, tx_len);
 		}
 #endif
+		{
+			uint32_t tw = HAL_GetTick();
+			while (huart1.gState != HAL_UART_STATE_READY) {
+				if ((HAL_GetTick() - tw) > UART1_TX_TIMEOUT_MS)
+					return;
+			}
+		}
+
 		last_tx_resp_tick = HAL_GetTick();
 		LED_Status_OnUart1TxRespBefore();
 		uart1_debug_log_tx_resp_len(tx_len);
@@ -259,29 +262,21 @@ static void process_modbus_frame(const uint8_t *frame, size_t frame_len, const a
 		 * a more likely culprit than end-of-frame hold. */
 		if (UART1_DE_PRE_TX_SETTLE_MS > 0)
 			HAL_Delay(UART1_DE_PRE_TX_SETTLE_MS);
-		/* Long RTU responses (e.g. FC04 82 regs) need extra transmit budget at 9600 baud. */
-		(void)HAL_UART_Transmit(&huart1, tx_frame, tx_len, UART1_TX_TIMEOUT_MS);
-		/* 마지막 바이트가 나갈 때까지 대기 후 DE → RX (응답 잘림/No Response 방지) */
-		{
-			uint32_t start = HAL_GetTick();
-			while (__HAL_UART_GET_FLAG(&huart1, UART_FLAG_TC) == RESET) {
-				if ((HAL_GetTick() - start) > UART1_TX_TC_TIMEOUT_MS)
-					break;
-			}
+
+		if ((size_t)tx_len > sizeof(s_uart1_tx_dma))
+			return;
+		memcpy(s_uart1_tx_dma, tx_frame, (size_t)tx_len);
+		if (HAL_UART_Transmit_DMA(&huart1, s_uart1_tx_dma, tx_len) != HAL_OK) {
+			uart1_debug_log_de_rx();
+			set_de_rx();
+			if (TX_GUARD_MS > 0)
+				HAL_Delay(TX_GUARD_MS);
+			(void)HAL_UARTEx_ReceiveToIdle_IT(&huart1, rx_buf, RX_BUF_SIZE);
+			return;
 		}
-		/* Keep DE asserted a little longer after TC.
-		 * On the actual MAX3485 line, dropping DE immediately after TC was
-		 * observed to clip the tail of longer frames (CRC/stop bits). */
-		if (UART1_DE_POST_TC_HOLD_MS > 0)
-			HAL_Delay(UART1_DE_POST_TC_HOLD_MS);
-		uart1_debug_log_de_rx();
-		set_de_rx();
-		if (TX_GUARD_MS > 0)
-			HAL_Delay(TX_GUARD_MS);
-		tx_resp_count++;
-		LED_Status_OnUart1SlaveTx();
+
 		LED_Status_OnRS485Activity();
-		(void)HAL_UARTEx_ReceiveToIdle_IT(&huart1, rx_buf, RX_BUF_SIZE);
+		/* DE -> RX, guard, RX restart, tx_resp_count: Poll() after TxCplt + post-TC hold */
 	}
 }
 
@@ -295,6 +290,7 @@ void UpstreamSlaveUart1_Init(void)
 	tx_resp_count = 0;
 	last_log_tick = HAL_GetTick();
 	last_tx_resp_tick = 0;
+	s_uart1_de_hold_pending = 0u;
 	set_de_rx();   /* Boot: always RX first (PB1=RX); FORCE_RS485_TX=1 then overrides below */
 #if FORCE_RS485_TX
 	set_de_tx();   /* Optional: fix PB1=TX for test */
@@ -327,9 +323,30 @@ void UpstreamSlaveUart1_RxEventCallback(uint16_t Size)
 	(void)HAL_UARTEx_ReceiveToIdle_IT(&huart1, rx_buf, RX_BUF_SIZE);
 }
 
+void UpstreamSlaveUart1_TxCpltCallback(void)
+{
+	s_uart1_post_tc_tick = HAL_GetTick();
+	s_uart1_de_hold_pending = 1u;
+}
+
 void UpstreamSlaveUart1_Poll(const aggregated_status_t *agg)
 {
 	uint32_t now = HAL_GetTick();
+	/* DMA TX TC: post-TC DE hold and RX restart in task context (not in ISR). */
+	if (s_uart1_de_hold_pending) {
+		if ((now - s_uart1_post_tc_tick) >= (uint32_t)UART1_DE_POST_TC_HOLD_MS) {
+			s_uart1_de_hold_pending = 0u;
+			uart1_debug_log_de_rx();
+			set_de_rx();
+			if (TX_GUARD_MS > 0)
+				HAL_Delay(TX_GUARD_MS);
+			tx_resp_count++;
+			LED_Status_OnUart1SlaveTx();
+			LED_Status_OnRS485Activity();
+			(void)HAL_UARTEx_ReceiveToIdle_IT(&huart1, rx_buf, RX_BUF_SIZE);
+		}
+	}
+	now = HAL_GetTick();
 
 	/* 완성된 Modbus 프레임이 있으면 먼저 처리 (이 경로에서는 0xAA 송신 없음 → 응답과 0xAA 혼선 방지) */
 	if (rx_ring_len > 0 && (now - last_rx_tick) >= (uint32_t)FRAME_END_MS) {
@@ -419,6 +436,8 @@ void UpstreamSlaveUart1_Poll(const aggregated_status_t *agg)
 	/* 유휴 시에만 0xAA 송신: Modbus 처리 중이 아니고, 응답 직후 금지 구간이 지났을 때만 */
 #if BOARD_TX_0XAA_ENABLE
 	if (rx_ring_len == 0
+	    && !s_uart1_de_hold_pending
+	    && huart1.gState == HAL_UART_STATE_READY
 	    && (now - last_tx_resp_tick) >= TX_RESP_GUARD_MS
 	    && (now - last_0xaa_tick) >= BOARD_TX_0XAA_INTERVAL_MS) {
 		last_0xaa_tick = now;

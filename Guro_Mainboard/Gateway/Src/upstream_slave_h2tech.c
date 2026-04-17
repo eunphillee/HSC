@@ -603,7 +603,7 @@ static void _legacy_fc04_main_packed_unused(uint16_t start_addr, uint16_t count,
 __attribute__((unused)) static int handle_fc06(uint16_t start_addr, const uint8_t *write_data,
                        uint8_t *response, uint16_t resp_max)
 {
-    if (resp_max < 6u || !write_data) return -1;
+    if (resp_max < 5u || !write_data) return -1;
     uint16_t value = (uint16_t)((write_data[0] << 8) | write_data[1]);
 
 #if FC06_DEBUG_LOG
@@ -631,7 +631,7 @@ __attribute__((unused)) static int handle_fc06(uint16_t start_addr, const uint8_
         response[2] = (uint8_t)(start_addr & 0xFF);
         response[3] = (uint8_t)(value >> 8);
         response[4] = (uint8_t)(value & 0xFF);
-        return 6;
+        return 5;
     }
     if (start_addr == UPSTREAM_PC_RESET_EN_REG) {
         if (value != 0u)
@@ -643,7 +643,7 @@ __attribute__((unused)) static int handle_fc06(uint16_t start_addr, const uint8_
         response[2] = (uint8_t)(start_addr & 0xFF);
         response[3] = (uint8_t)(value >> 8);
         response[4] = (uint8_t)(value & 0xFF);
-        return 6;
+        return 5;
     }
 
     /* 4x3000: slave_id (1~247) -> EEPROM save */
@@ -659,6 +659,7 @@ __attribute__((unused)) static int handle_fc06(uint16_t start_addr, const uint8_
         }
         system_config_t cfg = *cur;
         cfg.slave_id = (uint8_t)(value & 0xFF);
+        cfg.crc = SystemConfig_CalcCrc(&cfg);
         if (SystemConfig_Save(&cfg) != 0) {
 #if SYSCFG_MODBUS_DEBUG_LOG
             UpstreamSlave_LogSyscfgWrite(SYSCFG_MODBUS_SLAVE_ID_REG, value, 0);
@@ -675,7 +676,7 @@ __attribute__((unused)) static int handle_fc06(uint16_t start_addr, const uint8_
         response[2] = (uint8_t)(start_addr & 0xFF);
         response[3] = (uint8_t)(value >> 8);
         response[4] = (uint8_t)(value & 0xFF);
-        return 6;
+        return 5;
     }
 
     /* 4x3001: baudrate code (0~4) -> EEPROM save only.
@@ -693,6 +694,7 @@ __attribute__((unused)) static int handle_fc06(uint16_t start_addr, const uint8_
         uint32_t baud = baudrate_from_code((uint16_t)value);
         system_config_t cfg = *cur;
         cfg.baudrate = baud;
+        cfg.crc = SystemConfig_CalcCrc(&cfg);
         if (SystemConfig_Save(&cfg) != 0) {
 #if SYSCFG_MODBUS_DEBUG_LOG
             UpstreamSlave_LogSyscfgWrite(SYSCFG_MODBUS_BAUDRATE_CODE_REG, value, 0);
@@ -709,7 +711,7 @@ __attribute__((unused)) static int handle_fc06(uint16_t start_addr, const uint8_
         response[2] = (uint8_t)(start_addr & 0xFF);
         response[3] = (uint8_t)(value >> 8);
         response[4] = (uint8_t)(value & 0xFF);
-        return 6;
+        return 5;
     }
 
     /* 4x3002: factory reset command. value=1 -> SystemConfig_FactoryReset() */
@@ -738,7 +740,7 @@ __attribute__((unused)) static int handle_fc06(uint16_t start_addr, const uint8_
         response[2] = (uint8_t)(start_addr & 0xFF);
         response[3] = (uint8_t)(value >> 8);
         response[4] = (uint8_t)(value & 0xFF);
-        return 6;
+        return 5;
     }
 
     if (start_addr != UPSTREAM_MAIN_IO_DO_REG) {
@@ -756,7 +758,7 @@ __attribute__((unused)) static int handle_fc06(uint16_t start_addr, const uint8_
     response[2] = (uint8_t)(start_addr & 0xFF);
     response[3] = (uint8_t)(value >> 8);
     response[4] = (uint8_t)(value & 0xFF);
-    return 6;
+    return 5;
 }
 
 /* FC16 Write Multiple Holding Registers: 4x2101(1개), 4x3000~3002(1~3개).
@@ -839,6 +841,96 @@ __attribute__((unused)) static int handle_fc16(uint16_t start_addr, uint16_t cou
     return 2;
 }
 
+/* ------------------------------------------------------------------ */
+/* Mainboard config pending:
+ * FC06 2103(slave_id), 2104(baud), 2105(system_mode), 2106(log_enable)
+ * + FC05 coil 7(CONFIG_SAVE_TRIGGER) commit.
+ */
+/* ------------------------------------------------------------------ */
+
+static uint16_t s_mb_main_slave_pending;
+static uint16_t s_mb_baud_rate_pending;
+static uint16_t s_mb_system_mode_runtime;
+static uint16_t s_mb_log_enable_runtime;
+static uint16_t s_mb_last_coil7_save_fail_code;
+
+void UpstreamSlave_InitMainboardSlavePending(void)
+{
+    s_mb_main_slave_pending = (uint16_t)SystemConfig_GetEffectiveMainboardSlaveId();
+    {
+        const system_config_t *cfg = SystemConfig_Get();
+        s_mb_baud_rate_pending = cfg ? (uint16_t)cfg->baudrate : (uint16_t)SYSTEM_CONFIG_DEFAULT_BAUDRATE;
+    }
+    s_mb_system_mode_runtime = 0u;
+    s_mb_log_enable_runtime = 0u;
+    s_mb_last_coil7_save_fail_code = 0u;
+}
+
+uint16_t UpstreamSlave_GetPendingMainboardSlaveId(void)
+{
+    return s_mb_main_slave_pending;
+}
+
+uint16_t UpstreamSlave_GetPendingMainboardBaudRate(void)
+{
+    return s_mb_baud_rate_pending;
+}
+
+uint16_t UpstreamSlave_GetLastCoil7SaveFailCode(void)
+{
+    return s_mb_last_coil7_save_fail_code;
+}
+
+static int mb_main_slave_id_is_reserved_sub(uint16_t v)
+{
+    return (v == 1u || v == 2u || v == 4u || v == 8u) ? 1 : 0;
+}
+
+static int handle_fc06_main_config_pending(uint16_t start_addr, const uint8_t *write_data,
+                                           uint8_t *response, uint16_t resp_max)
+{
+    if (resp_max < 5u || !write_data)
+        return -1;
+    uint16_t val = (uint16_t)(((uint16_t)write_data[0] << 8) | (uint16_t)write_data[1]);
+    switch (start_addr) {
+    case MB_MAIN_SLAVE_PENDING_REG_PDU: /* 2103 */
+        if (val < SYSTEM_CONFIG_SLAVE_ID_MIN || val > SYSTEM_CONFIG_SLAVE_ID_MAX ||
+            mb_main_slave_id_is_reserved_sub(val)) {
+            response[0] = 0x86;
+            response[1] = EX_ILLEGAL_DATA_VAL;
+            return 2;
+        }
+        s_mb_main_slave_pending = val;
+        ModbusIrMap_SyncConfigDiag();
+        break;
+    case MB_MAIN_BAUD_RATE_PENDING_REG_PDU: /* 2104 */
+        if (!SystemConfig_IsBaudrateAllowed((uint32_t)val)) {
+            response[0] = 0x86;
+            response[1] = EX_ILLEGAL_DATA_VAL;
+            return 2;
+        }
+        s_mb_baud_rate_pending = val;
+        ModbusIrMap_SyncConfigDiag();
+        break;
+    case MB_MAIN_SYSTEM_MODE_REG_PDU: /* 2105, phase-1: runtime only */
+        s_mb_system_mode_runtime = val;
+        break;
+    case MB_MAIN_LOG_ENABLE_REG_PDU: /* 2106, phase-1: runtime only */
+        s_mb_log_enable_runtime = val;
+        break;
+    default:
+        response[0] = 0x86;
+        response[1] = EX_ILLEGAL_DATA_ADDR;
+        return 2;
+    }
+    response[0] = 0x06;
+    response[1] = (uint8_t)(start_addr >> 8);
+    response[2] = (uint8_t)(start_addr & 0xFFu);
+    response[3] = (uint8_t)(val >> 8);
+    response[4] = (uint8_t)(val & 0xFFu);
+    return 5;
+}
+
 /* FC05 Write Single Coil */
 static int handle_fc05(uint16_t start_addr, const uint8_t *write_data,
                       uint8_t *response, uint16_t resp_max)
@@ -891,8 +983,8 @@ static int handle_fc05(uint16_t start_addr, const uint8_t *write_data,
         return 5;
     }
     if (start_addr == 4u) {
+        /* Trigger-only: ON executes, OFF ignored. */
         if (value) Gateway_Action_StartPulsePC_ON_EN();
-        else BSP_WritePC_ON_EN(0);
         response[0] = 0x05;
         response[1] = (uint8_t)(start_addr >> 8);
         response[2] = (uint8_t)(start_addr & 0xFFu);
@@ -901,9 +993,9 @@ static int handle_fc05(uint16_t start_addr, const uint8_t *write_data,
         return 5;
     }
     if (start_addr == 5u) {
+        /* Trigger-only: ON executes, OFF ignored. */
         /* PC_OFF: writing ON should turn PC_ON_EN off */
         if (value) BSP_WritePC_ON_EN(0);
-        else BSP_WritePC_ON_EN(0);
         response[0] = 0x05;
         response[1] = (uint8_t)(start_addr >> 8);
         response[2] = (uint8_t)(start_addr & 0xFFu);
@@ -912,8 +1004,58 @@ static int handle_fc05(uint16_t start_addr, const uint8_t *write_data,
         return 5;
     }
     if (start_addr == 6u) {
+        /* Trigger-only: ON executes, OFF ignored. */
         if (value) Gateway_Action_StartPulsePC_RESET_EN();
-        else BSP_WritePC_RESET_EN(0);
+        response[0] = 0x05;
+        response[1] = (uint8_t)(start_addr >> 8);
+        response[2] = (uint8_t)(start_addr & 0xFFu);
+        response[3] = value ? 0xFFu : 0u;
+        response[4] = 0u;
+        return 5;
+    }
+    if (start_addr == MB_MAIN_SLAVE_SAVE_COIL_PDU) {
+        if (!value) {
+            response[0] = 0x05;
+            response[1] = (uint8_t)(start_addr >> 8);
+            response[2] = (uint8_t)(start_addr & 0xFFu);
+            response[3] = 0u;
+            response[4] = 0u;
+            return 5;
+        }
+        s_mb_last_coil7_save_fail_code = 0u;
+        uint16_t p = s_mb_main_slave_pending;
+        if (p < SYSTEM_CONFIG_SLAVE_ID_MIN || p > SYSTEM_CONFIG_SLAVE_ID_MAX ||
+            mb_main_slave_id_is_reserved_sub(p)) {
+            s_mb_last_coil7_save_fail_code = 1u; /* pending_id invalid/reserved */
+            ModbusIrMap_SyncConfigDiag();
+            response[0] = 0x85;
+            response[1] = EX_ILLEGAL_DATA_VAL;
+            return 2;
+        }
+        const system_config_t *cur = SystemConfig_Get();
+        if (!cur) {
+            s_mb_last_coil7_save_fail_code = 2u; /* SystemConfig_Get NULL */
+            ModbusIrMap_SyncConfigDiag();
+            response[0] = 0x85;
+            response[1] = EX_SLAVE_DEVICE_FAIL;
+            return 2;
+        }
+        system_config_t cfg = *cur;
+        cfg.slave_id = (uint8_t)(p & 0xFFu);
+        cfg.baudrate = (uint32_t)SYSTEM_CONFIG_BAUDRATE_9600;
+        cfg.crc = SystemConfig_CalcCrc(&cfg);
+        {
+            int save_ret = SystemConfig_Save(&cfg);
+            if (save_ret != 0) {
+                s_mb_last_coil7_save_fail_code = (uint16_t)(0x100u | SystemConfig_GetLastSaveStatus());
+                ModbusIrMap_SyncConfigDiag();
+                response[0] = 0x85;
+                response[1] = EX_SLAVE_DEVICE_FAIL;
+                return 2;
+            }
+        }
+        s_mb_last_coil7_save_fail_code = 0u;
+        ModbusIrMap_SyncConfigDiag();
         response[0] = 0x05;
         response[1] = (uint8_t)(start_addr >> 8);
         response[2] = (uint8_t)(start_addr & 0xFFu);
@@ -1092,8 +1234,20 @@ int UpstreamSlave_HandleRequest(uint8_t fc, uint16_t start_addr, uint16_t count,
         return handle_fc04(start_addr, count, p_agg, response, resp_max);
     case 0x05:
         return handle_fc05(start_addr, write_data, response, resp_max);
-    /* Unified Rule v1.2: Write = FC05 primary, FC16 reserved for RTC block. */
+    /* Write policy:
+     * - FC05: coil writes / triggers
+     * - FC06: legacy syscfg(3000~3002) + pending path(2103~2106)
+     * - FC16: reserved for RTC block. */
     case 0x06:
+        if (start_addr >= MB_MAIN_SLAVE_PENDING_REG_PDU && start_addr <= MB_MAIN_LOG_ENABLE_REG_PDU) {
+            return handle_fc06_main_config_pending(start_addr, write_data, response, resp_max);
+        }
+        if (start_addr >= SYSCFG_MODBUS_SLAVE_ID_REG && start_addr <= SYSCFG_MODBUS_FACTORY_RESET_REG) {
+            return handle_fc06(start_addr, write_data, response, resp_max);
+        }
+        response[0] = 0x86u;
+        response[1] = EX_ILLEGAL_DATA_ADDR;
+        return 2;
     case 0x0F:
         response[0] = (uint8_t)(fc | 0x80u);
         response[1] = EX_ILLEGAL_FUNCTION;

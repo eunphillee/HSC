@@ -55,7 +55,7 @@ int EEPROM_Write(uint16_t addr, const uint8_t *buf, uint16_t len)
 			return -1;
 		off += chunk;
 		HAL_Delay(EEPROM_WRITE_MS);
-		if (off < len && eeprom_wait_ready() != 0) return -1;
+		if (eeprom_wait_ready() != 0) return -1;
 	}
 	return 0;
 }
