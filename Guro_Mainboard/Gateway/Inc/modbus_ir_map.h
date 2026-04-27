@@ -3,13 +3,16 @@
  * @brief FC04 Input Register global map: 4 static zone arrays (MAIN/RTC/ENV/DIAG).
  *
  * Zones (v1.3 address map):
- *   s_ir_main[82]   : addr   0 ..   81  (MAIN 0..23 + PACKED 24..81)
+ *   s_ir_main[94]   : addr   0 ..   93
+ *                     - MAIN 0..23 + PACKED 24..81
+ *                     - Estimated Power W @220V (82..93)
  *   s_ir_rtc[7]     : addr 890 ..  896  (RTC)
  *   s_ir_env[23]    : addr 2100 .. 2122
  *                     - 2100..2101 : MAIN IO bitmaps
  *                     - 2102       : effective slave id
  *                     - 2103       : pending slave id
  *                     - 2104       : pending baudrate
+ *                     - 2107       : PC no-comm watchdog timeout (sec), mirror of 4x3003
  *                     - 2108       : last SystemConfig_Save() status
  *                     - 2109       : last FC05 coil7 save fail code
  *                     - 2113..2114 : reset CSR
@@ -38,12 +41,12 @@ extern "C" {
 #define MB_IR_DIAG_START 4000u
 
 /* ---- Zone sizes ---- */
-#define MB_IR_MAIN_COUNT   82u  /* 0..81              */
+#define MB_IR_MAIN_COUNT   94u  /* 0..93              */
 #define MB_IR_RTC_COUNT     7u  /* 890..896            */
 #define MB_IR_ENV_COUNT    23u  /* 2100..2122          */
 #define MB_IR_DIAG_COUNT   40u  /* 4000..4039          */
 
-/* Total static SRAM: (82+7+23+40)*2 = 304 bytes */
+/* Total static SRAM: (94+7+23+40)*2 = 328 bytes */
 
 /**
  * Refresh all IR zones from the given aggregated state + live GPIO reads.
@@ -89,6 +92,7 @@ void ModbusIrMap_OnFc05Write(uint16_t addr, bool value);
  *   2102 effective slave id
  *   2103 pending slave id
  *   2104 pending baudrate
+ *   2107 PC no-comm watchdog timeout(sec), mirror of 4x3003
  *   2108 last SystemConfig_Save() status
  *   2109 last FC05 coil7 save fail code
  */

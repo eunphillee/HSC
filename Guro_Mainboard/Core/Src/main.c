@@ -215,6 +215,12 @@ int main(void)
   UpstreamSlaveUart1_Init();
 #endif
   MainAutoLink_Init();
+  {
+    const output_state_nvm_t *out_state = OutputStateNvm_Get();
+    if (out_state != NULL) {
+      OutputStateNvm_ApplyMainboardRelays(out_state);
+    }
+  }
   LED_Status_Init();
 #if ENABLE_PC_TEST_AA_STREAM
   PcTestAA_Init();
@@ -323,6 +329,7 @@ int main(void)
 #endif
 #endif
 #endif
+    UpstreamSlave_PcWatchdogTick();
     if (AppScheduler_IsDue(TASK_AGGREGATE_UPDATE))
       SystemSync_Update(&aggregated_status, HAL_GetTick());
     Gateway_Action_Update();

@@ -41,7 +41,9 @@ extern "C" {
  * Upstream slave (UART1→PC): UART1_RESP_PDU_MAX_BYTES=256, tx_frame=259 (separate, upstream_slave_uart1.c)
  * Downstream master (USART2→Sub): uses these buffers.
  *   FC04 HPSB/LPSB max response: slave(1)+FC(1)+bc(1)+16regs×2(32)+CRC(2) = 37B → 64 was fine for sub.
- *   MB_IR_MAIN_COUNT=82 regs → PDU=1+1+164=166B, RTU frame=168B → needs ≥256B
+ *   MB_IR_MAIN_COUNT=94 regs → PDU=1+1+188=190B, RTU frame=192B
+ *   UART1 FC04 full read (94 regs): unit+PDU+CRC = 1+190+2 = 193B
+ *   => 256-byte buffers remain sufficient.
  *   MODBUS_MAX_PDU_LEN raised to 256 to avoid buffer overrun when sub responds with packed data. */
 #define MODBUS_RTU_RX_BUF_SIZE        256
 #define MODBUS_RTU_TX_BUF_SIZE        256

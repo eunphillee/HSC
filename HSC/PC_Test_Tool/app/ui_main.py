@@ -183,6 +183,8 @@ class MainWindow(QMainWindow):
     request_set_rtc = pyqtSignal()
     request_read_mainboard_slave_id = pyqtSignal()
     request_save_mainboard_slave_id = pyqtSignal(int)
+    request_save_pc_state_time_minutes = pyqtSignal(int)
+    request_read_pc_state_time_minutes = pyqtSignal()
     request_write_relay = pyqtSignal(int, bool)
     request_write_virtual_bit = pyqtSignal(int, bool)
     request_pc_on_pulse = pyqtSignal()
@@ -422,8 +424,16 @@ class MainWindow(QMainWindow):
         self.request_save_mainboard_slave_id.connect(
             self._worker.on_request_save_mainboard_slave_id, Qt.ConnectionType.QueuedConnection
         )
+        self.request_save_pc_state_time_minutes.connect(
+            self._worker.on_request_save_pc_state_time_minutes, Qt.ConnectionType.QueuedConnection
+        )
+        self.request_read_pc_state_time_minutes.connect(
+            self._worker.on_request_read_pc_state_time_minutes, Qt.ConnectionType.QueuedConnection
+        )
         self._worker.mainboard_slave_id_read_result.connect(self._on_mainboard_slave_id_read_result)
         self._worker.mainboard_slave_save_result.connect(self._on_mainboard_slave_save_result)
+        self._worker.pc_state_time_save_result.connect(self._on_pc_state_time_save_result)
+        self._worker.pc_state_time_read_result.connect(self._on_pc_state_time_read_result)
 
     def _build_ui(self):
         central = QWidget()
@@ -884,6 +894,8 @@ class MainWindow(QMainWindow):
             lambda unit, start, count: self.request_doc_fc04.emit(unit, start, count),
             lambda unit, addr, value: self.request_doc_fc05.emit(unit, addr, value),
             lambda unit, start, values: None,
+            lambda minutes: self.request_save_pc_state_time_minutes.emit(minutes),
+            lambda: self.request_read_pc_state_time_minutes.emit(),
         )
         self._doc_panel = tab_doc
         tabs.addTab(tab_doc, "Modbus 테스트")
@@ -910,6 +922,14 @@ class MainWindow(QMainWindow):
     def _on_doc_fc15_result(self, ok: bool, err: str | None):
         if hasattr(self, "_doc_panel"):
             self._doc_panel.on_fc15_result(ok, err)
+
+    def _on_pc_state_time_save_result(self, ok: bool, minutes: int, err: str | None):
+        if hasattr(self, "_doc_panel"):
+            self._doc_panel.on_set_pc_state_time_result(ok, int(minutes), err)
+
+    def _on_pc_state_time_read_result(self, ok: bool, minutes: int | None, err: str | None):
+        if hasattr(self, "_doc_panel"):
+            self._doc_panel.on_read_pc_state_time_result(ok, minutes, err)
 
     def showEvent(self, event: QShowEvent):
         """첫 표시 시 기본 너비·높이로 열림 (저장된 창 크기 무시)."""

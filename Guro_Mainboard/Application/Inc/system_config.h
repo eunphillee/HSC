@@ -16,6 +16,9 @@ extern "C" {
 #define SYSTEM_CONFIG_VERSION  1u
 #define SYSTEM_CONFIG_DEFAULT_SLAVE_ID  9u
 #define SYSTEM_CONFIG_DEFAULT_BAUDRATE  9600u
+#define SYSTEM_CONFIG_DEFAULT_PC_NO_COMM_TIMEOUT_SEC  600u
+#define SYSTEM_CONFIG_PC_NO_COMM_TIMEOUT_SEC_MIN      10u
+#define SYSTEM_CONFIG_PC_NO_COMM_TIMEOUT_SEC_MAX      65535u
 
 /* slave_id valid range (Modbus) */
 #define SYSTEM_CONFIG_SLAVE_ID_MIN  1u
@@ -45,7 +48,7 @@ typedef struct __attribute__((packed)) {
 	uint16_t crc;
 } system_config_t;
 
-/** Set default values (magic, version=1, slave_id=1, baudrate=9600). */
+/** Set default values (magic, version=1, slave_id=9, baudrate=9600). */
 void SystemConfig_SetDefaults(system_config_t *cfg);
 
 /**
@@ -78,6 +81,15 @@ int SystemConfig_Validate(const system_config_t *cfg);
 
 /** Return 1 if baudrate is in allowed list (9600,19200,38400,57600,115200), else 0. */
 int SystemConfig_IsBaudrateAllowed(uint32_t baudrate);
+
+/** Return 1 if PC no-comm timeout(sec) is in allowed range, else 0. */
+int SystemConfig_IsPcNoCommTimeoutAllowed(uint16_t timeout_sec);
+
+/** Extract PC no-comm timeout(sec). Legacy 0 value falls back to default. */
+uint16_t SystemConfig_GetPcNoCommTimeoutSecFromCfg(const system_config_t *cfg);
+
+/** Set PC no-comm timeout(sec) into cfg reserved bytes. Returns 0 on success. */
+int SystemConfig_SetPcNoCommTimeoutSec(system_config_t *cfg, uint16_t timeout_sec);
 
 /** Compute CRC over config (excluding crc field). */
 uint16_t SystemConfig_CalcCrc(const system_config_t *cfg);
@@ -118,21 +130,23 @@ void SystemConfig_LogSkipSave(void);
 /** Weak: override to log "CFG factory reset done" (when SYSTEM_CONFIG_BOOT_LOG_FACTORY_RESET=1). */
 void SystemConfig_LogFactoryResetDone(void);
 
-/** SYSCFG debug log (when SYSCFG_MODBUS_DEBUG_LOG=1). FC03 read 3000~3002 시 id, baud_code 출력. */
+/** SYSCFG debug log (when SYSCFG_MODBUS_DEBUG_LOG=1). FC03 read 3000~3003 시 id, baud_code 출력. */
 void UpstreamSlave_LogSyscfgRead(uint16_t id, uint16_t baud_code);
 
-/** SYSCFG debug log. FC06 write 3000/3001/3002 시 reg, value, result(1=OK 0=ERR) 출력. */
+/** SYSCFG debug log. FC06 write 3000/3001/3002/3003 시 reg, value, result(1=OK 0=ERR) 출력. */
 void UpstreamSlave_LogSyscfgWrite(uint16_t reg, uint16_t value, int result_ok);
 
-/* ---------- Modbus system config registers (4x3000~3002 구현 완료) ----------
+/* ---------- Modbus system config registers (4x3000~3003) ----------
  * Holding registers; write 동작은 추후 구현.
  * 4x3000 : slave_id (1~247)
  * 4x3001 : baudrate code (0=9600, 1=19200, 2=38400, 3=57600, 4=115200)
  * 4x3002 : factory reset command (write 1 = execute factory reset)
+ * 4x3003 : PC no-comm watchdog timeout(sec)
  */
 #define SYSCFG_MODBUS_SLAVE_ID_REG      3000u
 #define SYSCFG_MODBUS_BAUDRATE_CODE_REG 3001u
 #define SYSCFG_MODBUS_FACTORY_RESET_REG 3002u
+#define SYSCFG_MODBUS_PC_NO_COMM_TIMEOUT_REG 3003u
 
 /* PC UART1 config path: FC06 pending + FC05 coil7 save trigger */
 #define MB_MAIN_SLAVE_PENDING_REG_PDU   2103u

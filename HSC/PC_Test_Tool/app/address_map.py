@@ -12,11 +12,11 @@ All PDU addresses are 0-based unless noted as H2 4x/1x document addresses.
 """
 MAINBOARD_SLAVE_ID_DEFAULT = 9
 
-# ---- Mainboard MAIN zone (FC04 addr 0..81, s_ir_main) ----
+# ---- Mainboard MAIN zone (FC04 addr 0..93, s_ir_main) ----
 # 1차 폴링: FC04 address=0, count=MAIN_FC04_DI_VBIT_COUNT(24) — status/DI/relay/env/VBIT
 MAIN_FC04_DI_VBIT_COUNT = 24
-# 전체 MAIN+PACKED 스냅샷 길이 (펌 MB_IR_MAIN_COUNT)
-MAIN_FC04_VENDOR_SNAPSHOT_COUNT = 82
+# 전체 MAIN+PACKED+POWER_W 스냅샷 길이 (펌 MB_IR_MAIN_COUNT)
+MAIN_FC04_VENDOR_SNAPSHOT_COUNT = 94
 # PACKED 블록: FC04 address=24, count=MAIN_PACKED_FC04_COUNT — HPSB/LPSB alive/coils/AVG/PKPK/CUR
 MAIN_PACKED_FC04_START = 24
 MAIN_PACKED_FC04_COUNT = 58
@@ -44,6 +44,9 @@ MAIN_SYSTEM_MODE_REG = 2105
 MAIN_LOG_ENABLE_REG = 2106
 MAIN_SLAVE_SAVE_COIL = 7
 MAIN_SLAVE_ID_FORBIDDEN_SUB = frozenset({1, 2, 4, 8})
+# PC 무통신 워치독 타임아웃(초, EEPROM). 쓰기 FC06=4x3003, 읽기 통합규칙 FC04만 → 2107 미러.
+MAIN_PC_STATE_TIME_WRITE_REG = 3003
+MAIN_PC_STATE_TIME_READ_REG = 2107
 
 # ---- PC_LED_IN (FC04 MAIN 맵 reg10 = PDU addr 10; 보조: ENV 2122) ----
 PC_LED_IN_REG = 10

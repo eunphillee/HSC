@@ -69,6 +69,8 @@ from .address_map import (
     MAIN_SLAVE_ID_ACTIVE_REG,
     MAIN_SLAVE_ID_PENDING_REG,
     MAIN_BAUD_RATE_PENDING_REG,
+    MAIN_PC_STATE_TIME_WRITE_REG,
+    MAIN_PC_STATE_TIME_READ_REG,
     MAIN_SLAVE_SAVE_COIL,
 )
 
@@ -802,6 +804,23 @@ class ModbusClient:
     def write_mainboard_baud_pending(self, baud: int) -> tuple[bool, str | None]:
         """FC06 pending @2104. Commit is FC05 coil 7 ON."""
         return self.write_single_register(MAIN_BAUD_RATE_PENDING_REG, baud, unit=None)
+
+    def save_pc_state_time_minutes(self, minutes: int) -> tuple[bool, str | None]:
+        """Save PC watchdog timeout in minutes to EEPROM-backed 4x3003 (seconds)."""
+        m = int(minutes)
+        if m < 1 or m > 600:
+            return False, "PC state time 범위는 1~600분입니다."
+        seconds = m * 60
+        return self.write_single_register(MAIN_PC_STATE_TIME_WRITE_REG, seconds, unit=None)
+
+    def read_pc_state_time_minutes(self) -> tuple[bool, int | None, str | None]:
+        """Read PC watchdog timeout from 4x3003 and convert sec->min."""
+        ok, regs, err = self.read_input_registers(MAIN_PC_STATE_TIME_READ_REG, 1, unit=None)
+        if not ok or regs is None or len(regs) < 1:
+            return False, None, err or "read fail"
+        sec = int(regs[0]) & 0xFFFF
+        minutes = max(1, min(600, sec // 60 if sec > 0 else 1))
+        return True, minutes, None
 
     def write_single_coil(self, addr: int, value: bool, unit: int | None = None) -> tuple[bool, str | None]:
         with self._lock:

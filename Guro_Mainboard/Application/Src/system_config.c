@@ -32,6 +32,21 @@ static uint8_t normalize_slave_id(uint8_t id)
 	return id;
 }
 
+static uint16_t decode_pc_no_comm_timeout_sec(const system_config_t *cfg)
+{
+	if (!cfg) return SYSTEM_CONFIG_DEFAULT_PC_NO_COMM_TIMEOUT_SEC;
+	uint16_t v = (uint16_t)((uint16_t)cfg->reserved[0] | ((uint16_t)cfg->reserved[1] << 8));
+	if (v == 0u) return SYSTEM_CONFIG_DEFAULT_PC_NO_COMM_TIMEOUT_SEC;
+	return v;
+}
+
+static void encode_pc_no_comm_timeout_sec(system_config_t *cfg, uint16_t timeout_sec)
+{
+	if (!cfg) return;
+	cfg->reserved[0] = (uint8_t)(timeout_sec & 0xFFu);
+	cfg->reserved[1] = (uint8_t)((timeout_sec >> 8) & 0xFFu);
+}
+
 static int config_compare_payload(const system_config_t *a, const system_config_t *b)
 {
 	if (a->magic != b->magic) return 1;
@@ -49,6 +64,7 @@ void SystemConfig_SetDefaults(system_config_t *cfg)
 	cfg->slave_id = SYSTEM_CONFIG_DEFAULT_SLAVE_ID;
 	cfg->baudrate = SYSTEM_CONFIG_DEFAULT_BAUDRATE;
 	memset(cfg->reserved, 0, sizeof(cfg->reserved));
+	encode_pc_no_comm_timeout_sec(cfg, SYSTEM_CONFIG_DEFAULT_PC_NO_COMM_TIMEOUT_SEC);
 	cfg->crc = 0;
 	cfg->crc = SystemConfig_CalcCrc(cfg);
 }
@@ -73,6 +89,29 @@ int SystemConfig_IsBaudrateAllowed(uint32_t baudrate)
 	}
 }
 
+int SystemConfig_IsPcNoCommTimeoutAllowed(uint16_t timeout_sec)
+{
+	return (timeout_sec >= SYSTEM_CONFIG_PC_NO_COMM_TIMEOUT_SEC_MIN &&
+	        timeout_sec <= SYSTEM_CONFIG_PC_NO_COMM_TIMEOUT_SEC_MAX) ? 1 : 0;
+}
+
+uint16_t SystemConfig_GetPcNoCommTimeoutSecFromCfg(const system_config_t *cfg)
+{
+	uint16_t v = decode_pc_no_comm_timeout_sec(cfg);
+	if (!SystemConfig_IsPcNoCommTimeoutAllowed(v))
+		return SYSTEM_CONFIG_DEFAULT_PC_NO_COMM_TIMEOUT_SEC;
+	return v;
+}
+
+int SystemConfig_SetPcNoCommTimeoutSec(system_config_t *cfg, uint16_t timeout_sec)
+{
+	if (!cfg) return -1;
+	if (!SystemConfig_IsPcNoCommTimeoutAllowed(timeout_sec)) return -1;
+	encode_pc_no_comm_timeout_sec(cfg, timeout_sec);
+	cfg->crc = SystemConfig_CalcCrc(cfg);
+	return 0;
+}
+
 int SystemConfig_Validate(const system_config_t *cfg)
 {
 	if (!cfg) return -1;
@@ -81,6 +120,7 @@ int SystemConfig_Validate(const system_config_t *cfg)
 	if (cfg->slave_id < SYSTEM_CONFIG_SLAVE_ID_MIN || cfg->slave_id > SYSTEM_CONFIG_SLAVE_ID_MAX)
 		return -1;
 	if (!SystemConfig_IsBaudrateAllowed(cfg->baudrate)) return -1;
+	if (!SystemConfig_IsPcNoCommTimeoutAllowed(SystemConfig_GetPcNoCommTimeoutSecFromCfg(cfg))) return -1;
 	uint16_t computed = SystemConfig_CalcCrc(cfg);
 	if (computed != cfg->crc) return -1;
 	return 0;

@@ -1,6 +1,6 @@
 /**
  * @file output_state_nvm.h
- * @brief EEPROM A/B dual-block: 출력 상태(Mainboard relay, HPSB relay, LPSB SSR) 저장·복원.
+ * @brief EEPROM A/B dual-block: 출력 상태(Mainboard relay, virtual bit, HPSB relay, LPSB SSR) 저장·복원.
  *
  * EEPROM 레이아웃 (AT24C02, 256 bytes):
  *   0x00~0x3F : SystemConfig A/B (기존)
@@ -31,7 +31,7 @@ extern "C" {
 #define OUTPUT_STATE_NVM_BLOCK_A_BASE   0x40u
 #define OUTPUT_STATE_NVM_BLOCK_B_BASE   0x60u
 #define OUTPUT_STATE_NVM_BLOCK_SIZE     32u
-#define OUTPUT_STATE_NVM_PAYLOAD_BYTES  24u  /* CRC 계산 범위: magic~reserved */
+#define OUTPUT_STATE_NVM_PAYLOAD_BYTES  24u  /* CRC 계산 범위: magic~virtual_coil */
 #define OUTPUT_STATE_NVM_STRUCT_BYTES   26u  /* payload(24) + crc(2) */
 #define OUTPUT_STATE_NVM_STORED_BYTES   28u  /* seq(2) + struct(26) */
 
@@ -44,14 +44,14 @@ typedef struct __attribute__((packed)) {
     uint8_t  version;         /* OUTPUT_STATE_NVM_VERSION */
     uint8_t  _pad;            /* 정렬 예비 */
     uint8_t  main_relay[4];   /* Mainboard relay1~4 state (0/1) */
+    uint8_t  virtual_coil[4]; /* FC05 20~23 virtual coil state (0/1) */
     uint8_t  hpsb_relay[3];   /* HPSB relay1~3 state */
     uint8_t  lpsb2_ssr[3];    /* LPSB slave-id=2 SSR1~3 */
     uint8_t  lpsb4_ssr[3];    /* LPSB slave-id=4 SSR1~3 */
     uint8_t  lpsb8_ssr[3];    /* LPSB slave-id=8 SSR1~3 */
-    uint8_t  reserved[4];     /* 향후 확장 */
     uint16_t crc;             /* CRC16 over first OUTPUT_STATE_NVM_PAYLOAD_BYTES bytes */
 } output_state_nvm_t;
-/* sizeof: 2+1+1+4+3+3+3+3+4+2 = 26 ✓  PAYLOAD_BYTES = 24 ✓ */
+/* sizeof: 2+1+1+4+4+3+3+3+3+2 = 26 ✓  PAYLOAD_BYTES = 24 ✓ */
 
 /** 부팅 시 1회: EEPROM에서 로드. 비정상이면 기본값. */
 int OutputStateNvm_Load(output_state_nvm_t *state);
@@ -70,6 +70,12 @@ void OutputStateNvm_ApplyMainboardRelays(const output_state_nvm_t *state);
  * ch=0..3, value=0/1. 변경된 경우에만 EEPROM 저장.
  */
 void OutputStateNvm_NotifyMainRelay(uint8_t ch, uint8_t value);
+
+/**
+ * virtual coil(FC05 20~23) 변경 알림.
+ * ch=0..3, value=0/1. 변경된 경우에만 EEPROM 저장.
+ */
+void OutputStateNvm_NotifyVirtualCoil(uint8_t ch, uint8_t value);
 
 /**
  * [target-first] 하위보드 coil target 갱신 + EEPROM 저장.

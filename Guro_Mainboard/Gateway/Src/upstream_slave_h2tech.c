@@ -60,8 +60,8 @@
 #define UPSTREAM_PC_RESET_EN_REG 2121u
 #define UPSTREAM_PC_LED_IN_REG   2122u
 
-/* System config (EEPROM): 4x3000=slave_id, 4x3001=baudrate code, 4x3002=factory reset command */
-#define UPSTREAM_SYSCFG_REG_COUNT  3u
+/* System config (EEPROM): 4x3000=slave_id, 4x3001=baudrate code, 4x3002=factory reset, 4x3003=pc watchdog timeout(sec) */
+#define UPSTREAM_SYSCFG_REG_COUNT  4u
 /* FC04 input register diagnostics (service extension) */
 #define UPSTREAM_DIAG_IR_START      4000u
 #define UPSTREAM_DIAG_IR_COUNT      40u
@@ -70,7 +70,7 @@
 #define UPSTREAM_RTC_REG_COUNT      7u
 
 /* Unified Rule v1.3 FC04 address zones:
- *   0..81   : MAIN (0..23) + PACKED subboard (24..81)
+ *   0..93   : MAIN (0..23) + PACKED subboard (24..81) + POWER_W(82..93)
  *   890..896: RTC
  *   2100..2114: ENV/IO/reset-CSR (FC03 blocked, exposed here)
  *   4000..4039: DIAG
@@ -91,8 +91,9 @@
  *     55=LPSB8_A1, 56=LPSB8_A2, 57=LPSB8_A3
  *   PKPK 58..69: same board/channel order
  *   CUR  70..81: same board/channel order
+ *   POWER_W 82..93: Estimated Power W @220V (same board/channel order)
  */
-#define FC04_MAIN_PACKED_END   81u    /* 0..81 = 82 regs total */
+#define FC04_MAIN_PACKED_END   93u    /* 0..93 = 94 regs total */
 #define FC04_ENV_IO_START      2100u
 #define FC04_ENV_IO_END        2114u  /* 2100..2114 = 15 regs */
 #define FC04_ENV_IO_COUNT      15u
@@ -349,7 +350,7 @@ __attribute__((unused)) static int handle_fc03(uint16_t start_addr, uint16_t cou
         return 4;
     }
 
-    /* System config (4x3000~3002): FC03 read — slave_id, baudrate code, factory_reset(read 0) */
+    /* System config (4x3000~3003): FC03 read — slave_id, baudrate code, factory_reset(read 0), pc no-comm timeout(sec) */
     if (start_addr == SYSCFG_MODBUS_SLAVE_ID_REG) {
         if (count == 0u || count > UPSTREAM_SYSCFG_REG_COUNT) {
             response[0] = 0x83;
@@ -362,6 +363,7 @@ __attribute__((unused)) static int handle_fc03(uint16_t start_addr, uint16_t cou
         response[1] = (uint8_t)(count * 2u);
         uint16_t r0 = cfg ? (uint16_t)cfg->slave_id : SYSTEM_CONFIG_DEFAULT_SLAVE_ID;
         uint16_t r1 = cfg ? baudrate_to_code(cfg->baudrate) : 0u;
+        uint16_t r3 = cfg ? SystemConfig_GetPcNoCommTimeoutSecFromCfg(cfg) : SYSTEM_CONFIG_DEFAULT_PC_NO_COMM_TIMEOUT_SEC;
         if (r1 > 4u) r1 = 0u;
         response[2] = (uint8_t)(r0 >> 8);
         response[3] = (uint8_t)(r0 & 0xFF);
@@ -372,6 +374,10 @@ __attribute__((unused)) static int handle_fc03(uint16_t start_addr, uint16_t cou
         if (count >= 3u) {
             response[6] = 0;
             response[7] = 0;  /* 4x3002 read: always 0 */
+        }
+        if (count >= 4u) {
+            response[8] = (uint8_t)(r3 >> 8);
+            response[9] = (uint8_t)(r3 & 0xFF);
         }
 #if SYSCFG_MODBUS_DEBUG_LOG
         UpstreamSlave_LogSyscfgRead(r0, r1);
@@ -743,6 +749,45 @@ __attribute__((unused)) static int handle_fc06(uint16_t start_addr, const uint8_
         return 5;
     }
 
+    /* 4x3003: PC no-comm watchdog timeout(sec) */
+    if (start_addr == SYSCFG_MODBUS_PC_NO_COMM_TIMEOUT_REG) {
+        const system_config_t *cur = SystemConfig_Get();
+        if (!cur || !SystemConfig_IsPcNoCommTimeoutAllowed(value)) {
+#if SYSCFG_MODBUS_DEBUG_LOG
+            UpstreamSlave_LogSyscfgWrite(SYSCFG_MODBUS_PC_NO_COMM_TIMEOUT_REG, value, 0);
+#endif
+            response[0] = 0x86;
+            response[1] = EX_ILLEGAL_DATA_VAL;
+            return 2;
+        }
+        system_config_t cfg = *cur;
+        if (SystemConfig_SetPcNoCommTimeoutSec(&cfg, value) != 0) {
+#if SYSCFG_MODBUS_DEBUG_LOG
+            UpstreamSlave_LogSyscfgWrite(SYSCFG_MODBUS_PC_NO_COMM_TIMEOUT_REG, value, 0);
+#endif
+            response[0] = 0x86;
+            response[1] = EX_ILLEGAL_DATA_VAL;
+            return 2;
+        }
+        if (SystemConfig_Save(&cfg) != 0) {
+#if SYSCFG_MODBUS_DEBUG_LOG
+            UpstreamSlave_LogSyscfgWrite(SYSCFG_MODBUS_PC_NO_COMM_TIMEOUT_REG, value, 0);
+#endif
+            response[0] = 0x86;
+            response[1] = EX_ILLEGAL_DATA_VAL;
+            return 2;
+        }
+#if SYSCFG_MODBUS_DEBUG_LOG
+        UpstreamSlave_LogSyscfgWrite(SYSCFG_MODBUS_PC_NO_COMM_TIMEOUT_REG, value, 1);
+#endif
+        response[0] = 0x06;
+        response[1] = (uint8_t)(start_addr >> 8);
+        response[2] = (uint8_t)(start_addr & 0xFF);
+        response[3] = (uint8_t)(value >> 8);
+        response[4] = (uint8_t)(value & 0xFF);
+        return 5;
+    }
+
     if (start_addr != UPSTREAM_MAIN_IO_DO_REG) {
         response[0] = 0x86;
         response[1] = EX_ILLEGAL_DATA_ADDR;
@@ -853,6 +898,14 @@ static uint16_t s_mb_baud_rate_pending;
 static uint16_t s_mb_system_mode_runtime;
 static uint16_t s_mb_log_enable_runtime;
 static uint16_t s_mb_last_coil7_save_fail_code;
+static uint32_t s_pc_watchdog_last_comm_tick;
+static uint32_t s_pc_watchdog_last_action_tick;
+
+static uint16_t get_pc_no_comm_timeout_sec(void)
+{
+    const system_config_t *cfg = SystemConfig_Get();
+    return SystemConfig_GetPcNoCommTimeoutSecFromCfg(cfg);
+}
 
 void UpstreamSlave_InitMainboardSlavePending(void)
 {
@@ -864,6 +917,8 @@ void UpstreamSlave_InitMainboardSlavePending(void)
     s_mb_system_mode_runtime = 0u;
     s_mb_log_enable_runtime = 0u;
     s_mb_last_coil7_save_fail_code = 0u;
+    s_pc_watchdog_last_comm_tick = HAL_GetTick();
+    s_pc_watchdog_last_action_tick = s_pc_watchdog_last_comm_tick;
 }
 
 uint16_t UpstreamSlave_GetPendingMainboardSlaveId(void)
@@ -972,7 +1027,9 @@ static int handle_fc05(uint16_t start_addr, const uint8_t *write_data,
         return 5;
     }
     if (start_addr >= 20u && start_addr <= 23u) {
-        MainAutoLink_OnVirtualCoil((uint8_t)(start_addr - 20u), value ? 1u : 0u);
+        uint8_t ch = (uint8_t)(start_addr - 20u);
+        MainAutoLink_OnVirtualCoil(ch, value ? 1u : 0u);
+        OutputStateNvm_NotifyVirtualCoil(ch, value ? 1u : 0u);
         /* MainAutoLink 갱신 완료 후 즉시 맵 반영: s_ir_main[20..23] */
         ModbusIrMap_OnFc05Write(start_addr, value);
         response[0] = 0x05;
@@ -1221,6 +1278,7 @@ int UpstreamSlave_HandleRequest(uint8_t fc, uint16_t start_addr, uint16_t count,
 {
     (void)p_agg;
     if (!response || resp_max < 2u) return -1;
+    s_pc_watchdog_last_comm_tick = HAL_GetTick();
 
     switch (fc) {
     /* Unified Rule v1.2: Read = FC04 ONLY. FC01/FC02/FC03 금지. */
@@ -1236,13 +1294,13 @@ int UpstreamSlave_HandleRequest(uint8_t fc, uint16_t start_addr, uint16_t count,
         return handle_fc05(start_addr, write_data, response, resp_max);
     /* Write policy:
      * - FC05: coil writes / triggers
-     * - FC06: legacy syscfg(3000~3002) + pending path(2103~2106)
+     * - FC06: legacy syscfg(3000~3003) + pending path(2103~2106)
      * - FC16: reserved for RTC block. */
     case 0x06:
         if (start_addr >= MB_MAIN_SLAVE_PENDING_REG_PDU && start_addr <= MB_MAIN_LOG_ENABLE_REG_PDU) {
             return handle_fc06_main_config_pending(start_addr, write_data, response, resp_max);
         }
-        if (start_addr >= SYSCFG_MODBUS_SLAVE_ID_REG && start_addr <= SYSCFG_MODBUS_FACTORY_RESET_REG) {
+        if (start_addr >= SYSCFG_MODBUS_SLAVE_ID_REG && start_addr <= SYSCFG_MODBUS_PC_NO_COMM_TIMEOUT_REG) {
             return handle_fc06(start_addr, write_data, response, resp_max);
         }
         response[0] = 0x86u;
@@ -1281,4 +1339,27 @@ int UpstreamSlave_HandleRequest(uint8_t fc, uint16_t start_addr, uint16_t count,
         response[1] = EX_ILLEGAL_FUNCTION;
         return 2;
     }
+}
+
+void UpstreamSlave_PcWatchdogTick(void)
+{
+    uint32_t now = HAL_GetTick();
+    uint16_t timeout_sec = get_pc_no_comm_timeout_sec();
+    uint32_t timeout_ms = (uint32_t)timeout_sec * 1000u;
+
+    if (timeout_ms == 0u) return;
+
+    if ((uint32_t)(now - s_pc_watchdog_last_comm_tick) < timeout_ms) {
+        s_pc_watchdog_last_action_tick = s_pc_watchdog_last_comm_tick;
+        return;
+    }
+    if ((uint32_t)(now - s_pc_watchdog_last_action_tick) < timeout_ms)
+        return;
+
+    if (BSP_ReadPC_LED_IN() != 0u) {
+        Gateway_Action_StartPulsePC_RESET_EN();
+    } else {
+        Gateway_Action_StartPulsePC_ON_EN();
+    }
+    s_pc_watchdog_last_action_tick = now;
 }

@@ -37,18 +37,55 @@ static volatile uint8_t s_front_idx;
  * "FC04 side-effect free packed read" firmware is actually flashed. */
 #define MB_FW_MARKER_FC04_SIDE_EFFECT_FREE   0xA416u
 
+/* Estimated power model (initial coefficient, can be calibrated later).
+ * NOTE: This is NOT true active power metering (no live voltage/power-factor).
+ * It is an estimated W value from PKPK ADC at nominal 220Vac. */
+#define POWER_NOMINAL_VOLTAGE_V          220.0f
+#define POWER_ADC_REF_V                  3.3f
+#define POWER_ADC_COUNTS                 4096.0f
+#define POWER_SENSOR_SENS_V_PER_A        0.111f
+#define POWER_A_PER_PKPK_COUNT           (POWER_ADC_REF_V / POWER_ADC_COUNTS / POWER_SENSOR_SENS_V_PER_A)
+#define POWER_W_PER_PKPK_COUNT           (POWER_A_PER_PKPK_COUNT * POWER_NOMINAL_VOLTAGE_V)
+#define CURRENT_ON_PKPK_THRESHOLD        1u
+
+static uint16_t estimate_power_w_from_pkpk(uint16_t pkpk_adc, uint16_t cur_st)
+{
+    if (cur_st == 0u) {
+        return 0u;
+    }
+    if (pkpk_adc < CURRENT_ON_PKPK_THRESHOLD) {
+        return 0u;
+    }
+
+    {
+        float w = (float)pkpk_adc * POWER_W_PER_PKPK_COUNT;
+        if (w <= 0.0f) {
+            return 0u;
+        }
+        if (w >= 65535.0f) {
+            return 65535u;
+        }
+        return (uint16_t)(w + 0.5f);
+    }
+}
+
 static void patch_env_config_diag(ModbusIrBank_t *b)
 {
     if (!b) return;
     b->env[2] = (uint16_t)SystemConfig_GetEffectiveMainboardSlaveId(); /* 2102 */
     b->env[3] = UpstreamSlave_GetPendingMainboardSlaveId();            /* 2103 */
     b->env[4] = UpstreamSlave_GetPendingMainboardBaudRate();           /* 2104 */
+    {
+        const system_config_t *sc = SystemConfig_Get();
+        b->env[7] = sc ? SystemConfig_GetPcNoCommTimeoutSecFromCfg(sc)
+                       : SYSTEM_CONFIG_DEFAULT_PC_NO_COMM_TIMEOUT_SEC; /* 2107: mirror of 4x3003 */
+    }
     b->env[8] = SystemConfig_GetLastSaveStatus();                      /* 2108 */
     b->env[9] = UpstreamSlave_GetLastCoil7SaveFailCode();              /* 2109 */
 }
 
 /* ------------------------------------------------------------------ */
-/* Refresh: MAIN + PACKED  (0..81)                                      */
+/* Refresh: MAIN + PACKED + estimated power (0..93)                     */
 /* ------------------------------------------------------------------ */
 
 static void refresh_main(ModbusIrBank_t *b, const aggregated_status_t *agg)
@@ -123,6 +160,18 @@ static void refresh_main(ModbusIrBank_t *b, const aggregated_status_t *agg)
         s_ir_main[76] = agg->lpsb2_current_st[0];  s_ir_main[77] = agg->lpsb2_current_st[1];  s_ir_main[78] = agg->lpsb2_current_st[2];
         s_ir_main[79] = agg->lpsb3_current_st[0];  s_ir_main[80] = agg->lpsb3_current_st[1];  s_ir_main[81] = agg->lpsb3_current_st[2];
     }
+
+    /* Estimated Power W @220V: 82..93 (uint16_t, 1W unit, saturated).
+     * Mapping order is identical to PKPK/CUR blocks:
+     * HPSB(82..84), LPSB1(85..87), LPSB2(88..90), LPSB3(91..93). */
+    if (agg) {
+        for (uint16_t i = 0u; i < 3u; i++) {
+            s_ir_main[82u + i] = estimate_power_w_from_pkpk(agg->hpsb_pkpk[i], agg->hpsb_current_st[i]);
+            s_ir_main[85u + i] = estimate_power_w_from_pkpk(agg->lpsb1_pkpk[i], agg->lpsb1_current_st[i]);
+            s_ir_main[88u + i] = estimate_power_w_from_pkpk(agg->lpsb2_pkpk[i], agg->lpsb2_current_st[i]);
+            s_ir_main[91u + i] = estimate_power_w_from_pkpk(agg->lpsb3_pkpk[i], agg->lpsb3_current_st[i]);
+        }
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -150,8 +199,8 @@ static void refresh_env(ModbusIrBank_t *b, const aggregated_status_t *agg)
      */
     s_ir_env[0]  = IO_Main_ReadDI_Bitmap();                                   /* 2100: MAIN_IO_DI_BITMAP */
     s_ir_env[1]  = IO_Main_ReadDO_Bitmap();                                   /* 2101: MAIN_IO_DO_BITMAP */
-    patch_env_config_diag(b);
-    /* [5..7] RESERVED (2105..2107) */
+    patch_env_config_diag(b); /* 2102..2104,2107..2109 패치 포함(2107=PC 워치독 초) */
+    /* [5..6] RESERVED (2105..2106) */
     s_ir_env[10] = agg ? (uint16_t)agg->env_temp_cx10 : (uint16_t)0x8000u;   /* 2110: MAIN_ENV_TEMP     */
     s_ir_env[11] = agg ? agg->env_rh_x10 : 0xFFFFu;                          /* 2111: MAIN_ENV_RH       */
     s_ir_env[12] = agg ? agg->error_flags : 0xFFFFu;                          /* 2112: MAIN_ENV_ERR_FLAGS */

@@ -44,10 +44,26 @@ static volatile uint8_t s_write_in_progress;
 static volatile uint8_t s_uart2_locked_for_txn;
 static volatile ModbusMasterFc05Err_t s_last_fc05_err = MODBUS_MASTER_FC05_ERR_NONE;
 
+/* Sensor stabilization policy:
+ * - Only FC04 sensor registers are filtered (ADC AVG/PKPK style values).
+ * - Invalid range values are dropped and previous valid value is kept.
+ * - Jump filter: first large jump is dropped once. If same jump direction repeats,
+ *   it is accepted on the next sample (to allow real step changes).
+ */
+#define SENSOR_MAX_VALID_VALUE             4095u
+#define SENSOR_JUMP_THRESHOLD              1200u
+static uint16_t s_sensor_last_valid[SLAVE_ID_COUNT][MODBUS_INPUT_REG_IMG_MAX];
+static uint8_t  s_sensor_has_valid[SLAVE_ID_COUNT][MODBUS_INPUT_REG_IMG_MAX];
+static uint8_t  s_sensor_jump_pending[SLAVE_ID_COUNT][MODBUS_INPUT_REG_IMG_MAX];
+static int8_t   s_sensor_jump_dir[SLAVE_ID_COUNT][MODBUS_INPUT_REG_IMG_MAX];
+
 #define SLAVE_TO_INDEX(s)  ((uint8_t)SLAVE_ID_TO_TABLE_INDEX(s))
 
 static void uart2_mb_log(const char *msg);
 static void uart2_mb_log_hex(const char *prefix, const uint8_t *buf, uint16_t len);
+static void sensor_drop_log(uint8_t slave, uint16_t reg, uint16_t value, const char *reason);
+static int get_sensor_limits(SlaveId_t slave, uint16_t reg_index, uint16_t *max_valid, uint16_t *jump_threshold);
+static void stabilize_input_regs(SlaveId_t slave, uint16_t start_addr, uint16_t *regs, uint16_t num_regs);
 
 static const char *s_fc05_tx_reason = "UNKNOWN";
 
@@ -146,6 +162,80 @@ static void uart2_mb_log_hex(const char *prefix, const uint8_t *buf, uint16_t le
     }
     n += snprintf(line + n, sizeof(line) - (size_t)n, "\r\n");
     if (n > 0) uart2_mb_log(line);
+}
+
+static void sensor_drop_log(uint8_t slave, uint16_t reg, uint16_t value, const char *reason)
+{
+    char b[128];
+    int n = snprintf(b, sizeof(b),
+                     "[SENSOR][DROP] sid=%u reg=%u invalid value=%u reason=%s\r\n",
+                     (unsigned)slave, (unsigned)reg, (unsigned)value, reason ? reason : "unknown");
+    if (n > 0) uart2_mb_log(b);
+}
+
+static int get_sensor_limits(SlaveId_t slave, uint16_t reg_index, uint16_t *max_valid, uint16_t *jump_threshold)
+{
+    uint8_t is_sensor = 0u;
+    if (slave == SLAVE_ID_HPSB) {
+        if (reg_index >= 6u && reg_index <= 11u) is_sensor = 1u; /* AVG/PKPK */
+    } else if (slave == SLAVE_ID_LPSB1 || slave == SLAVE_ID_LPSB2 || slave == SLAVE_ID_LPSB3) {
+        if (reg_index >= 5u && reg_index <= 10u) is_sensor = 1u; /* AVG/PKPK */
+    }
+    if (!is_sensor) return 0;
+    if (max_valid) *max_valid = SENSOR_MAX_VALID_VALUE;
+    if (jump_threshold) *jump_threshold = SENSOR_JUMP_THRESHOLD;
+    return 1;
+}
+
+static void stabilize_input_regs(SlaveId_t slave, uint16_t start_addr, uint16_t *regs, uint16_t num_regs)
+{
+    uint8_t si = SLAVE_TO_INDEX(slave);
+    for (uint16_t i = 0u; i < num_regs; i++) {
+        uint16_t reg_index = (uint16_t)(start_addr + i);
+        uint16_t max_valid = 0u, jump_th = 0u;
+        if (!get_sensor_limits(slave, reg_index, &max_valid, &jump_th))
+            continue;
+        if (reg_index >= MODBUS_INPUT_REG_IMG_MAX) continue;
+
+        uint16_t raw_value = regs[i]; /* keep as single uint16 register */
+        uint16_t prev = s_sensor_last_valid[si][reg_index];
+        uint8_t has_prev = s_sensor_has_valid[si][reg_index];
+
+        if (raw_value > max_valid) {
+            sensor_drop_log((uint8_t)slave, reg_index, raw_value, "out_of_range");
+            regs[i] = has_prev ? prev : ModbusTable_GetInputReg(slave, reg_index);
+            continue;
+        }
+
+        if (!has_prev) {
+            s_sensor_last_valid[si][reg_index] = raw_value;
+            s_sensor_has_valid[si][reg_index] = 1u;
+            s_sensor_jump_pending[si][reg_index] = 0u;
+            s_sensor_jump_dir[si][reg_index] = 0;
+            continue;
+        }
+
+        uint16_t diff = (raw_value >= prev) ? (uint16_t)(raw_value - prev) : (uint16_t)(prev - raw_value);
+        if (diff > jump_th) {
+            int8_t dir = (raw_value > prev) ? 1 : -1;
+            if (s_sensor_jump_pending[si][reg_index] != 0u && s_sensor_jump_dir[si][reg_index] == dir) {
+                /* Second consecutive jump in same direction: accept as real change. */
+                s_sensor_last_valid[si][reg_index] = raw_value;
+                s_sensor_jump_pending[si][reg_index] = 0u;
+                s_sensor_jump_dir[si][reg_index] = 0;
+            } else {
+                sensor_drop_log((uint8_t)slave, reg_index, raw_value, "jump_first_drop");
+                s_sensor_jump_pending[si][reg_index] = 1u;
+                s_sensor_jump_dir[si][reg_index] = dir;
+                regs[i] = prev;
+                continue;
+            }
+        } else {
+            s_sensor_last_valid[si][reg_index] = raw_value;
+            s_sensor_jump_pending[si][reg_index] = 0u;
+            s_sensor_jump_dir[si][reg_index] = 0;
+        }
+    }
 }
 
 static void uart2_mb_lock_rx_it(void)
@@ -469,6 +559,7 @@ static void parse_response(void)
         return;
     }
     if (ModbusRTU_CRC16Check(rx_buf, rx_len) != 0) {
+        uart2_mb_log("[MODBUS][DROP] crc error\r\n");
 #if MODBUS_MASTER_DEBUG_LOG
         ModbusMaster_LogSubPollFail(slave, "CRC fail");
 #endif
@@ -493,6 +584,23 @@ static void parse_response(void)
         ondemand_clear_slave(slave);
         advance_poll_index();
         return;
+    }
+    {
+        uint16_t exp_len = expected_resp_len_bytes(&e);
+        if (exp_len > 0u && rx_len != exp_len) {
+            char b[128];
+            int n = snprintf(b, sizeof(b),
+                             "[MODBUS][DROP] length mismatch expected=%u actual=%u\r\n",
+                             (unsigned)exp_len, (unsigned)rx_len);
+            if (n > 0) uart2_mb_log(b);
+            comm_ok[SLAVE_TO_INDEX(e.slave_id)] = 0;
+            set_last_sub_fail(slave, recv_fc, MODBUS_SUB_FAIL_PARSE_FAIL, rx_len);
+            uart2_mb_unlock_rx_it();
+            state = MST_IDLE;
+            ondemand_clear_slave(slave);
+            advance_poll_index();
+            return;
+        }
     }
     uart2_mb_log_hex("rx raw", rx_buf, rx_len);
 
@@ -519,7 +627,10 @@ static void parse_response(void)
         case POLL_ENTRY_READ_INPUT_REG: {
             uint16_t regs[MODBUS_INPUT_REG_IMG_MAX];
             ok = ModbusRTU_ParseFC04Response(rx_buf, rx_len, regs, e.count);
-            if (ok == 0) ModbusTable_SetInputRegs(e.slave_id, e.start_addr, regs, e.count);
+            if (ok == 0) {
+                stabilize_input_regs(e.slave_id, e.start_addr, regs, e.count);
+                ModbusTable_SetInputRegs(e.slave_id, e.start_addr, regs, e.count);
+            }
             break;
         }
         default:
@@ -575,6 +686,10 @@ void ModbusMaster_Init(void)
     /* On-demand 정책: 초기에는 polling 비활성. PC 요청 시만 활성화. */
     s_ondemand_poll_mask = 0u;
     s_current_poll_slave_id = 0u;
+    memset(s_sensor_last_valid, 0, sizeof(s_sensor_last_valid));
+    memset(s_sensor_has_valid, 0, sizeof(s_sensor_has_valid));
+    memset(s_sensor_jump_pending, 0, sizeof(s_sensor_jump_pending));
+    memset(s_sensor_jump_dir, 0, sizeof(s_sensor_jump_dir));
     /* PC Test 모드 여부 무관하게 모든 슬레이브 on-demand 폴 허용.
      * s_ondemand_poll_mask가 0이면 어차피 폴 안 됨. */
     s_poll_enable_mask = (uint16_t)(SLAVE_ID_HPSB | SLAVE_ID_LPSB1 | SLAVE_ID_LPSB2 | SLAVE_ID_LPSB3);

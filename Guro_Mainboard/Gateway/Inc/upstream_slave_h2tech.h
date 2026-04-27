@@ -57,6 +57,9 @@ uint16_t UpstreamSlave_GetPendingMainboardBaudRate(void);
  */
 uint16_t UpstreamSlave_GetLastCoil7SaveFailCode(void);
 
+/** Call periodically from main loop. Executes PC watchdog action by EEPROM timeout policy. */
+void UpstreamSlave_PcWatchdogTick(void);
+
 #ifdef __cplusplus
 }
 #endif

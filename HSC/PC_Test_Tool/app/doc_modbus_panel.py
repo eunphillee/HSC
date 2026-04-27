@@ -53,6 +53,8 @@ class DocModbusPanel(QWidget):
         self._req_fc04 = None
         self._req_fc05 = None
         self._req_fc15 = None
+        self._req_set_pc_state_time = None
+        self._req_read_pc_state_time = None
         self._last_fc01 = (1, 0, 0)
         self._last_fc02 = (1, 0, 0)
         self._last_fc04 = (1, 0, 0)
@@ -113,6 +115,12 @@ class DocModbusPanel(QWidget):
         self._fc04_scan_ms.setSuffix(" ms")
         self._fc04_scan_ms.setMinimumWidth(100)
 
+        self._pc_state_time_min = QSpinBox()
+        self._pc_state_time_min.setRange(1, 600)
+        self._pc_state_time_min.setValue(10)
+        self._pc_state_time_min.setSuffix(" 분")
+        self._pc_state_time_min.setMinimumWidth(90)
+
         self._coil_value = QCheckBox("ON")
         self._coil_value.setChecked(True)
 
@@ -163,12 +171,23 @@ class DocModbusPanel(QWidget):
         self._init_points()
         self._fc04_scan_timer.timeout.connect(self._do_fc04)
 
-    def set_request_callbacks(self, fc01_cb, fc02_cb, fc04_cb, fc05_cb, fc15_cb):
+    def set_request_callbacks(
+        self,
+        fc01_cb,
+        fc02_cb,
+        fc04_cb,
+        fc05_cb,
+        fc15_cb,
+        set_pc_state_time_cb=None,
+        read_pc_state_time_cb=None,
+    ):
         self._req_fc01 = fc01_cb
         self._req_fc02 = fc02_cb
         self._req_fc04 = fc04_cb
         self._req_fc05 = fc05_cb
         self._req_fc15 = fc15_cb
+        self._req_set_pc_state_time = set_pc_state_time_cb
+        self._req_read_pc_state_time = read_pc_state_time_cb
 
     def _build_ui(self):
         root = QVBoxLayout(self)
@@ -214,10 +233,28 @@ class DocModbusPanel(QWidget):
             "QPushButton:pressed { background-color: #1f2937; }"
         )
         row_fc04.addWidget(btn_fc04_stop)
+        row_fc04.addWidget(QLabel("PC state time:"))
+        row_fc04.addWidget(self._pc_state_time_min)
+        btn_set_pc_state_time = QPushButton("Set")
+        btn_set_pc_state_time.setStyleSheet(
+            "QPushButton { background-color: #14532d; color: #dcfce7; border: 1px solid #16a34a; border-radius: 4px; padding: 4px 10px; }"
+            "QPushButton:hover { background-color: #166534; }"
+            "QPushButton:pressed { background-color: #052e16; }"
+        )
+        row_fc04.addWidget(btn_set_pc_state_time)
+        btn_read_pc_state_time = QPushButton("Read")
+        btn_read_pc_state_time.setStyleSheet(
+            "QPushButton { background-color: #1f2937; color: #e5e7eb; border: 1px solid #4b5563; border-radius: 4px; padding: 4px 10px; }"
+            "QPushButton:hover { background-color: #374151; }"
+            "QPushButton:pressed { background-color: #111827; }"
+        )
+        row_fc04.addWidget(btn_read_pc_state_time)
         row_fc04.addStretch()
         lay.addLayout(row_fc04)
         self._btn_fc04_apply = btn_fc04_apply
         self._btn_fc04_stop = btn_fc04_stop
+        self._btn_set_pc_state_time = btn_set_pc_state_time
+        self._btn_read_pc_state_time = btn_read_pc_state_time
 
         row_wr = QHBoxLayout()
         row_wr.addWidget(QLabel("FC05 문서주소(1x):"))
@@ -372,6 +409,8 @@ class DocModbusPanel(QWidget):
         btn_fc04.clicked.connect(self._do_fc04)
         btn_fc04_apply.clicked.connect(self._apply_fc04_scan)
         btn_fc04_stop.clicked.connect(self._stop_fc04_scan)
+        btn_set_pc_state_time.clicked.connect(self._do_set_pc_state_time)
+        btn_read_pc_state_time.clicked.connect(self._do_read_pc_state_time)
         btn_fc05.clicked.connect(self._do_fc05)
         btn_fc15.clicked.connect(self._do_fc15)
         btn_clear_left.clicked.connect(self._clear_left)
@@ -392,6 +431,21 @@ class DocModbusPanel(QWidget):
             points.append((f"1x{d:04d}", f"HPSB/LPSB SSR 쓰기 (doc→coil addr {d - 1})", "COIL", "RW", "N/A"))
         for d in range(4000, 4032):
             points.append((f"4x{d:04d}", f"진단레지스터 {d}", "IR", "R", "N/A"))
+        # FC04 MAIN 확장 82..93: 추정 전력(W) @220V
+        points.extend([
+            ("4x0082", "HPSB_POWER_W1 (HPSB 추정전력 #1, W)", "IR", "R", "N/A"),
+            ("4x0083", "HPSB_POWER_W2 (HPSB 추정전력 #2, W)", "IR", "R", "N/A"),
+            ("4x0084", "HPSB_POWER_W3 (HPSB 추정전력 #3, W)", "IR", "R", "N/A"),
+            ("4x0085", "LPSB1_POWER_W1 (LPSB1 추정전력 #1, W)", "IR", "R", "N/A"),
+            ("4x0086", "LPSB1_POWER_W2 (LPSB1 추정전력 #2, W)", "IR", "R", "N/A"),
+            ("4x0087", "LPSB1_POWER_W3 (LPSB1 추정전력 #3, W)", "IR", "R", "N/A"),
+            ("4x0088", "LPSB2_POWER_W1 (LPSB2 추정전력 #1, W)", "IR", "R", "N/A"),
+            ("4x0089", "LPSB2_POWER_W2 (LPSB2 추정전력 #2, W)", "IR", "R", "N/A"),
+            ("4x0090", "LPSB2_POWER_W3 (LPSB2 추정전력 #3, W)", "IR", "R", "N/A"),
+            ("4x0091", "LPSB3_POWER_W1 (LPSB3 추정전력 #1, W)", "IR", "R", "N/A"),
+            ("4x0092", "LPSB3_POWER_W2 (LPSB3 추정전력 #2, W)", "IR", "R", "N/A"),
+            ("4x0093", "LPSB3_POWER_W3 (LPSB3 추정전력 #3, W)", "IR", "R", "N/A"),
+        ])
 
         self._table.setRowCount(len(points))
         for r, p in enumerate(points):
@@ -549,6 +603,19 @@ class DocModbusPanel(QWidget):
             m[i] = f"LPSB4 CUR{i-76}"
         for i in range(79, 82):
             m[i] = f"LPSB8 CUR{i-79}"
+        # FC04 82..93: 추정 전력(W) @220V (Mainboard 계산값을 그대로 표시)
+        m[82] = "HPSB POWER_W1 (W)"
+        m[83] = "HPSB POWER_W2 (W)"
+        m[84] = "HPSB POWER_W3 (W)"
+        m[85] = "LPSB1 POWER_W1 (W)"
+        m[86] = "LPSB1 POWER_W2 (W)"
+        m[87] = "LPSB1 POWER_W3 (W)"
+        m[88] = "LPSB2 POWER_W1 (W)"
+        m[89] = "LPSB2 POWER_W2 (W)"
+        m[90] = "LPSB2 POWER_W3 (W)"
+        m[91] = "LPSB3 POWER_W1 (W)"
+        m[92] = "LPSB3 POWER_W2 (W)"
+        m[93] = "LPSB3 POWER_W3 (W)"
         return m
 
     def _unit(self) -> int:
@@ -656,6 +723,21 @@ class DocModbusPanel(QWidget):
         if self._fc04_scan_timer.isActive():
             self._fc04_scan_timer.stop()
             self._append_out("[FC04] STOP: periodic scan stopped")
+
+    def _do_set_pc_state_time(self):
+        mins = int(self._pc_state_time_min.value())
+        self._append_out(f"[PC_STATE_TIME] SET 요청: {mins}분")
+        if self._req_set_pc_state_time:
+            self._req_set_pc_state_time(mins)
+        else:
+            self._append_out("[PC_STATE_TIME] FAIL: request callback not set")
+
+    def _do_read_pc_state_time(self):
+        self._append_out("[PC_STATE_TIME] READ 요청")
+        if self._req_read_pc_state_time:
+            self._req_read_pc_state_time()
+        else:
+            self._append_out("[PC_STATE_TIME] FAIL: read callback not set")
 
     def _do_fc05(self):
         self._mark_tx("05")
@@ -825,4 +907,17 @@ class DocModbusPanel(QWidget):
                 self._table.item(row, 4).setText("ON" if v else "OFF")
         rx = bytes([unit, 0x0F, (start >> 8) & 0xFF, start & 0xFF, 0x00, len(values)])
         self._append_raw(f"RX HEX+CRC: {self._frame_hex(rx)}")
+
+    def on_set_pc_state_time_result(self, ok: bool, minutes: int, err: str | None):
+        if ok:
+            self._append_out(f"[PC_STATE_TIME] OK: {minutes}분 (EEPROM 저장)")
+        else:
+            self._append_out(f"[PC_STATE_TIME] FAIL: {err or 'unknown'}")
+
+    def on_read_pc_state_time_result(self, ok: bool, minutes: int | None, err: str | None):
+        if ok and minutes is not None:
+            self._pc_state_time_min.setValue(int(minutes))
+            self._append_out(f"[PC_STATE_TIME] READ OK: {int(minutes)}분")
+        else:
+            self._append_out(f"[PC_STATE_TIME] READ FAIL: {err or 'unknown'}")
 

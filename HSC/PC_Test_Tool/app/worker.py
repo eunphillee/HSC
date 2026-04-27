@@ -32,6 +32,8 @@ class MainboardWorker(QObject):
     rtc_result = pyqtSignal(bool, object, object)       # ok, regs[7] or None, err
     mainboard_slave_id_read_result = pyqtSignal(bool, object, object, object)  # ok, eff, pend, err
     mainboard_slave_save_result = pyqtSignal(bool, object)  # ok, err
+    pc_state_time_save_result = pyqtSignal(bool, object, object)  # ok, minutes, err
+    pc_state_time_read_result = pyqtSignal(bool, object, object)  # ok, minutes, err
 
     def __init__(self, client):
         super().__init__()
@@ -78,6 +80,21 @@ class MainboardWorker(QObject):
             return
         ok, err = self._client.save_mainboard_slave_id_eeprom(int(new_id))
         self.mainboard_slave_save_result.emit(ok, err)
+
+    def on_request_save_pc_state_time_minutes(self, minutes: int):
+        if not self._client.connected:
+            self.pc_state_time_save_result.emit(False, int(minutes), "Not connected")
+            return
+        m = int(minutes)
+        ok, err = self._client.save_pc_state_time_minutes(m)
+        self.pc_state_time_save_result.emit(ok, m, err)
+
+    def on_request_read_pc_state_time_minutes(self):
+        if not self._client.connected:
+            self.pc_state_time_read_result.emit(False, None, "Not connected")
+            return
+        ok, minutes, err = self._client.read_pc_state_time_minutes()
+        self.pc_state_time_read_result.emit(ok, minutes, err)
 
     def on_request_set_rtc(self):
         import datetime

@@ -5,6 +5,7 @@
 #include "output_state_nvm.h"
 #include "eeprom_24c02.h"
 #include "gateway_actions.h"
+#include "main_auto_link.h"
 #include "main.h"
 #include "app_config.h"
 #include "modbus_master.h"
@@ -213,6 +214,9 @@ void OutputStateNvm_ApplyMainboardRelays(const output_state_nvm_t *state)
 {
     if (state && g_loaded) {
         memcpy(g_state.main_relay, state->main_relay, sizeof(g_state.main_relay));
+        for (uint8_t ch = 0u; ch < 4u; ch++) {
+            MainAutoLink_OnVirtualCoil(ch, g_state.virtual_coil[ch] ? 1u : 0u);
+        }
     }
 }
 
@@ -222,6 +226,16 @@ void OutputStateNvm_NotifyMainRelay(uint8_t ch, uint8_t value)
     value = value ? 1u : 0u;
     if (g_state.main_relay[ch] != value) {
         g_state.main_relay[ch] = value;
+        (void)OutputStateNvm_Save(&g_state);
+    }
+}
+
+void OutputStateNvm_NotifyVirtualCoil(uint8_t ch, uint8_t value)
+{
+    if (!g_loaded || ch >= 4u) return;
+    value = value ? 1u : 0u;
+    if (g_state.virtual_coil[ch] != value) {
+        g_state.virtual_coil[ch] = value;
         (void)OutputStateNvm_Save(&g_state);
     }
 }

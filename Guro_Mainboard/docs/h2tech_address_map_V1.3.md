@@ -12,7 +12,7 @@ Encoding: **UTF-8**
 
 # FC04 - Read Input Registers
 
-## FC04-1. MAIN + PACKED (관리주소 0 ~ 81)
+## FC04-1. MAIN + PACKED (관리주소 0 ~ 93)
 
 | FC | 관리주소 | 항목 | 설명 |
 |----|----------|------|------|
@@ -98,6 +98,18 @@ Encoding: **UTF-8**
 | FC04 | 79 | LPSB3_CUR_S1 | LPSB3(slave=8) 전류/상태 #1 |
 | FC04 | 80 | LPSB3_CUR_S2 | LPSB3(slave=8) 전류/상태 #2 |
 | FC04 | 81 | LPSB3_CUR_S3 | LPSB3(slave=8) 전류/상태 #3 |
+| FC04 | 82 | HPSB_POWER_W1 | HPSB 추정전력 #1 (W, Estimated @220V) |
+| FC04 | 83 | HPSB_POWER_W2 | HPSB 추정전력 #2 (W, Estimated @220V) |
+| FC04 | 84 | HPSB_POWER_W3 | HPSB 추정전력 #3 (W, Estimated @220V) |
+| FC04 | 85 | LPSB1_POWER_W1 | LPSB1(slave=2) 추정전력 #1 (W, Estimated @220V) |
+| FC04 | 86 | LPSB1_POWER_W2 | LPSB1(slave=2) 추정전력 #2 (W, Estimated @220V) |
+| FC04 | 87 | LPSB1_POWER_W3 | LPSB1(slave=2) 추정전력 #3 (W, Estimated @220V) |
+| FC04 | 88 | LPSB2_POWER_W1 | LPSB2(slave=4) 추정전력 #1 (W, Estimated @220V) |
+| FC04 | 89 | LPSB2_POWER_W2 | LPSB2(slave=4) 추정전력 #2 (W, Estimated @220V) |
+| FC04 | 90 | LPSB2_POWER_W3 | LPSB2(slave=4) 추정전력 #3 (W, Estimated @220V) |
+| FC04 | 91 | LPSB3_POWER_W1 | LPSB3(slave=8) 추정전력 #1 (W, Estimated @220V) |
+| FC04 | 92 | LPSB3_POWER_W2 | LPSB3(slave=8) 추정전력 #2 (W, Estimated @220V) |
+| FC04 | 93 | LPSB3_POWER_W3 | LPSB3(slave=8) 추정전력 #3 (W, Estimated @220V) |
 
 ## FC04-2. RTC (관리주소 890 ~ 896)
 
@@ -124,7 +136,7 @@ Encoding: **UTF-8**
 | FC04 | 2104 | MB_BAUD_PENDING | 저장 전 pending baudrate |
 | FC04 | 2105 | RESERVED | 예약 |
 | FC04 | 2106 | RESERVED | 예약 |
-| FC04 | 2107 | RESERVED | 예약 |
+| FC04 | 2107 | PC_NO_COMM_TIMEOUT_SEC | PC 무통신 워치독 타임아웃(**초**), EEPROM(`4x3003`)과 동일 값. **PC 읽기는 FC04 전용 규칙**에 따라 본 주소 사용 |
 | FC04 | 2108 | SYSCFG_LAST_SAVE_STATUS | 마지막 `SystemConfig_Save()` 상태 코드 |
 | FC04 | 2109 | COIL7_LAST_FAIL_CODE | 마지막 `Save ID`(FC05 coil7) 실패 코드 |
 | FC04 | 2110 | MAIN_ENV_TEMP | 보드 온도 × 10 (signed), 센서에러=-32768 |
@@ -290,7 +302,47 @@ Encoding: **UTF-8**
 
 ## v1.3 요약
 
-- **FC04:** 주소 **0~81** 통합 PACKED (구 100/200/300/400 블록 제거). RTC **890~896**, ENV/IO **2100~2122**, DIAG **4000~4039** (40 워드).
+- **FC04:** 주소 **0~93** 통합 PACKED (기존 0~81 + 추정전력 `POWER_W` 82~93). RTC **890~896**, ENV/IO **2100~2122**, DIAG **4000~4039** (40 워드).
 - **FC05:** MAIN 릴레이 **0~6**, 가상비트 **20~23**, RESERVED **891~897**, 하위 SSR **898~909**.
 - **FC16:** RTC 설정 **890~896** (start=890, count=7 전용).
 - **코드 동작 변경 없음** — 이번 작업은 문서/주소 정의 정리만.
+
+---
+
+# 납품 반영 (2026-04-27) — 당일 추가·변경 사항
+
+아래는 통합 주소표(스프레드시트)와 **동일 표 형식**(`FC | 주소 | 명칭 | 설명`)으로 정리한 항목입니다. 엑셀에 반영 시 이 블록을 그대로 옮기면 됩니다.
+
+**표기 주의:** 외부 초안에 **FC05 주소 3**에 PC 상태 유지 시간을 넣는 경우가 있으나, **현재 펌웨어는 FC05|3 = `MAIN_RELAY4_EN`** 입니다. PC 무통신 워치독 시간은 **쓰기: 홀딩 `4x3003` + `FC06`**, **읽기: 입력 `FC04` 주소 `2107` 미러(통합 규칙 “읽기=FC04만”)**, 단위 **초**, EEPROM 저장으로 통일합니다.
+
+## FC04 — Read Input Registers (시스템 설정 미러, PC 읽기용)
+
+| FC | 주소 | 명칭 | 설명 |
+|----|------|------|------|
+| FC04 | 2107 | PC_NO_COMM_TIMEOUT_SEC | `4x3003`(EEPROM)과 동일한 PC 무통신 워치독 타임아웃(**초**). 상위 PC/PLC는 **FC04**로만 읽을 것 |
+
+## FC06 — Write Single Register (시스템 설정 / EEPROM)
+
+| FC | 주소 | 명칭 | 설명 |
+|----|------|------|------|
+| FC06 | 3000 | SET_SYSCFG_SLAVE_ID | Slave ID 쓰기 및 EEPROM 저장 (유효 범위 외 예외 응답) |
+| FC06 | 3001 | SET_SYSCFG_BAUD_CODE | 보드레이트 코드 쓰기 및 EEPROM 저장 |
+| FC06 | 3002 | SET_FACTORY_RESET | `1` 쓰기 시 팩토리 리셋 실행 |
+| FC06 | 3003 | SET_PC_NO_COMM_TIMEOUT_SEC | PC 무통신 워치독 타임아웃(**초**) 쓰기 및 EEPROM 저장 |
+
+## FC05 — Write Single Coil (기존 행 설명 보강)
+
+| FC | 주소 | 명칭 | 설명 |
+|----|------|------|------|
+| FC05 | 20 | MAIN_VBIT_1 | 가상비트#1 ON/OFF — **변경 시 EEPROM(`OutputStateNvm`)에 저장**, 재부팅 후 복원 |
+| FC05 | 21 | MAIN_VBIT_2 | 가상비트#2 ON/OFF — 동일 (EEPROM 유지) |
+| FC05 | 22 | MAIN_VBIT_3 | 가상비트#3 ON/OFF — 동일 (EEPROM 유지) |
+| FC05 | 23 | MAIN_VBIT_4 | 가상비트#4 ON/OFF — 동일 (EEPROM 유지) |
+
+## 동작 사양 (주소 외 로직)
+
+| 구분 | 명칭 | 설명 |
+|------|------|------|
+| 펌웨어 | PC 무통신 워치독 | 상기 `4x3003` 초 동안 PC 측 **유효 Modbus 요청**이 없으면, `FC04` **PC_LED_IN** 상태에 따라 `PC_ON` 펄스 또는 `PC_RESET` 펄스를 주기적으로 반복(간격=설정 초). 통신 복구 시 타이머 리셋 |
+| 펌웨어 | 서브보드 FC04 센서 안정화 | UART2 마스터 수신: CRC 미통과·FC04 응답 길이 불일치 시 폐기. Input Register 갱신 전 **범위(예: 4095 초과) 및 jump 필터** 적용, 비정상 시 이전 정상값 유지. 로그 태그: `[MODBUS][DROP]`, `[SENSOR][DROP]` |
+| PC 도구 | PC state time | Modbus 탭 Stop 옆 **1~600분** 스핀 + **Set**(EEPROM 저장) / **Read**(현재값 표시) |
